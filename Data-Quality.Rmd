@@ -1,0 +1,109 @@
+---
+title: "Data Quality Project"
+output: html_notebook
+---
+
+Load data and packages
+
+```{r}
+library(arrow)
+library(tidyverse)
+library(data.table)
+library(readxl)
+library(knitr)
+library(icd)  #contains WHO dictionary
+
+garbage <- read_csv("/Users/amymann/Documents/Data Quality Project/data_quality/gbd_garbage_codes_with_descr.csv")
+path = "/Users/amymann/Documents/Data Quality Project/data/"
+setwd(path)
+mortality <- read_parquet("mort2016.parquet")
+
+```
+
+First, we will measure completeness which is the Reg CDR / True CDR. How do you measure the true CDR?
+This is assuming that the percentage of under five deaths (true) is more accurate then the data registry. 
+
+- Compl_5q_0 is the number of under 5 deaths in the registry
+
+Predicted completeness usually within 3-5% of mean (R^2 = .85)
+
+```{r}
+RegCDR = nrow(mortality)/323071755 *1000.
+sixtyfiveplus = 49200000/323071755 
+Year = 2016.
+gamma = 0.    # IDK what gamma is
+births2016 <- 3945875                       # NCHS final birth count
+under5 <- sum(
+  with(mortality, {
+    age4  <- sprintf("%04d", as.integer(age))      # keep leading zeros
+    unit  <- substr(age4, 1, 1)
+    value <- as.integer(substr(age4, 2, 4))
+
+    # under-5 if: (unit = years & value < 5)  OR  (unit = months/days/hours/minutes)
+    (unit == "1" & value < 5) | unit %in% c("2", "4", "5", "6")
+  }),
+  na.rm = TRUE
+)
+vr5q0      <- under5 / births2016           # probability of dying <5
+fiveq0     <- 7 / 1000                      # IGME comparator (probability)
+Compl_5q_0 <- vr5q0 / fiveq0                # should be ≈ 1 for the US
+Compl_5q_0
+logit_completeness = (RegCDR^2 * -0.0187471)+(RegCDR * 0.6125569)+(sixtyfiveplus * -12.58245)+(log(fiveq0) * -1.134923)+ (Compl_5q_0 * 2.319505)+(Year*-0.0184299)+31.40303+ gamma
+completeness = exp(logit_completeness)/(1 + exp(logit_completeness))
+completeness
+```
+
+Calculate fraction of ‘garbage’ codes in the data, their GBD severity profiles, and the top garbage codes.
+
+```{r}
+clean_icd <- function(x) {
+  x <- toupper(x)               
+  x <- str_remove_all(x, "[^A-Z0-9\\.]")  
+  str_trim(x)
+}
+
+mortality <- mortality %>%
+  mutate(icd10 = clean_icd(ucod))
+
+# Perform a single join by icd10, adding gbd_severity from garbage
+mortality_flagged <- mortality %>%
+  left_join(garbage %>% select(icd10, description, gbd_severity), by = "icd10")
+
+# Compute the garbage fraction
+garbage_fraction <- mean(!is.na(mortality_flagged$gbd_severity), na.rm = TRUE)
+
+mortality_garbage <- mortality_flagged %>%
+  filter(!is.na(gbd_severity))
+
+# Count deaths by severity category
+severity_counts <- mortality_garbage %>%
+  count(gbd_severity, name = "deaths")
+
+# Calculate the total number of garbage-coded deaths
+total_garbage_deaths <- sum(severity_counts$deaths)
+
+# Calculate share of each severity category
+severity_profile <- severity_counts %>%
+  mutate(share = deaths / total_garbage_deaths)
+
+# Find the most common garbage codes
+top_garbage <- mortality_garbage %>%    
+  count(icd10, description, gbd_severity, sort = TRUE, name = "deaths") %>% 
+  mutate(share = deaths / sum(deaths))
+
+top_garbage_10 <- top_garbage %>% slice_head(n = 10)
+
+garbage_fraction
+severity_profile
+top_garbage_10
+
+write_csv(top_garbage_10, "top_garbage_10.csv")
+
+```
+
+Add a new chunk by clicking the *Insert Chunk* button on the toolbar or by pressing *Cmd+Option+I*.
+
+When you save the notebook, an HTML file containing the code and output will be saved alongside it (click the *Preview* button or press *Cmd+Shift+K* to preview the HTML file). 
+
+The preview shows you a rendered HTML copy of the contents of the editor. Consequently, unlike *Knit*, *Preview* does not run any R code chunks. Instead, the output of the chunk when it was last run in the editor is displayed.
+
