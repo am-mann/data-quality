@@ -6,9 +6,11 @@ Some important links:
 https://icd.who.int/browse10/2019/den
 https://www.cdc.gov/nchs/data_access/vitalstatsonline.htm
 https://www.nber.org/research/data/mortality-data-vital-statistics-nchs-multiple-cause-death-data#:~:text=Multiple%20Cause%2Dof%2DDeath%20Mortality,occurring%20within%20the%20United%20States
+https://docs.google.com/spreadsheets/d/1hitL24ykVDPB6V9E8sONYaU27ILbxHTAO3Q-D9rJ0AM/edit?usp=sharing
 
-May 12, 2025
+#######################  May 12, 2025  #########################
 Summary: Today read the literature on garbage codes and quality of death data index, I set up Github, I played around with codes, and I went through the dataset to get a sense of it.
+Hours: 11am - 7pm
 
 ANACONDA is an existing index from 2020 measuring the quality of death data (meant for a global context). Citation:  Mikkelsen, L., Moesgaard, K., Hegnauer, M. et al. ANACONDA: a new tool to improve mortality and cause of death data. BMC Med 18, 61 (2020). https://doi.org/10.1186/s12916-020-01521-0
         - On Google Scholar, I went through all the papers that cite it and I didn’t find any           applying it to the US or doing the kind of in-depth demographic anaylsis Monica suggested
@@ -17,10 +19,14 @@ ANACONDA is an existing index from 2020 measuring the quality of death data (mea
 How Anaconda works: 
 The five components that make up the index are as follows:
 1.Completeness of death registration
-2.Fraction of ‘garbage’ codes in the data
-3.Amount of COD detail in the COD list used
+2.* Fraction of ‘garbage’ codes in the data
+3.* Amount of COD detail in the COD list used
 4.Extent to which age and sex of deceased are not recorded
-5.Number of biologically implausible causes found in the data (i.e. highly unlikely of impossible causes for a given age-sex category)
+5.* Number of biologically implausible causes found in the data (i.e. highly unlikely of impossible causes for a given age-sex category)
+- Should include R99 (no cause of death specified)
+- Autopsy rate
+- Also, look at severity of data poor quality
+
 
 Types of garbage codes (Mikkelsen et al, 2020):
 Category 1: Codes relating to symptoms, signs and ill-defined conditions (most drawn from ICD Chapter XVIII); e.g. R99 Other ill-defined and unspecified causes of mortality).
@@ -73,8 +79,14 @@ Important Paper: Flagg, L. A., & Anderson, R. N. (2021). Unsuitable underlying c
         
         
 ############### THINGS TO DISCUSS IN MEETING WITH MONICA ###########################
-1. Autopsies: can we use this data as another quality index?
-2. Seeing how LLMs perform as coding.
+1. How do you measure the true CDR? Go through slide 14
 3. Need to get access to ANACONDA (the link is broken)
 4. Discuss the Flagg & Anderson, 2021 paper. Don't want our work to be redundant.
+5. Having trouble downloading the data from 2018, 2019, 2020, 2021
+6. Ask Monica about timesheets and if this format for logging hours is okay
 
+Next meeting: 
+- Tuesday or Wednesday
+
+MAY 15
+- 9 -11: worked on calculating completeness
