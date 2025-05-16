@@ -11,12 +11,19 @@ library(tidyverse)
 library(data.table)
 library(readxl)
 library(knitr)
-library(icd)  #contains WHO dictionary
+library(icd)
+library(readr)
+library(dplyr)
+library(ggplot2)
+library(forcats)
+library(scales)
+library(patchwork)
 
 garbage <- read_csv("/Users/amymann/Documents/Data Quality Project/data_quality/gbd_garbage_codes_with_descr.csv")
 path = "/Users/amymann/Documents/Data Quality Project/data/"
 setwd(path)
 mortality <- read_parquet("mort2016.parquet")
+print(colnames(mortality))
 
 ```
 
@@ -103,7 +110,7 @@ write_csv(top_garbage_10, "top_garbage_10.csv")
 
 Determine the number of different codes used.
 
-Note that I currently get a detail around 33% which suggests to me that there is a mistake with the method because that should be much larger
+Note that this method might have a bug in it.
 
 ```{r}
 library(readr); library(dplyr); library(stringr);library(tidyverse)
@@ -136,7 +143,243 @@ level_of_detail
 
 ```
 
+Frequency of autopsies with demographic breakdown.
 
+```{r}
+
+# ── autopsy flag ────────────────────────────────────────────────────────────
+mort <- mortality %>%
+  mutate(
+    autopsy_flag = recode(toupper(autopsy),   # normalise case
+                          "Y" = "Yes",
+                          "N" = "No",
+                          .default = "Unknown")
+  )
+
+# ── detail-age  ───────────────────────────────
+decode_age_detail <- function(detail_age){
+  s     <- str_pad(detail_age, 4, pad = "0")
+  unit  <- substr(s, 1, 1)              # 1=years,2=months,4=days,5=hrs,6=mins
+  value <- as.numeric(substr(s, 2, 4))
+
+  yrs <- dplyr::case_when(
+    unit == "1" ~ value,
+    unit == "2" ~ value / 12,
+    unit == "4" ~ value / 365.25,
+    unit == "5" ~ value / (24 * 365.25),
+    unit == "6" ~ value / (60 * 24 * 365.25),
+    TRUE        ~ NA_real_
+  )
+  round(yrs, 2)
+}
+
+age12_labels <- c(
+  "01" = "<1 y",   "02" = "1-4 y",  "03" = "5-14 y",
+  "04" = "15-24 y","05" = "25-34 y","06" = "35-44 y",
+  "07" = "45-54 y","08" = "55-64 y","09" = "65-74 y",
+  "10" = "75-84 y","11" = "85+ y",  "12" = "Age NS"
+)
+
+mort <- mort %>% mutate(
+  age_years = decode_age_detail(age),
+  # -- ager12 is numeric 1-12 in the file; pad with leading zero before recoding
+  age_grp12 = fct_recode(sprintf("%02d", as.integer(ager12)), !!!age12_labels)
+)
+
+# ── education  ────────────────────────────────────────
+educ03_map <- c(                         # 2003 revision :contentReference[oaicite:15]{index=15}:contentReference[oaicite:16]{index=16}
+  "1"="≤8 grade","2"="9-12 no dip","3"="HS/GED",
+  "4"="Some college","5"="Assoc deg","6"="Bach deg",
+  "7"="Master","8"="Doctorate","9"="Edu unk"
+)
+educ89_map <- function(code){            # 1989 revision summary
+  if (is.na(code) || code == "")            return("Edu unk")
+  else if (code %in% sprintf("%02d", 1:8))  "≤8 grade"
+  else if (code %in% c("09","10","11")) "Some HS"
+  else if (code == "12")                "HS grad"
+  else if (code %in% c("13","14","15")) "Some college"
+  else if (code == "16")                "College grad"
+  else if (code == "17")                "≥5 yrs college"
+  else if (code == "00")                "None"
+  else                                  "Edu unk"
+}
+
+mort <- mort %>%
+  mutate(
+    edu_final = case_when(
+      educflag == 1 ~ recode(as.character(educ2003), !!!educ03_map),
+      educflag == 0 ~ sapply(as.character(educ1989), educ89_map),
+      TRUE          ~ "Edu missing"
+    )
+  )
+
+# ──────── race ───────────────────────────────────
+
+race5_map <- c(
+  "1" = "White",
+  "2" = "Black",
+  "3" = "AI/AN",
+  "4" = "Asian/PI",
+  "0" = "Race unk"
+)
+
+mort <- mort %>% mutate(
+  race_lbl = recode(as.character(racer5), !!!race5_map, .default = "Race unk"),
+  hisp_lbl = recode(as.character(hspanicr),
+                    "6" = "NH White",
+                    "7" = "NH Black",
+                    "8" = "NH Other",
+                    "1" = "Mexican",
+                    "2" = "PRican",
+                    "3" = "Cuban",
+                    "4" = "Cen/S Am",
+                    "5" = "Other Hisp",
+                    "9" = "Hisp unk",
+                    .default = "Hisp unk")
+)
+
+
+# ── others ──────────────────────────────────────────────────────────
+mort <- mort %>% mutate(
+  sex_lbl  = recode(sex, "M" = "Male", "F" = "Female", .default = "Sex unk"),
+  marital  = recode(marstat, "S"="Single","M"="Married","W"="Widowed",
+                              "D"="Divorced","U"="MS unk", .default="MS unk"),
+  inj_work = recode(toupper(injwork), "Y"="Yes","N"="No", .default="Unknown"),
+  cause113 = ucr113
+)
+
+# ── set dimensions ──────────────────────────────────────
+dims <- c("sex_lbl", "age_grp12", "race_lbl", "hisp_lbl",
+          "edu_final", "marital", "inj_work", "cause113")
+
+make_table <- function(df, var){
+  df %>% 
+    group_by(.data[[var]], autopsy_flag) %>% 
+    summarise(deaths = n(), .groups = "drop_last") %>% 
+    mutate(
+      prop     = deaths / sum(deaths),
+      variable = var,
+      level    = as.character(.data[[var]])  
+    ) %>% 
+    ungroup() %>% 
+    select(variable, level, autopsy_flag, deaths, prop)
+}
+
+autopsy_breakdown <- bind_rows(lapply(dims, make_table, df = mort))
+
+library(readr)
+lookup113 <- read_csv("cause_code_135.csv", show_col_types = FALSE)
+
+autopsy_breakdown <- autopsy_breakdown %>%
+  left_join(lookup113, by = c("level" = "code"))
+
+# ── summary by sex ─────────────────────────────────────────────
+sex_counts <- mort %>%
+  filter(autopsy_flag %in% c("Yes", "No")) %>%  
+  group_by(sex_lbl) %>%
+  summarise(
+    autopsy_yes = sum(autopsy_flag == "Yes"),
+    total       = n(),
+    .groups = "drop"
+  )
+
+sex_stat <- sex_counts %>%
+  rowwise() %>%
+  mutate(
+    prop = autopsy_yes / total,
+  ) %>%
+
+print(sex_stat)
+
+
+# ── 6. save / inspect ─────────────────────────────────────────────────────────
+write_csv(autopsy_breakdown,
+          "autopsy_breakdown_demographics_2016.csv")  
+print(head(autopsy_breakdown, 20))
+```
+
+Make plots for autopsy data!
+
+```{r}
+
+autopsy_breakdown <- read_csv(
+  "/Users/amymann/Documents/Data Quality Project/data_quality/autopsy_breakdown_demographics_2016.csv",
+  show_col_types = FALSE
+)
+
+age12_labels <- setNames(
+  c("<1", "1–4", "5–14", "15–24", "25–34", "35–44",
+    "45–54", "55–64", "65–74", "75–84", "85+", "NS"),
+  sprintf("%02d", 1:12)
+)
+
+# ── 3. Helper to build one stacked-bar plot ───────────────────────────────────
+plot_autopsy_prop <- function(df, var){
+  plot_df <- df %>%
+    filter(variable == var, autopsy_flag != "Unknown") %>%
+    mutate(level = case_when(
+      var == "age_grp12"              ~ factor(level,
+                                               levels = names(age12_labels),
+                                               labels = age12_labels),
+      var %in% c("race_lbl", "hisp_lbl") ~ fct_relevel(level),  # keep file order
+      TRUE                              ~ fct_infreq(level)     # order by freq
+    ))
+
+  ggplot(plot_df, aes(level, prop, fill = autopsy_flag)) +
+    geom_col(width = 0.9, position = "stack") +
+    scale_y_continuous(labels = percent_format(accuracy = 1)) +
+    scale_fill_brewer(palette = "Set1") +
+    labs(x = NULL, y = "Proportion of deaths",
+         fill = "Autopsy performed",
+         title = paste("Autopsy frequency by", var)) +
+    theme_minimal(base_size = 11) +
+    theme(axis.text.x = element_text(angle = 45, hjust = 1),
+          plot.title  = element_text(size = 12, face = "bold"))
+}
+
+# ── pick variables for grid  ──────────────────
+grid_vars <- c("sex_lbl", "age_grp12", "race_lbl", "hisp_lbl",
+               "edu_final", "marital", "inj_work")
+
+# ── make grid plot  ──────────────────────────────────────────────────
+grid_plot <- wrap_plots(
+  lapply(grid_vars, \(v) plot_autopsy_prop(autopsy_breakdown, v)),
+  ncol = 2
+) +
+  plot_annotation(
+    title = "Autopsy proportions across demographic groups (US deaths, 2016)",
+    theme = theme(plot.title = element_text(size = 14, face = "bold"))
+  )
+
+print(grid_plot)
+ggsave("autopsy_demographics_grid_2016.png",
+       grid_plot, width = 14, height = 10, dpi = 300)
+
+# ── make 113 cause groups plot ───────────────────────────
+cause_plot <- autopsy_breakdown %>%
+  filter(variable == "cause113",
+         autopsy_flag != "Unknown",
+         as.numeric(level) >= 1,
+         as.numeric(level) <= 113) %>%
+  mutate(desc = fct_reorder(level, prop)) %>%   # use plain-English label
+  ggplot(aes(x = desc, y = prop, fill = autopsy_flag)) +
+    geom_col(position = "stack", width = 0.9) +
+    scale_y_continuous(labels = percent_format()) +
+    scale_fill_manual(values = c("Yes"="#377eb8",
+                                 "No" ="#e41a1c")) +
+    labs(x = "Underlying-cause (113-group recode)",
+         y = "Proportion of deaths",
+         fill = "Autopsy",
+         title = "Autopsy frequency by underlying cause, 2016") +
+    theme_minimal(base_size = 12) +
+    theme(axis.text.x = element_text(angle = 90, hjust = 1, vjust = 0.4),
+          plot.title  = element_text(size = 13, face = "bold"))
+
+print(cause_plot)
+ggsave("autopsy_by_cause113_2016.png",
+       cause_plot, width = 16, height = 6, dpi = 300)
+
+```
 
 
 Add a new chunk by clicking the *Insert Chunk* button on the toolbar or by pressing *Cmd+Option+I*.
