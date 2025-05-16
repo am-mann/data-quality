@@ -101,6 +101,44 @@ write_csv(top_garbage_10, "top_garbage_10.csv")
 
 ```
 
+Determine the number of different codes used.
+
+Note that I currently get a detail around 33% which suggests to me that there is a mistake with the method because that should be much larger
+
+```{r}
+library(readr); library(dplyr); library(stringr);library(tidyverse)
+ihme <- read_csv("/Users/amymann/Documents/Data Quality Project/data_quality/ihme_cause_codes.csv")
+
+clean_icd <- function(x) {
+  x %>%
+    str_to_upper() %>%                    # upper-case
+    str_remove_all("[^A-Z0-9]") %>%    # keep letters, digits, dot
+    str_trim()
+}
+
+mortality_clean <- mortality %>%
+  mutate(icd10 = clean_icd(ucod)) 
+
+ihme_clean <- ihme %>%
+  mutate(icd10_code = clean_icd(icd10_code)) %>%     # assumes this column name
+  filter(!is.na(icd10_code) & icd10_code != "") %>%  # drop empty rows
+  distinct(icd10_code)                               # remove duplicates
+
+observed_detail <- mortality_clean %>%
+  distinct(icd10) %>%                         # unique codes in your data
+  inner_join(ihme_clean, by = c("icd10" = "icd10_code")) %>%  # keep only valid codes
+  nrow()
+
+reference_detail <- nrow(ihme_clean)             
+level_of_detail <- observed_detail / reference_detail
+level_of_detail
+
+
+```
+
+
+
+
 Add a new chunk by clicking the *Insert Chunk* button on the toolbar or by pressing *Cmd+Option+I*.
 
 When you save the notebook, an HTML file containing the code and output will be saved alongside it (click the *Preview* button or press *Cmd+Shift+K* to preview the HTML file). 
