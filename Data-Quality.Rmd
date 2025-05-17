@@ -18,22 +18,19 @@ library(ggplot2)
 library(forcats)
 library(scales)
 library(patchwork)
+library(broom)
 
-garbage <- read_csv("/Users/amymann/Documents/Data Quality Project/data_quality/gbd_garbage_codes_with_descr.csv")
+garbage <- read_csv("/Users/amymann/Documents/Data Quality Project/data_quality/cause-codes/gbd_garbage_codes_with_descr.csv")
 path = "/Users/amymann/Documents/Data Quality Project/data/"
 setwd(path)
 mortality <- read_parquet("mort2016.parquet")
-print(colnames(mortality))
 
 ```
 
-First, we will measure completeness which is the Reg CDR / True CDR. How do you measure the true CDR?
+Model completeness which is the Reg CDR / True CDR (since we don't have access to True CDR). 
 This is assuming that the percentage of under five deaths (true) is more accurate then the data registry. 
 
-- Compl_5q_0 is the number of under 5 deaths in the registry
-
 Predicted completeness usually within 3-5% of mean (R^2 = .85)
-
 ```{r}
 RegCDR = nrow(mortality)/323071755 *1000.
 sixtyfiveplus = 49200000/323071755 
@@ -61,7 +58,6 @@ completeness
 ```
 
 Calculate fraction of ‘garbage’ codes in the data, their GBD severity profiles, and the top garbage codes.
-
 ```{r}
 clean_icd <- function(x) {
   x <- toupper(x)               
@@ -108,10 +104,103 @@ write_csv(top_garbage_10, "top_garbage_10.csv")
 
 ```
 
-Determine the number of different codes used.
+Demographic breakdown the proportion of garbage codes.
+```{r}
+clean_icd <- function(x) {
+  x <- toupper(x)               
+  x <- str_remove_all(x, "[^A-Z0-9\\.]")  
+  str_trim(x)
+}
 
-Note that this method might have a bug in it.
+mort <- mortality %>%
+  mutate(icd10 = clean_icd(ucod))
 
+mort <- mort |>            
+  mutate(has_factor =
+           rowSums(across(starts_with("record_"),
+                          ~ .x != "" & !is.na(.x)>1))-1)
+
+mortality_flagged <- mort %>%
+  left_join(garbage %>% select(icd10, description, gbd_severity), by = "icd10")
+
+
+DT <- as.data.table(mortality_flagged)           # convert once
+DT[, garbage := !is.na(gbd_severity)]            # logical flag
+
+garbage_by <- function(dt, col) {
+  dt[, .(n_deaths = .N,
+         garbage   = sum(garbage),
+         prop_garbage = sum(garbage)/.N),
+     by = col][order(-prop_garbage)]
+}
+
+by_sex      <- garbage_by(DT, "sex")
+by_race     <- garbage_by(DT, "racer5")
+by_age_grp  <- garbage_by(DT, "ager52")
+by_educ     <- garbage_by(DT, "educ2003")
+by_marstat  <- garbage_by(DT, "marstat")
+by_weekday  <- garbage_by(DT, "weekday")
+by_placdth  <- garbage_by(DT, "placdth")
+by_has_secondary <- garbage_by(DT, "has_secondary")
+
+demog_detail <- rbindlist(list(
+  by_sex     [, .(demog = "sex",      group = sex,      n_deaths, garbage, prop_garbage)],
+  by_race    [, .(demog = "racer5",   group = racer5,   n_deaths, garbage, prop_garbage)],
+  by_age_grp [, .(demog = "ager52",   group = ager52,   n_deaths, garbage, prop_garbage)],
+  by_educ    [, .(demog = "education",group = educ2003, n_deaths, garbage, prop_garbage)],
+  by_marstat [, .(demog = "marstat",  group = marstat,  n_deaths, garbage, prop_garbage)],
+  by_weekday [, .(demog = "weekday",  group = weekday,  n_deaths, garbage, prop_garbage)],
+  by_placdth [, .(demog = "placdth",  group = placdth,  n_deaths, garbage, prop_garbage)],
+  by_has_secondary [, .(demog = "has_secondary",  group = has_secondary,  n_deaths, garbage, prop_garbage)]
+))
+
+# ────────────────────────────
+# 3 · save or inspect
+# ────────────────────────────
+write_csv(demog_detail, "garbage_proportion_by_demographics.csv")
+
+# ─────────────────────────────────────────────────────────────────────────
+# 1 · lookup vector: ager52 → readable label
+# ─────────────────────────────────────────────────────────────────────────
+age52_lbl <- c(
+  "Under 1 h","1–23 h", "1 day", "2 days", "3 days", "4 days", "5 days","6 days",
+  "7–13 d", "14–20 d", "21–27 d","1 mo", "2 mo","3 mo","4 mo","5 mo","6 mo","7 mo", 
+  "8 mo", "9 mo",  "10 mo", "11 mo", "1 y", "2 y","3 y", "4 y","5–9 y", "10–14 y",           
+  "15–19 y", "20–24 y",  "25–29 y",  "30–34 y",  "35–39 y",
+  "40–44 y", "45–49 y",  "50–54 y",  "55–59 y", "60–64 y",   "65–69 y",   "70–74 y",   "75–79 y", 
+  "80–84 y",  "85–89 y", "90–94 y",  "95–99 y",                    
+  "100–104 y", "105–109 y","110–114 y", "115–119 y", "120–124 y", "125–129 y", "130+ y"
+)
+
+# ─────────────────────────────────────────────────────────────────────────
+# 2 · summarise proportion of garbage by ager52
+# ─────────────────────────────────────────────────────────────────────────
+by_age_grp_labeled <- by_age_grp %>%
+  mutate(
+    age_label = factor(age52_lbl[ager52],
+                       levels = age52_lbl)   # keep age order on x-axis
+  )
+
+# ────────────────────────────────────────────────────────────────
+# 3 · plot: bar chart of garbage proportion by age-recode
+# ────────────────────────────────────────────────────────────────
+p <- ggplot(by_age_grp_labeled,
+       aes(x = age_label, y = prop_garbage)) +
+  geom_col(width = 0.9) +
+  scale_y_continuous(labels = percent_format(accuracy = 1)) +
+  labs(
+    title = "Proportion of garbage-coded deaths by age",
+    x = "Age category",
+    y = "Garbage codes (%)"
+  ) +
+  theme_minimal(base_size = 11) +
+  theme(axis.text.x = element_text(angle = 90,
+                                   vjust = 0.5,
+                                   hjust = 1))
+ggsave("garbage_by_age52.png", plot = p, width = 10, height = 6, dpi = 300)
+```
+
+Determine the number of different codes used. ***Note that this method might have a bug in it.
 ```{r}
 library(readr); library(dplyr); library(stringr);library(tidyverse)
 ihme <- read_csv("/Users/amymann/Documents/Data Quality Project/data_quality/ihme_cause_codes.csv")
@@ -144,7 +233,6 @@ level_of_detail
 ```
 
 Frequency of autopsies with demographic breakdown.
-
 ```{r}
 
 # ── autopsy flag ────────────────────────────────────────────────────────────
@@ -291,15 +379,42 @@ sex_stat <- sex_counts %>%
 
 print(sex_stat)
 
-
-# ── 6. save / inspect ─────────────────────────────────────────────────────────
 write_csv(autopsy_breakdown,
           "autopsy_breakdown_demographics_2016.csv")  
 print(head(autopsy_breakdown, 20))
 ```
 
-Make plots for autopsy data!
+Is the male/female difference simply a result of men dying younger? The rest of it could be the way men are dying? 
+```{r}
+reg_dat <- mort %>%                               # keep only Yes/No rows
+  filter(autopsy_flag %in% c("Yes", "No")) %>%
+  mutate(
+    autopsy_bin = as.integer(autopsy_flag == "Yes")  # 1 = autopsy performed
+  )
 
+# model 1: sex only
+m1 <- lm(autopsy_bin ~ sex_lbl, data = reg_dat)
+
+# model 2: add age (continuous, in years)
+m2 <- lm(autopsy_bin ~ sex_lbl + age_years, data = reg_dat)
+
+m3 <- lm(autopsy_bin ~  age_years, data = reg_dat)
+
+# quick summaries
+summary(m1)          # baseline difference ⟶ coefficient for sex_lblMale
+summary(m2)          # see how that coefficient shrinks once age is added
+summary(m3)
+anova(m3, m2)
+
+# if you want a tidy comparison table:
+bind_rows(
+  tidy(m1) %>% mutate(model = "Sex only"),
+  tidy(m2) %>% mutate(model = "Sex + age"),
+  tidy(m3) %>% mutate(model = "Age only")
+)
+```
+
+Make plots for autopsy data!
 ```{r}
 
 autopsy_breakdown <- read_csv(
@@ -381,6 +496,179 @@ ggsave("autopsy_by_cause113_2016.png",
 
 ```
 
+Average number of secondary factors listed 
+```{r}
+demo_vars <- c("race", "racer5", "educ2003", "sex", "ager52", "marstat", "ucr39")
+
+mort <- mortality |>            
+  mutate(extra_factor_count =
+           rowSums(across(starts_with("record_"),
+                          ~ .x != "" & !is.na(.x)))-1)
+extra_factor_summary <- bind_rows(
+  lapply(demo_vars, function(v)
+    mort %>% 
+      group_by(.data[[v]], .drop = FALSE) %>% 
+      summarise(
+        n_deaths   = n(),
+        mean_extra = mean(extra_factor_count, na.rm = TRUE),
+        .groups    = "drop"
+      ) %>% 
+      transmute(
+        variable   = v,
+        level      = as.character(.data[[v]]),    # ensure character
+        n_deaths,
+        mean_extra
+      )
+  )
+)
+
+
+print(extra_factor_summary)
+write_csv(extra_factor_summary, "avg_secondary_factors_by_demo.csv")
+
+top10_ucr39 <- mort %>%
+  count(ucr39, sort = TRUE, name = "n_deaths") %>%
+  slice_head(n = 10) %>%
+  left_join(
+    mort %>% group_by(ucr39) %>%
+      summarise(mean_extra = mean(extra_factor_count, na.rm = TRUE),
+                .groups = "drop"),
+    by = "ucr39"
+  )
+print(top10_ucr39)
+
+
+hist_plot <- ggplot(mort, aes(extra_factor_count)) +
+  geom_histogram(binwidth = 1, boundary = -0.5, fill = "#2e86c1") +
+  scale_x_continuous(breaks = 0:20) +
+  labs(x = "Number of record-axis conditions",
+       y = "Deaths",
+       title = "Distribution of additional conditions per death") +
+  theme_minimal(base_size = 11)
+
+ggsave("hist_extra_factors.png", hist_plot, width = 7, height = 4, dpi = 300)
+
+
+age_var <- if ("age52" %in% names(mort)) "age52" else "ager52"
+
+age_means <- mort %>%
+  group_by(.data[[age_var]]) %>%
+  summarise(mean_extra = mean(extra_factor_count, na.rm = TRUE),
+            .groups = "drop")
+
+age_plot <- ggplot(age_means,
+                   aes(factor(.data[[age_var]]), mean_extra)) +
+  geom_col(fill = "#e41a1c") +
+  scale_y_continuous(labels = number_format(accuracy = 0.1)) +
+  labs(x = "Age category (Recode 52)",
+       y = "Mean number of record-axis conditions",
+       title = "Average additional conditions by age group") +
+  theme_minimal(base_size = 11) +
+  theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust = 1))
+
+ggsave("mean_extra_factors_by_age.png", age_plot, width = 8, height = 4, dpi = 300)
+
+```
+
+Frequency of 0 secondary factors listed 
+```{r}
+demo_vars <- c("racer3", "racer5", "educ2003", "sex", "ager52", "marstat")
+
+mort <- mortality |>            
+  mutate(extra_factor_count =
+           rowSums(across(starts_with("record_"),
+                          ~ .x != "" & !is.na(.x)))-1)
+# ── 1. proportion with *zero* secondary factors, by demographic ───────────────
+no_sec_summary <- bind_rows(
+  lapply(demo_vars, function(v)
+    mort %>% 
+      group_by(.data[[v]], .drop = FALSE) %>% 
+      summarise(
+        n_deaths   = n(),
+        prop_zero  = mean(extra_factor_count == 0, na.rm = TRUE),
+        .groups    = "drop"
+      ) %>% 
+      transmute(
+        variable = v,
+        level    = as.character(.data[[v]]),
+        n_deaths,
+        prop_zero
+      )
+  )
+)
+
+write_csv(no_sec_summary, "prop_no_secondary_by_demo.csv")
+print(no_sec_summary)
+
+# ── 2. top-10 UCR-39 causes – prop with no secondary factor ───────────────────
+top10_ucr39_none <- mort %>%
+  count(ucr39, sort = TRUE, name = "n_deaths") %>%
+  slice_head(n = 10) %>%
+  left_join(
+    mort %>% group_by(ucr39) %>%
+      summarise(prop_zero = mean(extra_factor_count == 0, na.rm = TRUE),
+                .groups   = "drop"),
+    by = "ucr39"
+  )
+
+write_csv(top10_ucr39_none, "prop_no_secondary_top10_ucr39.csv")
+print(top10_ucr39_none)
+
+# ── 3. bar chart of prop-zero by age52 (or ager52) ────────────────────────────
+age_var <- if ("age52" %in% names(mort)) "age52" else "ager52"
+
+age_prop_zero <- mort %>%
+  group_by(.data[[age_var]]) %>%
+  summarise(prop_zero = mean(extra_factor_count == 0, na.rm = TRUE),
+            .groups   = "drop")
+
+ggplot(age_prop_zero, aes(factor(.data[[age_var]]), prop_zero)) +
+  geom_col(fill = "#e41a1c") +
+  scale_y_continuous(labels = percent_format(accuracy = 1)) +
+  labs(x = "Age category (Recode 52)",
+       y = "Share of deaths with NO secondary factor",
+       title = "Percentage with no record-axis conditions by age group") +
+  theme_minimal(base_size = 11) +
+  theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust = 1))
+
+ggsave("prop_no_secondary_by_age.png", width = 8, height = 4, dpi = 300)
+
+```
+
+Can sex differences in frequency of 0 or 1 secondary factors listed be explained by cause of death and/or age of death?
+```{r}
+mort <- mortality %>% 
+  mutate(
+    has_extra_factor = 1- as.integer(                       # 1 = none, 0 = ≥1
+      rowSums(across(starts_with("record_"),
+                     ~ .x != "" & !is.na(.x))) > 1
+    )
+  )
+mort <- mort %>%                    
+  mutate(
+    ucr39 = factor(ucr39, levels = 1:39) 
+  )
+
+m1 <- lm(has_extra_factor ~ sex, data = mort)
+
+library(MASS)
+
+full_mod  <- lm(has_extra_factor ~ sex + age + ucr39, data = mort)
+
+step_mod  <- stepAIC(full_mod,
+                     scope = list(upper = ~ age + sex + ucr39,
+                                  lower = ~ 1),   # start at intercept-only
+                     direction = "both",
+                     trace = FALSE)
+
+summary(step_mod)
+
+
+# quick summaries
+summary(m1)          # baseline difference ⟶ coefficient for sex_lblMale
+```
+
+How correlated is everything?
 
 Add a new chunk by clicking the *Insert Chunk* button on the toolbar or by pressing *Cmd+Option+I*.
 
