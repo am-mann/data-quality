@@ -635,7 +635,7 @@ ggsave("prop_no_secondary_by_age.png", width = 8, height = 4, dpi = 300)
 
 ```
 
-Can sex differences in frequency of 0 or 1 secondary factors listed be explained by cause of death and/or age of death?
+Can sex differences in frequency of 0 secondary factors listed be explained by cause of death and/or age of death?
 ```{r}
 mort <- mortality %>% 
   mutate(
@@ -668,7 +668,132 @@ summary(step_mod)
 summary(m1)          # baseline difference ⟶ coefficient for sex_lblMale
 ```
 
-How correlated is everything?
+How correlated are the various indices (no secondary factors, average number of secondary factors, proportion of garbage codes, and whether or not their is an autopsy)?
+```{r}
+library(dplyr)
+library(stringr)
+library(tidyr)
+
+# ----------------------------------------------------------------
+# 1. Helper: clean ICD10 codes
+# ----------------------------------------------------------------
+clean_icd <- function(x) {
+  x <- toupper(x)
+  x <- str_remove_all(x, "[^A-Z0-9\\.]")
+  str_trim(x)
+}
+
+# ----------------------------------------------------------------
+# 2. Correlation function
+# ----------------------------------------------------------------
+calculate_dqi_correlations <- function(data,
+                                       vars   = c("has_factor",
+                                                  "avg_secondary_factor",
+                                                  "prop_garbage_codes",
+                                                  "autopsy_flag_num"),
+                                       method = "spearman") {
+  if (!all(vars %in% names(data))) {
+    stop("One or more of the specified variables are missing in `data`.")
+  }
+  d <- data[vars]
+
+  # Coerce logical / 2-level factor → 0/1 numeric
+  to_numeric <- function(x) {
+    if (is.logical(x)) return(as.numeric(x))
+    if (is.factor(x) && nlevels(x) == 2) {
+      return(as.numeric(as.integer(x) - 1))
+    }
+    return(x)
+  }
+  d[] <- lapply(d, to_numeric)
+
+  # 1) Correlation matrix
+  cor_mat <- cor(d, use = "pairwise.complete.obs", method = method)
+
+  # 2) Tidy table of pairwise rho + p-value + n
+  combs <- combn(vars, 2, simplify = FALSE)
+  pair_stats <- lapply(combs, function(v) {
+    x <- d[[v[1]]]]; y <- d[[v[2]]]]
+    idx <- complete.cases(x, y)
+    test <- cor.test(x[idx], y[idx], method = method, exact = FALSE)
+    data.frame(
+      var1    = v[1],
+      var2    = v[2],
+      rho     = unname(test$estimate),
+      p_value = test$p.value,
+      n       = sum(idx),
+      stringsAsFactors = FALSE
+    )
+  })
+
+  list(
+    correlation_matrix = cor_mat,
+    pairwise_table     = bind_rows(pair_stats)
+  )
+}
+
+# ----------------------------------------------------------------
+# 3. Build your data-quality indices on `mort`
+# ----------------------------------------------------------------
+mort <- mortality %>%
+  # normalize ICD10
+  mutate(icd10 = clean_icd(ucod)) %>%
+
+  # 3a) no secondary factors flag (1=yes none; 0=has ≥1)
+  mutate(
+    has_factor = 1L - as.integer(
+      rowSums(across(starts_with("record_"),
+                     ~ !is.na(.x) & .x != "")) > 1
+    )
+  ) %>%
+
+  # 3b) average number of secondary factors
+  mutate(
+    avg_secondary_factor =
+      rowSums(across(starts_with("record_"),
+                     ~ !is.na(.x) & .x != "")) - 1L
+  ) %>%
+
+  # 3c) autopsy flag → Yes/No → numeric 0/1
+  mutate(
+    autopsy_flag = recode(toupper(autopsy),
+                          "Y" = "Yes", "N" = "No",
+                          .default = "Unknown"),
+    autopsy_flag_num = case_when(
+      autopsy_flag == "Yes" ~ 1L,
+      autopsy_flag == "No"  ~ 0L,
+      TRUE                  ~ NA_integer_
+    )
+  )
+
+# 3d) garbage-code flag via %in% (no join explosion)
+garb_icds <- garbage %>%
+  pull(icd10) %>%
+  clean_icd() %>%
+  unique()
+
+mort <- mort %>%
+  mutate(
+    garbage_flag      = as.integer(icd10 %in% garb_icds),
+    prop_garbage_codes = garbage_flag  # 0/1 per record
+  )
+
+# ----------------------------------------------------------------
+# 4. Run correlations
+# ----------------------------------------------------------------
+results <- calculate_dqi_correlations(
+  mort,
+  vars = c("has_factor",
+           "avg_secondary_factor",
+           "prop_garbage_codes",
+           "autopsy_flag_num")
+)
+
+# View results
+results$correlation_matrix
+results$pairwise_table
+
+```
 
 Add a new chunk by clicking the *Insert Chunk* button on the toolbar or by pressing *Cmd+Option+I*.
 
