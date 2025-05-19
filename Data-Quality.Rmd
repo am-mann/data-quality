@@ -23,7 +23,8 @@ library(broom)
 garbage <- read_csv("/Users/amymann/Documents/Data Quality Project/data_quality/cause-codes/gbd_garbage_codes_with_descr.csv")
 path = "/Users/amymann/Documents/Data Quality Project/data/"
 setwd(path)
-mortality <- read_parquet("mort2016.parquet")
+mortality <- read_parquet("mort2015.parquet")
+write_csv(head(mortality), "first_few_lines.csv")
 
 ```
 
@@ -384,7 +385,7 @@ write_csv(autopsy_breakdown,
 print(head(autopsy_breakdown, 20))
 ```
 
-Is the male/female difference simply a result of men dying younger? The rest of it could be the way men are dying? 
+Is the male/female difference in autopsy simply a result of men dying younger? The rest of it could be the way men are dying? 
 ```{r}
 reg_dat <- mort %>%                               # keep only Yes/No rows
   filter(autopsy_flag %in% c("Yes", "No")) %>%
@@ -411,6 +412,32 @@ bind_rows(
   tidy(m1) %>% mutate(model = "Sex only"),
   tidy(m2) %>% mutate(model = "Sex + age"),
   tidy(m3) %>% mutate(model = "Age only")
+)
+```
+
+What is the effect of marital status on autopsy after controlling for age?
+```{r}
+reg_dat <- mortality %>%
+  filter(autopsy %in% c("Y", "N")) %>%
+  mutate(
+    autopsy_bin = as.integer(autopsy == "Y")
+  )
+
+
+# model 1: sex only
+m1 <- lm(autopsy_bin ~ marstat, data = reg_dat)
+
+# model 2: add age (continuous, in years)
+m2 <- lm(autopsy_bin ~ marstat + ager52, data = reg_dat)
+
+# quick summaries
+summary(m1)          # baseline difference ⟶ coefficient for sex_lblMale
+summary(m2)          # see how that coefficient shrinks once age is added
+
+# if you want a tidy comparison table:
+bind_rows(
+  tidy(m1) %>% mutate(model = "Marital status only"),
+  tidy(m2) %>% mutate(model = "Marital status + age"),
 )
 ```
 
@@ -635,37 +662,37 @@ ggsave("prop_no_secondary_by_age.png", width = 8, height = 4, dpi = 300)
 
 ```
 
-Can sex differences in frequency of 0 secondary factors listed be explained by cause of death and/or age of death?
+Can sex/marital differences in frequency of 0 secondary factors listed be explained by cause of death and/or age of death?
 ```{r}
 mort <- mortality %>% 
   mutate(
     has_extra_factor = 1- as.integer(                       # 1 = none, 0 = ≥1
       rowSums(across(starts_with("record_"),
-                     ~ .x != "" & !is.na(.x))) > 1
-    )
-  )
+                     ~ .x != "" & !is.na(.x))) > 1)) %>%
+  mutate(
+    num_extra_factors =                    
+      rowSums(across(starts_with("record_"),
+                     ~ .x != "" & !is.na(.x))))-1
 mort <- mort %>%                    
   mutate(
     ucr39 = factor(ucr39, levels = 1:39) 
   )
 
-m1 <- lm(has_extra_factor ~ sex, data = mort)
+m1 <- lm(num_extra_factors ~ marstat + ager52, data = mort)
 
 library(MASS)
 
-full_mod  <- lm(has_extra_factor ~ sex + age + ucr39, data = mort)
+full_mod  <- lm(num_extra_factors ~ marstat + ager52 + ucr39, data = mort)
 
 step_mod  <- stepAIC(full_mod,
-                     scope = list(upper = ~ age + sex + ucr39,
+                     scope = list(upper = ~ marstat + ager52 + ucr39,
                                   lower = ~ 1),   # start at intercept-only
                      direction = "both",
-                     trace = FALSE)
+                     trace = FALSE,  k = log(n))
 
 summary(step_mod)
 
-
-# quick summaries
-summary(m1)          # baseline difference ⟶ coefficient for sex_lblMale
+summary(m1)          
 ```
 
 How correlated are the various indices (no secondary factors, average number of secondary factors, proportion of garbage codes, and whether or not their is an autopsy)?
@@ -739,7 +766,7 @@ mort <- mortality %>%
   # normalize ICD10
   mutate(icd10 = clean_icd(ucod)) %>%
 
-  # 3a) no secondary factors flag (1=yes none; 0=has ≥1)
+  # 3a) no secondary factors flag (0=yes none; 1=has ≥1)
   mutate(
     has_factor = 1L - as.integer(
       rowSums(across(starts_with("record_"),
