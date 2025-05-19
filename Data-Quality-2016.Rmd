@@ -1,0 +1,828 @@
+---
+title: "Data Quality Project"
+output: html_notebook
+---
+
+Load data and packages
+
+```{r}
+library(arrow)
+library(tidyverse)
+library(data.table)
+library(readxl)
+library(knitr)
+library(icd)
+library(readr)
+library(dplyr)
+library(ggplot2)
+library(forcats)
+library(scales)
+library(patchwork)
+library(broom)
+
+garbage <- read_csv("/Users/amymann/Documents/Data Quality Project/data_quality/cause-codes/gbd_garbage_codes_with_descr.csv")
+path = "/Users/amymann/Documents/Data Quality Project/data/"
+setwd(path)
+mortality <- read_parquet("mort2016.parquet")
+```
+
+Model completeness which is the Reg CDR / True CDR (since we don't have access to True CDR). 
+This is assuming that the percentage of under five deaths (true) is more accurate then the data registry. 
+
+Predicted completeness usually within 3-5% of mean (R^2 = .85)
+```{r}
+RegCDR = nrow(mortality)/323071755 *1000.
+sixtyfiveplus = 49200000/323071755 
+Year = 2016.
+gamma = 0.    # IDK what gamma is
+births2016 <- 3945875                       # NCHS final birth count
+under5 <- sum(
+  with(mortality, {
+    age4  <- sprintf("%04d", as.integer(age))      # keep leading zeros
+    unit  <- substr(age4, 1, 1)
+    value <- as.integer(substr(age4, 2, 4))
+
+    # under-5 if: (unit = years & value < 5)  OR  (unit = months/days/hours/minutes)
+    (unit == "1" & value < 5) | unit %in% c("2", "4", "5", "6")
+  }),
+  na.rm = TRUE
+)
+vr5q0      <- under5 / births2016           # probability of dying <5
+fiveq0     <- 7 / 1000                      # IGME comparator (probability)
+Compl_5q_0 <- vr5q0 / fiveq0                # should be ≈ 1 for the US
+Compl_5q_0
+logit_completeness = (RegCDR^2 * -0.0187471)+(RegCDR * 0.6125569)+(sixtyfiveplus * -12.58245)+(log(fiveq0) * -1.134923)+ (Compl_5q_0 * 2.319505)+(Year*-0.0184299)+31.40303+ gamma
+completeness = exp(logit_completeness)/(1 + exp(logit_completeness))
+completeness
+```
+
+Calculate fraction of ‘garbage’ codes in the data, their GBD severity profiles, and the top garbage codes.
+```{r}
+clean_icd <- function(x) {
+  x <- toupper(x)               
+  x <- str_remove_all(x, "[^A-Z0-9\\.]")  
+  str_trim(x)
+}
+
+mortality <- mortality %>%
+  mutate(icd10 = clean_icd(ucod))
+
+# Perform a single join by icd10, adding gbd_severity from garbage
+mortality_flagged <- mortality %>%
+  left_join(garbage %>% select(icd10, description, gbd_severity), by = "icd10")
+
+# Compute the garbage fraction
+garbage_fraction <- mean(!is.na(mortality_flagged$gbd_severity), na.rm = TRUE)
+
+mortality_garbage <- mortality_flagged %>%
+  filter(!is.na(gbd_severity))
+
+# Count deaths by severity category
+severity_counts <- mortality_garbage %>%
+  count(gbd_severity, name = "deaths")
+
+# Calculate the total number of garbage-coded deaths
+total_garbage_deaths <- sum(severity_counts$deaths)
+
+# Calculate share of each severity category
+severity_profile <- severity_counts %>%
+  mutate(share = deaths / total_garbage_deaths)
+
+# Find the most common garbage codes
+top_garbage <- mortality_garbage %>%    
+  count(icd10, description, gbd_severity, sort = TRUE, name = "deaths") %>% 
+  mutate(share = deaths / sum(deaths))
+
+top_garbage_10 <- top_garbage %>% slice_head(n = 10)
+
+garbage_fraction
+severity_profile
+top_garbage_10
+
+write_csv(top_garbage_10, "top_garbage_10.csv")
+
+```
+
+Demographic breakdown the proportion of garbage codes.
+```{r}
+clean_icd <- function(x) {
+  x <- toupper(x)               
+  x <- str_remove_all(x, "[^A-Z0-9\\.]")  
+  str_trim(x)
+}
+
+mort <- mortality %>%
+  mutate(icd10 = clean_icd(ucod))
+
+mort <- mort |>            
+  mutate(has_factor =
+           rowSums(across(starts_with("record_"),
+                          ~ .x != "" & !is.na(.x)>1))-1)
+
+mortality_flagged <- mort %>%
+  left_join(garbage %>% select(icd10, description, gbd_severity), by = "icd10")
+
+
+DT <- as.data.table(mortality_flagged)           # convert once
+DT[, garbage := !is.na(gbd_severity)]            # logical flag
+
+garbage_by <- function(dt, col) {
+  dt[, .(n_deaths = .N,
+         garbage   = sum(garbage),
+         prop_garbage = sum(garbage)/.N),
+     by = col][order(-prop_garbage)]
+}
+
+by_sex      <- garbage_by(DT, "sex")
+by_race     <- garbage_by(DT, "racer5")
+by_age_grp  <- garbage_by(DT, "ager52")
+by_educ     <- garbage_by(DT, "educ2003")
+by_marstat  <- garbage_by(DT, "marstat")
+by_weekday  <- garbage_by(DT, "weekday")
+by_placdth  <- garbage_by(DT, "placdth")
+by_has_secondary <- garbage_by(DT, "has_secondary")
+
+demog_detail <- rbindlist(list(
+  by_sex     [, .(demog = "sex",      group = sex,      n_deaths, garbage, prop_garbage)],
+  by_race    [, .(demog = "racer5",   group = racer5,   n_deaths, garbage, prop_garbage)],
+  by_age_grp [, .(demog = "ager52",   group = ager52,   n_deaths, garbage, prop_garbage)],
+  by_educ    [, .(demog = "education",group = educ2003, n_deaths, garbage, prop_garbage)],
+  by_marstat [, .(demog = "marstat",  group = marstat,  n_deaths, garbage, prop_garbage)],
+  by_weekday [, .(demog = "weekday",  group = weekday,  n_deaths, garbage, prop_garbage)],
+  by_placdth [, .(demog = "placdth",  group = placdth,  n_deaths, garbage, prop_garbage)],
+  by_has_secondary [, .(demog = "has_secondary",  group = has_secondary,  n_deaths, garbage, prop_garbage)]
+))
+
+# ────────────────────────────
+# 3 · save or inspect
+# ────────────────────────────
+write_csv(demog_detail, "garbage_proportion_by_demographics.csv")
+
+# ─────────────────────────────────────────────────────────────────────────
+# 1 · lookup vector: ager52 → readable label
+# ─────────────────────────────────────────────────────────────────────────
+age52_lbl <- c(
+  "Under 1 h","1–23 h", "1 day", "2 days", "3 days", "4 days", "5 days","6 days",
+  "7–13 d", "14–20 d", "21–27 d","1 mo", "2 mo","3 mo","4 mo","5 mo","6 mo","7 mo", 
+  "8 mo", "9 mo",  "10 mo", "11 mo", "1 y", "2 y","3 y", "4 y","5–9 y", "10–14 y",           
+  "15–19 y", "20–24 y",  "25–29 y",  "30–34 y",  "35–39 y",
+  "40–44 y", "45–49 y",  "50–54 y",  "55–59 y", "60–64 y",   "65–69 y",   "70–74 y",   "75–79 y", 
+  "80–84 y",  "85–89 y", "90–94 y",  "95–99 y",                    
+  "100–104 y", "105–109 y","110–114 y", "115–119 y", "120–124 y", "125–129 y", "130+ y"
+)
+
+# ─────────────────────────────────────────────────────────────────────────
+# 2 · summarise proportion of garbage by ager52
+# ─────────────────────────────────────────────────────────────────────────
+by_age_grp_labeled <- by_age_grp %>%
+  mutate(
+    age_label = factor(age52_lbl[ager52],
+                       levels = age52_lbl)   # keep age order on x-axis
+  )
+
+# ────────────────────────────────────────────────────────────────
+# 3 · plot: bar chart of garbage proportion by age-recode
+# ────────────────────────────────────────────────────────────────
+p <- ggplot(by_age_grp_labeled,
+       aes(x = age_label, y = prop_garbage)) +
+  geom_col(width = 0.9) +
+  scale_y_continuous(labels = percent_format(accuracy = 1)) +
+  labs(
+    title = "Proportion of garbage-coded deaths by age",
+    x = "Age category",
+    y = "Garbage codes (%)"
+  ) +
+  theme_minimal(base_size = 11) +
+  theme(axis.text.x = element_text(angle = 90,
+                                   vjust = 0.5,
+                                   hjust = 1))
+ggsave("garbage_by_age52.png", plot = p, width = 10, height = 6, dpi = 300)
+```
+
+Determine the number of different codes used. ***Note that this method might have a bug in it.
+```{r}
+library(readr); library(dplyr); library(stringr);library(tidyverse)
+ihme <- read_csv("/Users/amymann/Documents/Data Quality Project/data_quality/ihme_cause_codes.csv")
+
+clean_icd <- function(x) {
+  x %>%
+    str_to_upper() %>%                    # upper-case
+    str_remove_all("[^A-Z0-9]") %>%    # keep letters, digits, dot
+    str_trim()
+}
+
+mortality_clean <- mortality %>%
+  mutate(icd10 = clean_icd(ucod)) 
+
+ihme_clean <- ihme %>%
+  mutate(icd10_code = clean_icd(icd10_code)) %>%     # assumes this column name
+  filter(!is.na(icd10_code) & icd10_code != "") %>%  # drop empty rows
+  distinct(icd10_code)                               # remove duplicates
+
+observed_detail <- mortality_clean %>%
+  distinct(icd10) %>%                         # unique codes in your data
+  inner_join(ihme_clean, by = c("icd10" = "icd10_code")) %>%  # keep only valid codes
+  nrow()
+
+reference_detail <- nrow(ihme_clean)             
+level_of_detail <- observed_detail / reference_detail
+level_of_detail
+
+
+```
+
+Frequency of autopsies with demographic breakdown.
+```{r}
+
+# ── autopsy flag ────────────────────────────────────────────────────────────
+mort <- mortality %>%
+  mutate(
+    autopsy_flag = recode(toupper(autopsy),   # normalise case
+                          "Y" = "Yes",
+                          "N" = "No",
+                          .default = "Unknown")
+  )
+
+# ── detail-age  ───────────────────────────────
+decode_age_detail <- function(detail_age){
+  s     <- str_pad(detail_age, 4, pad = "0")
+  unit  <- substr(s, 1, 1)              # 1=years,2=months,4=days,5=hrs,6=mins
+  value <- as.numeric(substr(s, 2, 4))
+
+  yrs <- dplyr::case_when(
+    unit == "1" ~ value,
+    unit == "2" ~ value / 12,
+    unit == "4" ~ value / 365.25,
+    unit == "5" ~ value / (24 * 365.25),
+    unit == "6" ~ value / (60 * 24 * 365.25),
+    TRUE        ~ NA_real_
+  )
+  round(yrs, 2)
+}
+
+age12_labels <- c(
+  "01" = "<1 y",   "02" = "1-4 y",  "03" = "5-14 y",
+  "04" = "15-24 y","05" = "25-34 y","06" = "35-44 y",
+  "07" = "45-54 y","08" = "55-64 y","09" = "65-74 y",
+  "10" = "75-84 y","11" = "85+ y",  "12" = "Age NS"
+)
+
+mort <- mort %>% mutate(
+  age_years = decode_age_detail(age),
+  # -- ager12 is numeric 1-12 in the file; pad with leading zero before recoding
+  age_grp12 = fct_recode(sprintf("%02d", as.integer(ager12)), !!!age12_labels)
+)
+
+# ── education  ────────────────────────────────────────
+educ03_map <- c(                         # 2003 revision :contentReference[oaicite:15]{index=15}:contentReference[oaicite:16]{index=16}
+  "1"="≤8 grade","2"="9-12 no dip","3"="HS/GED",
+  "4"="Some college","5"="Assoc deg","6"="Bach deg",
+  "7"="Master","8"="Doctorate","9"="Edu unk"
+)
+educ89_map <- function(code){            # 1989 revision summary
+  if (is.na(code) || code == "")            return("Edu unk")
+  else if (code %in% sprintf("%02d", 1:8))  "≤8 grade"
+  else if (code %in% c("09","10","11")) "Some HS"
+  else if (code == "12")                "HS grad"
+  else if (code %in% c("13","14","15")) "Some college"
+  else if (code == "16")                "College grad"
+  else if (code == "17")                "≥5 yrs college"
+  else if (code == "00")                "None"
+  else                                  "Edu unk"
+}
+
+mort <- mort %>%
+  mutate(
+    edu_final = case_when(
+      educflag == 1 ~ recode(as.character(educ2003), !!!educ03_map),
+      educflag == 0 ~ sapply(as.character(educ1989), educ89_map),
+      TRUE          ~ "Edu missing"
+    )
+  )
+
+# ──────── race ───────────────────────────────────
+
+race5_map <- c(
+  "1" = "White",
+  "2" = "Black",
+  "3" = "AI/AN",
+  "4" = "Asian/PI",
+  "0" = "Race unk"
+)
+
+mort <- mort %>% mutate(
+  race_lbl = recode(as.character(racer5), !!!race5_map, .default = "Race unk"),
+  hisp_lbl = recode(as.character(hspanicr),
+                    "6" = "NH White",
+                    "7" = "NH Black",
+                    "8" = "NH Other",
+                    "1" = "Mexican",
+                    "2" = "PRican",
+                    "3" = "Cuban",
+                    "4" = "Cen/S Am",
+                    "5" = "Other Hisp",
+                    "9" = "Hisp unk",
+                    .default = "Hisp unk")
+)
+
+
+# ── others ──────────────────────────────────────────────────────────
+mort <- mort %>% mutate(
+  sex_lbl  = recode(sex, "M" = "Male", "F" = "Female", .default = "Sex unk"),
+  marital  = recode(marstat, "S"="Single","M"="Married","W"="Widowed",
+                              "D"="Divorced","U"="MS unk", .default="MS unk"),
+  inj_work = recode(toupper(injwork), "Y"="Yes","N"="No", .default="Unknown"),
+  cause113 = ucr113
+)
+
+# ── set dimensions ──────────────────────────────────────
+dims <- c("sex_lbl", "age_grp12", "race_lbl", "hisp_lbl",
+          "edu_final", "marital", "inj_work", "cause113")
+
+make_table <- function(df, var){
+  df %>% 
+    group_by(.data[[var]], autopsy_flag) %>% 
+    summarise(deaths = n(), .groups = "drop_last") %>% 
+    mutate(
+      prop     = deaths / sum(deaths),
+      variable = var,
+      level    = as.character(.data[[var]])  
+    ) %>% 
+    ungroup() %>% 
+    select(variable, level, autopsy_flag, deaths, prop)
+}
+
+autopsy_breakdown <- bind_rows(lapply(dims, make_table, df = mort))
+
+library(readr)
+lookup113 <- read_csv("cause_code_135.csv", show_col_types = FALSE)
+
+autopsy_breakdown <- autopsy_breakdown %>%
+  left_join(lookup113, by = c("level" = "code"))
+
+# ── summary by sex ─────────────────────────────────────────────
+sex_counts <- mort %>%
+  filter(autopsy_flag %in% c("Yes", "No")) %>%  
+  group_by(sex_lbl) %>%
+  summarise(
+    autopsy_yes = sum(autopsy_flag == "Yes"),
+    total       = n(),
+    .groups = "drop"
+  )
+
+sex_stat <- sex_counts %>%
+  rowwise() %>%
+  mutate(
+    prop = autopsy_yes / total,
+  ) %>%
+
+print(sex_stat)
+
+write_csv(autopsy_breakdown,
+          "autopsy_breakdown_demographics_2016.csv")  
+print(head(autopsy_breakdown, 20))
+```
+
+Is the male/female difference in autopsy simply a result of men dying younger? The rest of it could be the way men are dying? 
+```{r}
+reg_dat <- mort %>%                               # keep only Yes/No rows
+  filter(autopsy_flag %in% c("Yes", "No")) %>%
+  mutate(
+    autopsy_bin = as.integer(autopsy_flag == "Yes")  # 1 = autopsy performed
+  )
+
+# model 1: sex only
+m1 <- lm(autopsy_bin ~ sex_lbl, data = reg_dat)
+
+# model 2: add age (continuous, in years)
+m2 <- lm(autopsy_bin ~ sex_lbl + age_years, data = reg_dat)
+
+m3 <- lm(autopsy_bin ~  age_years, data = reg_dat)
+
+# quick summaries
+summary(m1)          # baseline difference ⟶ coefficient for sex_lblMale
+summary(m2)          # see how that coefficient shrinks once age is added
+summary(m3)
+anova(m3, m2)
+
+# if you want a tidy comparison table:
+bind_rows(
+  tidy(m1) %>% mutate(model = "Sex only"),
+  tidy(m2) %>% mutate(model = "Sex + age"),
+  tidy(m3) %>% mutate(model = "Age only")
+)
+```
+
+What is the effect of marital status on autopsy after controlling for age?
+```{r}
+reg_dat <- mortality %>%
+  filter(autopsy %in% c("Y", "N")) %>%
+  mutate(
+    autopsy_bin = as.integer(autopsy == "Y")
+  )
+
+
+# model 1: sex only
+m1 <- lm(autopsy_bin ~ marstat, data = reg_dat)
+
+# model 2: add age (continuous, in years)
+m2 <- lm(autopsy_bin ~ marstat + ager52, data = reg_dat)
+
+# quick summaries
+summary(m1)          # baseline difference ⟶ coefficient for sex_lblMale
+summary(m2)          # see how that coefficient shrinks once age is added
+
+# if you want a tidy comparison table:
+bind_rows(
+  tidy(m1) %>% mutate(model = "Marital status only"),
+  tidy(m2) %>% mutate(model = "Marital status + age"),
+)
+```
+
+Make plots for autopsy data!
+```{r}
+
+autopsy_breakdown <- read_csv(
+  "/Users/amymann/Documents/Data Quality Project/data_quality/autopsy_breakdown_demographics_2016.csv",
+  show_col_types = FALSE
+)
+
+age12_labels <- setNames(
+  c("<1", "1–4", "5–14", "15–24", "25–34", "35–44",
+    "45–54", "55–64", "65–74", "75–84", "85+", "NS"),
+  sprintf("%02d", 1:12)
+)
+
+# ── 3. Helper to build one stacked-bar plot ───────────────────────────────────
+plot_autopsy_prop <- function(df, var){
+  plot_df <- df %>%
+    filter(variable == var, autopsy_flag != "Unknown") %>%
+    mutate(level = case_when(
+      var == "age_grp12"              ~ factor(level,
+                                               levels = names(age12_labels),
+                                               labels = age12_labels),
+      var %in% c("race_lbl", "hisp_lbl") ~ fct_relevel(level),  # keep file order
+      TRUE                              ~ fct_infreq(level)     # order by freq
+    ))
+
+  ggplot(plot_df, aes(level, prop, fill = autopsy_flag)) +
+    geom_col(width = 0.9, position = "stack") +
+    scale_y_continuous(labels = percent_format(accuracy = 1)) +
+    scale_fill_brewer(palette = "Set1") +
+    labs(x = NULL, y = "Proportion of deaths",
+         fill = "Autopsy performed",
+         title = paste("Autopsy frequency by", var)) +
+    theme_minimal(base_size = 11) +
+    theme(axis.text.x = element_text(angle = 45, hjust = 1),
+          plot.title  = element_text(size = 12, face = "bold"))
+}
+
+# ── pick variables for grid  ──────────────────
+grid_vars <- c("sex_lbl", "age_grp12", "race_lbl", "hisp_lbl",
+               "edu_final", "marital", "inj_work")
+
+# ── make grid plot  ──────────────────────────────────────────────────
+grid_plot <- wrap_plots(
+  lapply(grid_vars, \(v) plot_autopsy_prop(autopsy_breakdown, v)),
+  ncol = 2
+) +
+  plot_annotation(
+    title = "Autopsy proportions across demographic groups (US deaths, 2016)",
+    theme = theme(plot.title = element_text(size = 14, face = "bold"))
+  )
+
+print(grid_plot)
+ggsave("autopsy_demographics_grid_2016.png",
+       grid_plot, width = 14, height = 10, dpi = 300)
+
+# ── make 113 cause groups plot ───────────────────────────
+cause_plot <- autopsy_breakdown %>%
+  filter(variable == "cause113",
+         autopsy_flag != "Unknown",
+         as.numeric(level) >= 1,
+         as.numeric(level) <= 113) %>%
+  mutate(desc = fct_reorder(level, prop)) %>%   # use plain-English label
+  ggplot(aes(x = desc, y = prop, fill = autopsy_flag)) +
+    geom_col(position = "stack", width = 0.9) +
+    scale_y_continuous(labels = percent_format()) +
+    scale_fill_manual(values = c("Yes"="#377eb8",
+                                 "No" ="#e41a1c")) +
+    labs(x = "Underlying-cause (113-group recode)",
+         y = "Proportion of deaths",
+         fill = "Autopsy",
+         title = "Autopsy frequency by underlying cause, 2016") +
+    theme_minimal(base_size = 12) +
+    theme(axis.text.x = element_text(angle = 90, hjust = 1, vjust = 0.4),
+          plot.title  = element_text(size = 13, face = "bold"))
+
+print(cause_plot)
+ggsave("autopsy_by_cause113_2016.png",
+       cause_plot, width = 16, height = 6, dpi = 300)
+
+```
+
+Average number of secondary factors listed 
+```{r}
+demo_vars <- c("race", "racer5", "educ2003", "sex", "ager52", "marstat", "ucr39")
+
+mort <- mortality |>            
+  mutate(extra_factor_count =
+           rowSums(across(starts_with("record_"),
+                          ~ .x != "" & !is.na(.x)))-1)
+extra_factor_summary <- bind_rows(
+  lapply(demo_vars, function(v)
+    mort %>% 
+      group_by(.data[[v]], .drop = FALSE) %>% 
+      summarise(
+        n_deaths   = n(),
+        mean_extra = mean(extra_factor_count, na.rm = TRUE),
+        .groups    = "drop"
+      ) %>% 
+      transmute(
+        variable   = v,
+        level      = as.character(.data[[v]]),    # ensure character
+        n_deaths,
+        mean_extra
+      )
+  )
+)
+
+
+print(extra_factor_summary)
+write_csv(extra_factor_summary, "avg_secondary_factors_by_demo.csv")
+
+top10_ucr39 <- mort %>%
+  count(ucr39, sort = TRUE, name = "n_deaths") %>%
+  slice_head(n = 10) %>%
+  left_join(
+    mort %>% group_by(ucr39) %>%
+      summarise(mean_extra = mean(extra_factor_count, na.rm = TRUE),
+                .groups = "drop"),
+    by = "ucr39"
+  )
+print(top10_ucr39)
+
+
+hist_plot <- ggplot(mort, aes(extra_factor_count)) +
+  geom_histogram(binwidth = 1, boundary = -0.5, fill = "#2e86c1") +
+  scale_x_continuous(breaks = 0:20) +
+  labs(x = "Number of record-axis conditions",
+       y = "Deaths",
+       title = "Distribution of additional conditions per death") +
+  theme_minimal(base_size = 11)
+
+ggsave("hist_extra_factors.png", hist_plot, width = 7, height = 4, dpi = 300)
+
+
+age_var <- if ("age52" %in% names(mort)) "age52" else "ager52"
+
+age_means <- mort %>%
+  group_by(.data[[age_var]]) %>%
+  summarise(mean_extra = mean(extra_factor_count, na.rm = TRUE),
+            .groups = "drop")
+
+age_plot <- ggplot(age_means,
+                   aes(factor(.data[[age_var]]), mean_extra)) +
+  geom_col(fill = "#e41a1c") +
+  scale_y_continuous(labels = number_format(accuracy = 0.1)) +
+  labs(x = "Age category (Recode 52)",
+       y = "Mean number of record-axis conditions",
+       title = "Average additional conditions by age group") +
+  theme_minimal(base_size = 11) +
+  theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust = 1))
+
+ggsave("mean_extra_factors_by_age.png", age_plot, width = 8, height = 4, dpi = 300)
+
+```
+
+Frequency of 0 secondary factors listed 
+```{r}
+demo_vars <- c("racer3", "racer5", "educ2003", "sex", "ager52", "marstat")
+
+mort <- mortality |>            
+  mutate(extra_factor_count =
+           rowSums(across(starts_with("record_"),
+                          ~ .x != "" & !is.na(.x)))-1)
+# ── 1. proportion with *zero* secondary factors, by demographic ───────────────
+no_sec_summary <- bind_rows(
+  lapply(demo_vars, function(v)
+    mort %>% 
+      group_by(.data[[v]], .drop = FALSE) %>% 
+      summarise(
+        n_deaths   = n(),
+        prop_zero  = mean(extra_factor_count == 0, na.rm = TRUE),
+        .groups    = "drop"
+      ) %>% 
+      transmute(
+        variable = v,
+        level    = as.character(.data[[v]]),
+        n_deaths,
+        prop_zero
+      )
+  )
+)
+
+write_csv(no_sec_summary, "prop_no_secondary_by_demo.csv")
+print(no_sec_summary)
+
+# ── 2. top-10 UCR-39 causes – prop with no secondary factor ───────────────────
+top10_ucr39_none <- mort %>%
+  count(ucr39, sort = TRUE, name = "n_deaths") %>%
+  slice_head(n = 10) %>%
+  left_join(
+    mort %>% group_by(ucr39) %>%
+      summarise(prop_zero = mean(extra_factor_count == 0, na.rm = TRUE),
+                .groups   = "drop"),
+    by = "ucr39"
+  )
+
+write_csv(top10_ucr39_none, "prop_no_secondary_top10_ucr39.csv")
+print(top10_ucr39_none)
+
+# ── 3. bar chart of prop-zero by age52 (or ager52) ────────────────────────────
+age_var <- if ("age52" %in% names(mort)) "age52" else "ager52"
+
+age_prop_zero <- mort %>%
+  group_by(.data[[age_var]]) %>%
+  summarise(prop_zero = mean(extra_factor_count == 0, na.rm = TRUE),
+            .groups   = "drop")
+
+ggplot(age_prop_zero, aes(factor(.data[[age_var]]), prop_zero)) +
+  geom_col(fill = "#e41a1c") +
+  scale_y_continuous(labels = percent_format(accuracy = 1)) +
+  labs(x = "Age category (Recode 52)",
+       y = "Share of deaths with NO secondary factor",
+       title = "Percentage with no record-axis conditions by age group") +
+  theme_minimal(base_size = 11) +
+  theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust = 1))
+
+ggsave("prop_no_secondary_by_age.png", width = 8, height = 4, dpi = 300)
+
+```
+
+Can sex/marital differences in frequency of 0 secondary factors listed be explained by cause of death and/or age of death?
+```{r}
+mort <- mortality %>% 
+  mutate(
+    has_extra_factor = 1- as.integer(                       # 1 = none, 0 = ≥1
+      rowSums(across(starts_with("record_"),
+                     ~ .x != "" & !is.na(.x))) > 1)) %>%
+  mutate(
+    num_extra_factors =                    
+      rowSums(across(starts_with("record_"),
+                     ~ .x != "" & !is.na(.x))))-1
+mort <- mort %>%                    
+  mutate(
+    ucr39 = factor(ucr39, levels = 1:39) 
+  )
+
+m1 <- lm(num_extra_factors ~ marstat + ager52, data = mort)
+
+library(MASS)
+
+full_mod  <- lm(num_extra_factors ~ marstat + ager52 + ucr39, data = mort)
+
+step_mod  <- stepAIC(full_mod,
+                     scope = list(upper = ~ marstat + ager52 + ucr39,
+                                  lower = ~ 1),   # start at intercept-only
+                     direction = "both",
+                     trace = FALSE,  k = log(n))
+
+summary(step_mod)
+
+summary(m1)          
+```
+
+How correlated are the various indices (no secondary factors, average number of secondary factors, proportion of garbage codes, and whether or not their is an autopsy)?
+```{r}
+library(dplyr)
+library(stringr)
+library(tidyr)
+
+# ----------------------------------------------------------------
+# 1. Helper: clean ICD10 codes
+# ----------------------------------------------------------------
+clean_icd <- function(x) {
+  x <- toupper(x)
+  x <- str_remove_all(x, "[^A-Z0-9\\.]")
+  str_trim(x)
+}
+
+# ----------------------------------------------------------------
+# 2. Correlation function
+# ----------------------------------------------------------------
+calculate_dqi_correlations <- function(data,
+                                       vars   = c("has_factor",
+                                                  "avg_secondary_factor",
+                                                  "prop_garbage_codes",
+                                                  "autopsy_flag_num"),
+                                       method = "spearman") {
+  if (!all(vars %in% names(data))) {
+    stop("One or more of the specified variables are missing in `data`.")
+  }
+  d <- data[vars]
+
+  # Coerce logical / 2-level factor → 0/1 numeric
+  to_numeric <- function(x) {
+    if (is.logical(x)) return(as.numeric(x))
+    if (is.factor(x) && nlevels(x) == 2) {
+      return(as.numeric(as.integer(x) - 1))
+    }
+    return(x)
+  }
+  d[] <- lapply(d, to_numeric)
+
+  # 1) Correlation matrix
+  cor_mat <- cor(d, use = "pairwise.complete.obs", method = method)
+
+  # 2) Tidy table of pairwise rho + p-value + n
+  combs <- combn(vars, 2, simplify = FALSE)
+  pair_stats <- lapply(combs, function(v) {
+    x <- d[[v[1]]]]; y <- d[[v[2]]]]
+    idx <- complete.cases(x, y)
+    test <- cor.test(x[idx], y[idx], method = method, exact = FALSE)
+    data.frame(
+      var1    = v[1],
+      var2    = v[2],
+      rho     = unname(test$estimate),
+      p_value = test$p.value,
+      n       = sum(idx),
+      stringsAsFactors = FALSE
+    )
+  })
+
+  list(
+    correlation_matrix = cor_mat,
+    pairwise_table     = bind_rows(pair_stats)
+  )
+}
+
+# ----------------------------------------------------------------
+# 3. Build your data-quality indices on `mort`
+# ----------------------------------------------------------------
+mort <- mortality %>%
+  # normalize ICD10
+  mutate(icd10 = clean_icd(ucod)) %>%
+
+  # 3a) no secondary factors flag (0=yes none; 1=has ≥1)
+  mutate(
+    has_factor = 1L - as.integer(
+      rowSums(across(starts_with("record_"),
+                     ~ !is.na(.x) & .x != "")) > 1
+    )
+  ) %>%
+
+  # 3b) average number of secondary factors
+  mutate(
+    avg_secondary_factor =
+      rowSums(across(starts_with("record_"),
+                     ~ !is.na(.x) & .x != "")) - 1L
+  ) %>%
+
+  # 3c) autopsy flag → Yes/No → numeric 0/1
+  mutate(
+    autopsy_flag = recode(toupper(autopsy),
+                          "Y" = "Yes", "N" = "No",
+                          .default = "Unknown"),
+    autopsy_flag_num = case_when(
+      autopsy_flag == "Yes" ~ 1L,
+      autopsy_flag == "No"  ~ 0L,
+      TRUE                  ~ NA_integer_
+    )
+  )
+
+# 3d) garbage-code flag via %in% (no join explosion)
+garb_icds <- garbage %>%
+  pull(icd10) %>%
+  clean_icd() %>%
+  unique()
+
+mort <- mort %>%
+  mutate(
+    garbage_flag      = as.integer(icd10 %in% garb_icds),
+    prop_garbage_codes = garbage_flag  # 0/1 per record
+  )
+
+# ----------------------------------------------------------------
+# 4. Run correlations
+# ----------------------------------------------------------------
+results <- calculate_dqi_correlations(
+  mort,
+  vars = c("has_factor",
+           "avg_secondary_factor",
+           "prop_garbage_codes",
+           "autopsy_flag_num")
+)
+
+# View results
+results$correlation_matrix
+results$pairwise_table
+
+```
+
+Add a new chunk by clicking the *Insert Chunk* button on the toolbar or by pressing *Cmd+Option+I*.
+
+When you save the notebook, an HTML file containing the code and output will be saved alongside it (click the *Preview* button or press *Cmd+Shift+K* to preview the HTML file). 
+
+The preview shows you a rendered HTML copy of the contents of the editor. Consequently, unlike *Knit*, *Preview* does not run any R code chunks. Instead, the output of the chunk when it was last run in the editor is displayed.
+
