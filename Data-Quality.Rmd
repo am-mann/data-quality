@@ -2,7 +2,6 @@
 title: "Data Quality Project"
 output: html_notebook
 ---
-
 Load packages and summarize data.
 ```{r}
 library(arrow)
@@ -12,57 +11,75 @@ library(purrr)
 library(stringr)
 library(ggplot2)
 library(readr)
-library(janitor) 
+library(janitor)
 
+## ── 0. Parameters ────────────────────────────────────────────────────────────
 parquet_dir   <- "/Users/amymann/Documents/Data Quality Project/data/parquet"
-garbage_path  <- "/Users/amymann/Documents/Data Quality Project/data_quality/cause-codes/gbd_garbage_codes_with_descr.csv"
+garbage_path  <- "/Users/amymann/Documents/Data Quality Project/data_quality/cause-codes/gbd_garbage_codes_with_descr_no_overdose.csv"
 
-needed_cols   <- c("year", "sex", "race", "marstat", "placdth", "ucod", "ranum")
+needed_cols   <- c("year", "sex", "race5", "marstat", "placdth", "ucod", "ranum")  # core variables
+extra_cols    <- "educ2003"                      # educ2003 only present for 2003+
 years_wanted  <- 1999:2023
 
-garbage_lu <- read_csv(garbage_path, show_col_types = FALSE) %>% 
+## ── 1. Garbage code lookup ───────────────────────────────────────────────────
+garbage_lu <- read_csv(garbage_path, show_col_types = FALSE) %>%
   transmute(
     icd10        = str_to_upper(icd10),
-    gbd_severity = as.integer(gbd_severity)        # 1-4
+    gbd_severity = as.integer(gbd_severity)
   )
 
 clean_icd <- function(x) str_remove_all(str_to_upper(x), "[^A-Z0-9\\.]")
 
+## ── 2. File summarization function ───────────────────────────────────────────
 summarise_file <- function(path) {
-  read_parquet(path, col_select = all_of(needed_cols)) %>% 
+  read_parquet(path, col_select = any_of(c(needed_cols, extra_cols))) %>%
     mutate(
       year  = as.integer(year),
       icd10 = clean_icd(ucod)
-    ) %>% 
-    filter(year %in% years_wanted) %>% 
-    left_join(garbage_lu, by = "icd10") %>% 
-    
-    # ── flag garbage deaths once ──────────────────────────────────────────────
-    mutate(is_garbage = !is.na(gbd_severity)) %>%      # TRUE for garbage-coded
-    select(-any_of(c("ucod", "icd10", "gbd_severity"))) %>% 
-    
-    # ── reshape so every demo var becomes its own column `variable` / `level` ─
+    ) %>%
+    filter(year %in% years_wanted) %>%
+    left_join(garbage_lu, by = "icd10") %>%
+
+    mutate(is_garbage = !is.na(gbd_severity)) %>%
+    select(-any_of(c("ucod", "icd10", "gbd_severity"))) %>%
+
     pivot_longer(
-      -c(year, is_garbage),                            # keep flags & year
-      names_to  = "variable",
+      -c(year, is_garbage),
+      names_to = "variable",
       values_to = "level",
       values_transform = list(level = as.character)
-    ) %>% 
-    filter(!is.na(level)) %>% 
-    
-    # ── compute totals + garbage share for each year-variable-level ───────────
-    group_by(year, variable, level) %>% 
+    ) %>%
+    filter(!is.na(level)) %>%
+    filter(!(variable == "educ2003" & year < 2003)) %>%
+
+    group_by(year, variable, level) %>%
     summarise(
-      total_n        = n(),
-      garbage_n      = sum(is_garbage),
-      prop_garbage   = garbage_n / total_n,            # ← requested metric
-      .groups        = "drop"
+      total_n      = n(),
+      garbage_n    = sum(is_garbage),
+      prop_garbage = garbage_n / total_n,
+      .groups      = "drop"
     )
 }
 
+## ── 3. Process all files ─────────────────────────────────────────────────────
+file_paths <- list.files(parquet_dir, pattern = "\\.parquet$", full.names = TRUE)
+ts_long    <- map_dfr(file_paths, summarise_file)
 
-ts_long <- list.files(parquet_dir, "\\.parquet$", full.names = TRUE) %>% 
-map_dfr(summarise_file)            
+## ── 4. Yearly totals (for ALL deaths) ────────────────────────────────────────
+totals_by_year <- ts_long %>%
+  group_by(year) %>%
+  summarise(
+    total_n      = sum(total_n),
+    garbage_n    = sum(garbage_n),
+    prop_garbage = garbage_n / total_n,
+    .groups      = "drop"
+  ) %>%
+  mutate(variable = "ALL", level = "ALL")
+
+## ── 5. Append totals to full time-series ─────────────────────────────────────
+ts_long <- bind_rows(ts_long, totals_by_year)
+
+
 ```
 
 Plots of proportion of garbage codes overtime and average severity overtime 
@@ -71,10 +88,8 @@ fig_dir <- "/Users/amymann/Documents/Data Quality Project/data_quality/figures"
 dir.create(fig_dir, recursive = TRUE, showWarnings = FALSE)
 
 ts_garbage <- ts_long %>%
-  filter(variable == "garbage") %>% 
-  group_by(year) %>% 
-  mutate(prop = n / sum(n)) %>% 
-  ungroup()
+  filter(variable == "garbage_n") %>% 
+  group_by(year) 
 
 prop_garbage_plot<-ts_garbage %>%
   filter(level == "Garbage") %>% 
@@ -88,11 +103,11 @@ avg_severity_ts <- ts_long %>%
   filter(variable == "gbd_severity", level != "0-Non") %>% 
   mutate(
     severity = as.numeric(level),
-    n        = as.numeric(n)) %>% 
+    n        = as.numeric(total_n)) %>% 
   group_by(year) %>% 
   summarise(
     total_deaths = sum(n),
-    avg_severity = sum(severity * n) / total_deaths,
+    avg_severity = sum(severity * total_n) / total_deaths,
     .groups      = "drop" )
 
 severity_plot <- ggplot(avg_severity_ts, aes(year, avg_severity)) +
@@ -100,6 +115,25 @@ severity_plot <- ggplot(avg_severity_ts, aes(year, avg_severity)) +
   scale_y_continuous(limits = c(1, 4)) +
   labs(title = "Average garbage-code severity, 1999–2023",
        x = NULL, y = "Average severity (scale 1-4)")
+
+## 1 ── make (or reuse) the yearly-total table -----------------------
+totals_by_year <- ts_long %>%           # if you haven’t built it yet
+  group_by(year) %>% 
+  summarise(
+    total_n      = sum(total_n),
+    garbage_n    = sum(garbage_n),
+    prop_garbage = garbage_n / total_n,
+    .groups      = "drop"
+  ) %>% 
+  mutate(variable = "ALL", level = "ALL")
+
+## 2 ── plot the proportion ------------------------------------------
+prop_garbage_plot <- ggplot(totals_by_year,
+                            aes(year, prop_garbage)) +
+  geom_line(colour = "black") +
+  scale_y_continuous(labels = scales::percent) +
+  labs(title = "Proportion of deaths classified as garbage",
+       x = NULL, y = "Proportion of deaths")
 
 ggsave(file.path(fig_dir, "prop_garbage_over_time.png"),
        plot   = prop_garbage_plot,
@@ -114,7 +148,7 @@ ggsave(file.path(fig_dir, "avg_garbage_severity_over_time.png"),
 Demographics v.s. proportion garbage codes overtime
 ```{r}
 # assumes `ts_demo` and `fig_dir` already exist
-demo_vars <- c("sex", "race", "marstat", "placdth", "educ2003")
+demo_vars <- c("sex", "race5", "marstat", "placdth", "educ2003", "popsizeoc", "stateoc")
 
 walk(demo_vars, \(v) {
   p <- ggplot(filter(ts_long, variable == v),
@@ -129,7 +163,105 @@ walk(demo_vars, \(v) {
 })
 
 ```
+Controlling for cause of death, plots odds ratios for place of death, sex, and marital status.
+```{r}
+# ── 0.  Packages ─────────────────────────────────────────────────────────────
+library(arrow)
+library(dplyr)
+library(stringr)
+library(purrr)
+library(readr)
+library(broom)
+library(ggplot2)
+library(tidyr)
 
+# ── 1.  Paths & constants ────────────────────────────────────────────────────
+parquet_dir <- "/Users/amymann/Documents/Data Quality Project/data/parquet"
+garbage_path <- file.path(
+  "/Users/amymann/Documents/Data Quality Project",
+  "data_quality/cause-codes",
+  "gbd_garbage_codes_with_descr_no_overdose.csv"
+)
+
+years_wanted   <- 1999:2023
+vars_interest  <- c("placdth", "sex", "marstat")
+
+base_cols  <- c("year", "ucr39", "ucod", "ranum", vars_interest)
+# keep educ2003 out of base_cols for years where it’s absent
+extra_cols <- "educ2003"                    # only present 2003+
+
+garbage_lu <- read_csv(garbage_path, show_col_types = FALSE) %>%
+  transmute(
+    icd10        = str_to_upper(icd10),
+    gbd_severity = as.integer(gbd_severity)
+  )
+
+clean_icd <- function(x) str_remove_all(str_to_upper(x), "[^A-Z0-9\\.]")
+
+# ── 2.  Fit *separate* models for each variable in one file/year ────────────
+fit_year <- function(path) {
+
+  dat <- read_parquet(path, col_select = any_of(c(base_cols, extra_cols))) %>%
+    mutate(
+      year  = as.integer(year),
+      icd10 = clean_icd(ucod)
+    ) %>%
+    filter(year %in% years_wanted) %>%
+    left_join(garbage_lu, by = "icd10") %>%
+    mutate(
+      is_garbage = as.integer(!is.na(gbd_severity)),
+      ucr39      = factor(ucr39)
+    ) %>%
+    select(-ucod, -icd10, -gbd_severity)
+
+  yr <- unique(dat$year)
+  stopifnot(length(yr) == 1)
+
+  # Hold all model results here
+  bind_rows(lapply(vars_interest, function(var) {
+    # skip if this column is missing (e.g. educ2003 before 2003)
+    if (!(var %in% names(dat))) return(NULL)
+
+dat_var <- dat %>%                                    # existing line
+  mutate(across(all_of(var), factor)) %>%             # focal var as factor
+  filter(!is.na(.data[[var]]), !is.na(ucr39)) %>%     # drop NAs
+  droplevels()                                        # discard empty levels
+
+# ---- new safety checks -----------------------------------------------
+if (nlevels(dat_var[[var]])  < 2) return(NULL)   # focal var has 1 level
+if (nlevels(dat_var$ucr39)   < 2) return(NULL)   # ucr39 has 1 level
+# ----------------------------------------------------------------------
+
+fmla <- as.formula(paste("is_garbage ~", var, "+ ucr39"))
+mod  <- glm(fmla, family = binomial("logit"), data = dat_var)
+
+    fmla <- as.formula(paste("is_garbage ~", var, "+ ucr39"))
+
+    mod <- glm(fmla, family = binomial("logit"), data = dat_var)
+
+    coefs <- broom::tidy(mod, conf.int = FALSE, exponentiate = FALSE) %>%   # no CI here
+  filter(term != "(Intercept)", !startsWith(term, "ucr39")) %>%
+  # 95 % Wald CIs
+  mutate(
+    conf.low  = estimate - 1.96 * std.error,
+    conf.high = estimate + 1.96 * std.error
+  ) %>%
+  # exponentiate ORs
+  mutate(
+    estimate  = exp(estimate),
+    conf.low  = exp(conf.low),
+    conf.high = exp(conf.high),
+    year      = yr,
+    variable  = var
+  )
+  }))
+}
+
+# ── 3.  Run every file/year ──────────────────────────────────────────────────
+file_paths <- list.files(parquet_dir, "\\.parquet$", full.names = TRUE)
+
+coefs <- map_dfr(file_paths, fit_year)
+```
 
 
 
