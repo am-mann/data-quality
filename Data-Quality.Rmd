@@ -261,6 +261,39 @@ mod  <- glm(fmla, family = binomial("logit"), data = dat_var)
 file_paths <- list.files(parquet_dir, "\\.parquet$", full.names = TRUE)
 
 coefs <- map_dfr(file_paths, fit_year)
+
+out_dir <- "/Users/amymann/Documents/Data Quality Project/data_quality/figures/"
+write_csv(coefs, file.path(out_dir, "garbage_logit_coefs.csv"))
+
+# ── 5.  Prep for plotting ────────────────────────────────────────────────────
+plot_dat <- coefs %>% 
+  # pull out the level name (term includes the variable prefix)
+  mutate(level = str_remove(term, paste0("^", variable))) %>% 
+  # nice ordering inside legends
+  arrange(variable, level, year)
+
+# ── 6.  Plot: odds-ratio trajectories, facetted by variable ──────────────────
+or_plot <- ggplot(plot_dat,
+                  aes(x = year, y = estimate,
+                      colour = level, fill = level, group = level)) +
+  geom_ribbon(aes(ymin = conf.low, ymax = conf.high),
+              alpha = 0.20, linewidth = 0) +
+  geom_line(linewidth = 0.7) +
+  scale_y_log10(expand = expansion(mult = c(0.05, 0.05))) +
+  facet_wrap(~ variable, scales = "free_y") +
+  labs(title = "Odds ratios for garbage cause-of-death coding, 1999–2023",
+       subtitle = "Separate logistic models adjusting for ICD-39 category (ucr39)",
+       y = "Odds ratio (log scale)", x = NULL,
+       colour = "Level", fill = "Level") +
+  theme_minimal(base_size = 11) +
+  theme(legend.position = "bottom")
+
+ggsave(file.path(out_dir, "odds_ratios_over_time.png"),
+       or_plot, width = 8, height = 4.5, dpi = 320)
+
+# ── 7.  (Optional) quick look in RStudio viewer ──────────────────────────────
+print(or_plot)
+
 ```
 
 
