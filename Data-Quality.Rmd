@@ -47,7 +47,7 @@ summarise_file <- function(path) {
          as.data.frame()
 
   ## which of the 60 secondary columns actually exist in this file?
-  sec_cols_here <- intersect(sec_cols, names(dat))
+  sec_cols_here <- intersect(keep_cols, names(dat))
 
   ## --- garbage classification -----------------------------------------------
   dat <- dat %>% 
@@ -223,15 +223,21 @@ parquet_dir <- "/Users/amymann/Documents/Data Quality Project/data/parquet"
 garbage_path <- file.path(
   "/Users/amymann/Documents/Data Quality Project",
   "data_quality/cause-codes",
-  "gbd_garbage_codes_with_descr.csv"
+  "gbd_garbage_codes_with_descr_no_overdose.csv"
 )
 
 years_wanted   <- 1999:2023
 vars_interest  <- c("placdth", "sex", "marstat")
 
 base_cols  <- c("year", "ucr39", "ucod", "ranum", vars_interest)
-# keep educ2003 out of base_cols for years where it’s absent
-extra_cols <- "educ2003"                    # only present 2003+
+extra_cols <- "educ2003"                      # present only ≥2003
+
+## all 60 secondary-factor columns you might need
+sec_cols   <- c(paste0("record_",  1:20),
+                paste0("econdp_",  1:20),
+                paste0("econds_",  1:20))
+
+keep_cols  <- c(base_cols, extra_cols, sec_cols)
 
 garbage_lu <- read_csv(garbage_path, show_col_types = FALSE) %>%
   transmute(
@@ -241,17 +247,25 @@ garbage_lu <- read_csv(garbage_path, show_col_types = FALSE) %>%
 
 clean_icd <- function(x) str_remove_all(str_to_upper(x), "[^A-Z0-9\\.]")
 
+# ── helper: identify “good” T-codes vectorised over a whole column ───────────
+is_good_T <- function(x) {
+  x <- toupper(x)
+  startsWith(x, "T") & substr(x, 4L, 4L) != "9"
+}
+
 # ── 2.  Fit *separate* models for each variable in one file/year ────────────
 fit_year <- function(path) {
 
-    ## --- read only the columns we need ----------------------------------------
+  ## read only available columns in this parquet
   dat <- read_parquet(path, col_select = any_of(keep_cols)) %>% 
-         as.data.frame()
+    as.data.frame()
 
-  ## which of the 60 secondary columns actually exist in this file?
+  ## which secondary columns exist in this particular file?
   sec_cols_here <- intersect(sec_cols, names(dat))
 
-  ## --- garbage classification -----------------------------------------------
+  ## -------------------------------------------------------------------------
+  ## garbage-code flag with the new overdose rule
+  ## -------------------------------------------------------------------------
   dat <- dat %>% 
     mutate(
       year  = as.integer(year),
@@ -259,93 +273,72 @@ fit_year <- function(path) {
     ) %>% 
     left_join(garbage_lu, by = "icd10")
 
-  ## TRUE if *any* secondary factor is a T-code AND not “… .9”
-if (length(sec_cols_here)) {
-
-  # helper that returns TRUE/FALSE for the whole column *at once*
-  is_good_T <- function(x) {
-    x <- toupper(x)                 # vectorised upper-case
-    startsWith(x, "T") &            # begins with T…
-      substr(x, 4L, 4L) != "9"      # …but 4th char ≠ 9  (i.e. not T__.9)
+  ## TRUE for at least one specific T-code (vectorised OR)
+  if (length(sec_cols_here)) {
+    has_specific_T <- Reduce(`|`, lapply(dat[sec_cols_here], is_good_T))
+  } else {
+    has_specific_T <- rep(FALSE, nrow(dat))
   }
-
-  # OR-reduce the 60 logical vectors without touching R’s slow loop
-  has_specific_T <- Reduce(`|`, lapply(dat[sec_cols_here], is_good_T))
-
-} else {
-  has_specific_T <- rep(FALSE, nrow(dat))      # file had no secondary cols
-}
-
 
   dat <- dat %>% 
     mutate(
       is_garbage = case_when(
-        is.na(gbd_severity)                     ~ FALSE,           # not on garbage list
-        !str_starts(icd10, "X")                 ~ TRUE,            # garbage, not X-code
-        str_starts(icd10, "X") & !has_specific_T~ TRUE,            # X w/o good T
-        TRUE                                    ~ FALSE            # X w/ good T
-      )
-    )
-  
+        is.na(gbd_severity)                         ~ FALSE,            # not on list
+        !str_starts(icd10, "X")                     ~ TRUE,             # garbage, not X
+        str_starts(icd10, "X") & !has_specific_T    ~ TRUE,             # X, no good T
+        TRUE                                        ~ FALSE             # X with good T
+      ),
+      ucr39 = factor(ucr39)
+    ) %>% 
+    select(-ucod, -icd10, -gbd_severity, -any_of(sec_cols_here))
+
   yr <- unique(dat$year)
   stopifnot(length(yr) == 1)
 
-  # Hold all model results here
+  ## ── run separate models for each focal variable ──────────────────────────
   bind_rows(lapply(vars_interest, function(var) {
-    # skip if this column is missing (e.g. educ2003 before 2003)
+
     if (!(var %in% names(dat))) return(NULL)
 
-dat_var <- dat %>%                                    # existing line
-  mutate(across(all_of(var), factor)) %>%             # focal var as factor
-  filter(!is.na(.data[[var]]), !is.na(ucr39)) %>%     # drop NAs
-  droplevels()                                        # discard empty levels
+    dat_var <- dat %>% 
+      mutate(across(all_of(var), factor)) %>% 
+      filter(!is.na(.data[[var]]), !is.na(ucr39)) %>% 
+      droplevels()
 
-# ---- new safety checks -----------------------------------------------
-if (nlevels(dat_var[[var]])  < 2) return(NULL)   # focal var has 1 level
-if (nlevels(dat_var$ucr39)   < 2) return(NULL)   # ucr39 has 1 level
-# ----------------------------------------------------------------------
-
-fmla <- as.formula(paste("is_garbage ~", var, "+ ucr39"))
-mod  <- glm(fmla, family = binomial("logit"), data = dat_var)
+    if (nlevels(dat_var[[var]]) < 2 || nlevels(dat_var$ucr39) < 2)
+      return(NULL)
 
     fmla <- as.formula(paste("is_garbage ~", var, "+ ucr39"))
+    mod  <- glm(fmla, family = binomial("logit"), data = dat_var)
 
-    mod <- glm(fmla, family = binomial("logit"), data = dat_var)
-
-    coefs <- broom::tidy(mod, conf.int = FALSE, exponentiate = FALSE) %>%   # no CI here
-  filter(term != "(Intercept)", !startsWith(term, "ucr39")) %>%
-  # 95 % Wald CIs
-  mutate(
-    conf.low  = estimate - 1.96 * std.error,
-    conf.high = estimate + 1.96 * std.error
-  ) %>%
-  # exponentiate ORs
-  mutate(
-    estimate  = exp(estimate),
-    conf.low  = exp(conf.low),
-    conf.high = exp(conf.high),
-    year      = yr,
-    variable  = var
-  )
+    broom::tidy(mod, conf.int = FALSE, exponentiate = FALSE) %>% 
+      filter(term != "(Intercept)", !startsWith(term, "ucr39")) %>% 
+      mutate(
+        conf.low  = estimate - 1.96 * std.error,
+        conf.high = estimate + 1.96 * std.error,
+        estimate  = exp(estimate),
+        conf.low  = exp(conf.low),
+        conf.high = exp(conf.high),
+        year      = yr,
+        variable  = var
+      )
   }))
 }
 
 # ── 3.  Run every file/year ──────────────────────────────────────────────────
 file_paths <- list.files(parquet_dir, "\\.parquet$", full.names = TRUE)
+coefs      <- map_dfr(file_paths, fit_year)
 
-coefs <- map_dfr(file_paths, fit_year)
-
-out_dir <- "/Users/amymann/Documents/Data Quality Project/data_quality/figures/"
+out_dir <- "/Users/amymann/Documents/Data Quality Project/data_quality/figures"
+dir.create(out_dir, recursive = TRUE, showWarnings = FALSE)
 write_csv(coefs, file.path(out_dir, "garbage_logit_coefs.csv"))
 
 # ── 5.  Prep for plotting ────────────────────────────────────────────────────
 plot_dat <- coefs %>% 
-  # pull out the level name (term includes the variable prefix)
   mutate(level = str_remove(term, paste0("^", variable))) %>% 
-  # nice ordering inside legends
   arrange(variable, level, year)
 
-# ── 6.  Plot: odds-ratio trajectories, facetted by variable ──────────────────
+# ── 6.  Plot: odds-ratio trajectories ────────────────────────────────────────
 or_plot <- ggplot(plot_dat,
                   aes(x = year, y = estimate,
                       colour = level, fill = level, group = level)) +
@@ -364,13 +357,12 @@ or_plot <- ggplot(plot_dat,
 ggsave(file.path(out_dir, "odds_ratios_over_time.png"),
        or_plot, width = 8, height = 4.5, dpi = 320)
 
-# ── 7.  (Optional) quick look in RStudio viewer ──────────────────────────────
+# ── 7.  Quick look if you’re in RStudio ──────────────────────────────────────
 print(or_plot)
 
 ```
-Calculate timeseries for no secondary factor, number of secondary factors and autopsy for place of death, education level, race, and marital status
+Controlling for cause of death, plots odds ratios for race and educational attainment.
 ```{r}
-# ── 0.  Packages ─────────────────────────────────────────────────────────────
 library(arrow)
 library(dplyr)
 library(stringr)
@@ -380,95 +372,97 @@ library(broom)
 library(ggplot2)
 library(tidyr)
 
-# ── 1.  Paths & constants ────────────────────────────────────────────────────
+## ─────────────────────────── 1 · Paths & constants ────────────────────────
 parquet_dir <- "/Users/amymann/Documents/Data Quality Project/data/parquet"
+
 garbage_path <- file.path(
   "/Users/amymann/Documents/Data Quality Project",
   "data_quality/cause-codes",
-  "gbd_garbage_codes_with_descr.csv"
+  "gbd_garbage_codes_with_descr_no_overdose.csv"
 )
 
-years_wanted   <- 1999:2023
-vars_interest  <- c("placdth", "sex", "marstat")
+years_wanted  <- 1999:2023
+
+## focal predictors — *just* race and education -----------------------------
+vars_interest <- c("race5", "educ2003")   # <-- change made here
 
 base_cols  <- c("year", "ucr39", "ucod", "ranum", vars_interest)
-extra_cols <- "educ2003"  # only present 2003+
+extra_cols <- "educ2003"                  # present only ≥2003
 
-sec_cols   <- c(paste0("record_",  1:20),
-                paste0("econdp_",  1:20),
-                paste0("econds_",  1:20))
-keep_cols  <- c(base_cols, extra_cols, sec_cols)
+## all 60 potential secondary-factor columns
+sec_cols <- c(paste0("record_",  1:20),
+              paste0("econdp_",  1:20),
+              paste0("econds_",  1:20))
+
+keep_cols <- c(base_cols, extra_cols, sec_cols)
 
 garbage_lu <- read_csv(garbage_path, show_col_types = FALSE) %>%
   transmute(
     icd10        = str_to_upper(icd10),
     gbd_severity = as.integer(gbd_severity)
   )
-garbage_map <- with(garbage_lu, setNames(gbd_severity, icd10))
 
-clean_icd <- function(x) str_remove_all(str_to_upper(x), "[^A-Z0-9\\.]")
+clean_icd <- function(x)
+  str_remove_all(str_to_upper(x), "[^A-Z0-9\\.]")
 
-# ── 2.  Fit *separate* models for each variable in one file/year ────────────
+## ── helper: identify “good” T-codes (vectorised) ───────────────────────────
+is_good_T <- function(x) {
+  x <- toupper(x)
+  startsWith(x, "T") & substr(x, 4L, 4L) != "9"
+}
+
+## ───────────────────── 2 · Fit models for one file/year ────────────────────
 fit_year <- function(path) {
-  dat <- read_parquet(path, col_select = any_of(keep_cols)) %>% as.data.frame()
 
+  ## read only available columns
+  dat <- read_parquet(path, col_select = any_of(keep_cols)) |>
+         as.data.frame()
+
+  ## which secondary columns exist here?
   sec_cols_here <- intersect(sec_cols, names(dat))
 
+  ## ── garbage flag with overdose rule ──────────────────────────────────────
   dat <- dat %>%
     mutate(
-      year         = as.integer(year),
-      icd10        = clean_icd(ucod),
-      gbd_severity = garbage_map[icd10]
-    )
+      year  = as.integer(year),
+      icd10 = clean_icd(ucod)
+    ) %>%
+    left_join(garbage_lu, by = "icd10")
 
-  if (length(sec_cols_here)) {
-    is_good_T <- function(x) {
-      x <- toupper(x)
-      startsWith(x, "T") & substr(x, 4L, 4L) != "9"
-    }
-    has_specific_T <- Reduce(`|`, lapply(dat[sec_cols_here], is_good_T))
-  } else {
-    has_specific_T <- rep(FALSE, nrow(dat))
-  }
+  ## TRUE if any secondary column contains a specific T-code
+  has_specific_T <-
+    if (length(sec_cols_here))
+      Reduce(`|`, lapply(dat[sec_cols_here], is_good_T))
+    else
+      rep(FALSE, nrow(dat))
 
   dat <- dat %>%
     mutate(
       is_garbage = case_when(
-        is.na(gbd_severity)                      ~ FALSE,
-        !str_starts(icd10, "X")                  ~ TRUE,
-        str_starts(icd10, "X") & !has_specific_T ~ TRUE,
-        TRUE                                     ~ FALSE
+        is.na(gbd_severity)                      ~ FALSE,           # not on list
+        !str_starts(icd10, "X")                  ~ TRUE,            # garbage, not X
+        str_starts(icd10, "X") & !has_specific_T ~ TRUE,            # X with no good T
+        TRUE                                     ~ FALSE            # X with good T
       ),
       ucr39 = factor(ucr39)
     ) %>%
-    select(-ucod, -icd10, -gbd_severity, -all_of(sec_cols_here))
+    select(-ucod, -icd10, -gbd_severity, -any_of(sec_cols_here))
 
   yr <- unique(dat$year)
   stopifnot(length(yr) == 1)
 
+  ## ── separate models for each focal variable ──────────────────────────────
   bind_rows(lapply(vars_interest, function(var) {
-    if (!(var %in% names(dat))) {
-      message(sprintf("❌ %s %d: '%s' not found in dataset → skipping",
-                      basename(path), yr, var))
-      return(NULL)
-    }
+
+    if (!(var %in% names(dat))) return(NULL)
 
     dat_var <- dat %>%
       mutate(across(all_of(var), factor)) %>%
       filter(!is.na(.data[[var]]), !is.na(ucr39)) %>%
       droplevels()
 
-    if (nlevels(dat_var[[var]]) < 2) {
-      message(sprintf("⚠️  %s %d: '%s' has <2 levels after filtering → skipping",
-                      basename(path), yr, var))
+    if (nlevels(dat_var[[var]]) < 2 || nlevels(dat_var$ucr39) < 2)
       return(NULL)
-    }
-
-    if (nlevels(dat_var$ucr39) < 2) {
-      message(sprintf("⚠️  %s %d: ucr39 has <2 levels after filtering → skipping",
-                      basename(path), yr))
-      return(NULL)
-    }
 
     fmla <- as.formula(paste("is_garbage ~", var, "+ ucr39"))
     mod  <- glm(fmla, family = binomial("logit"), data = dat_var)
@@ -487,20 +481,20 @@ fit_year <- function(path) {
   }))
 }
 
-# ── 3.  Run every file/year ──────────────────────────────────────────────────
+## ───────────────────── 3 · Run across all parquet files ────────────────────
 file_paths <- list.files(parquet_dir, "\\.parquet$", full.names = TRUE)
-coefs <- map_dfr(file_paths, fit_year)
+coefs      <- map_dfr(file_paths, fit_year)
 
-# ── 4.  Save coefficients ────────────────────────────────────────────────────
-out_dir <- "/Users/amymann/Documents/Data Quality Project/data_quality/figures/"
+out_dir <- "/Users/amymann/Documents/Data Quality Project/data_quality/figures"
+dir.create(out_dir, recursive = TRUE, showWarnings = FALSE)
 write_csv(coefs, file.path(out_dir, "garbage_logit_coefs.csv"))
 
-# ── 5.  Prep for plotting ────────────────────────────────────────────────────
+## ────────────────────────── 4 · Prepare for plotting ───────────────────────
 plot_dat <- coefs %>%
   mutate(level = str_remove(term, paste0("^", variable))) %>%
   arrange(variable, level, year)
 
-# ── 6.  Plot: odds-ratio trajectories, facetted by variable ──────────────────
+## ─────────────────────────── 5 · Plot trajectories ─────────────────────────
 or_plot <- ggplot(plot_dat,
                   aes(x = year, y = estimate,
                       colour = level, fill = level, group = level)) +
@@ -519,9 +513,209 @@ or_plot <- ggplot(plot_dat,
 ggsave(file.path(out_dir, "odds_ratios_over_time.png"),
        or_plot, width = 8, height = 4.5, dpi = 320)
 
-# ── 7.  (Optional) quick look in RStudio viewer ──────────────────────────────
+## ───────────────────────────── 6 · Quick look ──────────────────────────────
 print(or_plot)
 
+```
+Calculate timeseries for no secondary factor, number of secondary factors and autopsy for place of death, education level, race, and marital status
+```{r}
+# ── 1b.  Pull only what we need ───────────────────────────────────────────────
+vars_interest <- c("placdth", "sex", "marstat", "race5")
+base_cols  <- c("year", "ucr39", "ucod", "ranum", vars_interest)
+extra_cols <- "educ2003"  # if you still need it elsewhere
+# ── 2c.  Summarize no‐secondary and avg‐secondary only ────────────────────────
+fit_secondary_models <- function(path) {
+  # 1. Read & preprocess
+  dat <- read_parquet(path, col_select = any_of(c(base_cols, extra_cols))) %>%
+    mutate(
+      year          = as.integer(year),
+      ranum         = as.integer(ranum),
+      no_secondary  = as.integer(ranum <= 1),
+      num_secondary = pmax(ranum - 1, 0),
+      ucr39         = factor(ucr39)
+    ) %>%
+    filter(year %in% years_wanted) %>%
+    select(year, all_of(vars_interest), no_secondary, num_secondary, ucr39)
+
+  yr <- unique(dat$year)
+  stopifnot(length(yr) == 1)
+  print(paste("Processing year:", yr))
+
+  # 2. Per-variable aggregation + fast GLMs with Wald CIs
+  bind_rows(lapply(vars_interest, function(var) {
+    if (!(var %in% names(dat))) return(NULL)
+
+    d <- dat %>%
+      filter(!is.na(.data[[var]])) %>%
+      mutate(across(all_of(var), factor)) %>%
+      droplevels()
+    if (nlevels(d[[var]]) < 2) return(NULL)
+
+    # 2a) logistic on aggregated counts
+    d_log <- d %>%
+      group_by(.data[[var]], ucr39) %>%
+      summarise(
+        success = sum(no_secondary),
+        failure = n() - sum(no_secondary),
+        .groups = "drop"
+      )
+    f1 <- as.formula(paste0("cbind(success, failure) ~ ", var, " + ucr39"))
+    m1 <- glm(f1, data = d_log, family = binomial())
+
+    t1 <- broom::tidy(m1, conf.int = FALSE, exponentiate = FALSE) %>%
+      filter(term != "(Intercept)", !grepl("^ucr39", term)) %>%
+      transmute(
+        year      = yr,
+        variable  = var,
+        outcome   = "No secondary factor (OR)",
+        level     = sub(paste0("^", var), "", term),
+        estimate  = exp(estimate),
+        standard_error = std.error,
+        conf.low  = exp(estimate - 1.96 * std.error),
+        conf.high = exp(estimate + 1.96 * std.error)
+      )
+
+    # 2b) Poisson on aggregated sums with offset
+    d_pois <- d %>%
+      group_by(.data[[var]], ucr39) %>%
+      summarise(
+        count    = sum(num_secondary),
+        exposure = n(),
+        .groups  = "drop"
+      )
+    f2 <- as.formula(paste0("count ~ ", var, " + ucr39 + offset(log(exposure))"))
+    m2 <- glm(f2, data = d_pois, family = poisson())
+
+    t2 <- broom::tidy(m2, conf.int = FALSE, exponentiate = FALSE) %>%
+      filter(term != "(Intercept)", !grepl("^ucr39", term)) %>%
+      transmute(
+        year      = yr,
+        variable  = var,
+        outcome   = "Secondary count (IRR)",
+        level     = sub(paste0("^", var), "", term),
+        estimate  = exp(estimate),
+        conf.low  = exp(estimate - 1.96 * std.error),
+        conf.high = exp(estimate + 1.96 * std.error)
+      )
+
+    bind_rows(t1, t2)
+  }))
+}
+
+# ── 3d.  Run over all years and collect coefficients ─────────────────────────
+file_paths <- list.files(parquet_dir, "\\.parquet$", full.names = TRUE)
+sec_coefs  <- map_dfr(file_paths, fit_secondary_models)
+
+# And to peek in R:
+print(sec_coefs)
+
+```
+Calculate timeseries for no secondary factor, number of secondary factors by education level
+```{r}
+# ── Education-only coefficient calculation (2003–2023) ──────────────────────
+
+library(stringr)
+library(purrr)
+library(dplyr)
+
+fit_secondary_models_educ2003 <- function(path) {
+  # 1) read only the columns we need and coerce year to integer
+  dat0 <- read_parquet(path,
+                       col_select = any_of(c("year", "ranum", "ucr39", "educ2003"))) %>%
+    mutate(
+      year = as.integer(year)
+    )
+
+  # 2) grab the single year, bail if something’s off
+  yr <- unique(dat0$year)
+  stopifnot(length(yr) == 1)
+  message("Processing year: ", yr)
+
+  # 3) skip files with no educ2003 column
+  if (!"educ2003" %in% names(dat0)) {
+    message("  → skipping: no educ2003 column")
+    return(NULL)
+  }
+
+  # 4) filter to our years and non‐missing educ2003
+  dat <- dat0 %>%
+    filter(year %in% years_wanted, !is.na(educ2003)) %>%
+    mutate(
+      ranum         = as.integer(ranum),
+      no_secondary  = as.integer(ranum <= 1),
+      num_secondary = pmax(ranum - 1, 0),
+      ucr39         = factor(ucr39),
+      educ2003      = factor(educ2003)
+    ) %>%
+    select(year, educ2003, no_secondary, num_secondary, ucr39)
+
+  # 5) if only one level, nothing to do
+  if (nlevels(dat$educ2003) < 2) {
+    message("  → skipping: only one educ2003 level")
+    return(NULL)
+  }
+
+  # 6a) logistic (OR) on aggregated counts
+  d_log <- dat %>%
+    group_by(educ2003, ucr39) %>%
+    summarise(
+      success = sum(no_secondary),
+      failure = n() - sum(no_secondary),
+      .groups = "drop"
+    )
+  m1 <- glm(cbind(success, failure) ~ educ2003 + ucr39,
+            data   = d_log,
+            family = binomial())
+  t1 <- broom::tidy(m1, conf.int = FALSE) %>%
+    filter(!grepl("^(Intercept|ucr39)", term)) %>%
+    transmute(
+      year      = yr,
+      variable  = "educ2003",
+      outcome   = "No secondary factor (OR)",
+      level     = sub("^educ2003", "", term),
+      estimate  = exp(estimate),
+      conf.low  = exp(estimate - 1.96 * std.error),
+      conf.high = exp(estimate + 1.96 * std.error)
+    )
+
+  # 6b) Poisson (IRR) on aggregated sums
+  d_pois <- dat %>%
+    group_by(educ2003, ucr39) %>%
+    summarise(
+      count    = sum(num_secondary),
+      exposure = n(),
+      .groups  = "drop"
+    )
+  m2 <- glm(count ~ educ2003 + ucr39 + offset(log(exposure)),
+            data   = d_pois,
+            family = poisson())
+  t2 <- broom::tidy(m2, conf.int = FALSE) %>%
+    filter(!grepl("^(Intercept|ucr39)", term)) %>%
+    transmute(
+      year      = yr,
+      variable  = "educ2003",
+      outcome   = "Secondary count (IRR)",
+      level     = sub("^educ2003", "", term),
+      estimate  = exp(estimate),
+      conf.low  = exp(estimate - 1.96 * std.error),
+      conf.high = exp(estimate + 1.96 * std.error)
+    )
+
+  # 7) return combined results (year is now always integer)
+  bind_rows(t1, t2)
+}
+
+
+years_wanted <- 2006:2023
+file_paths_edu <- list.files(parquet_dir, "\\.parquet$", full.names = TRUE) %>%
+  keep(~ as.integer(str_extract(basename(.), "\\d{4}")) %in% years_wanted)
+
+# Run the (efficient) model‐fitting function over those files
+sec_coefs <- map_dfr(file_paths_edu, fit_secondary_models_educ2003) %>%
+  filter(variable == "educ2003")
+
+# Inspect the first few rows
+head(sec_coefs)
 
 ```
 Plot the time series
