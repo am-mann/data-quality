@@ -95,7 +95,7 @@ summarise_file <- function(path) {
     ) %>% 
     filter(
       !is.na(level),
-      !(variable == "educ2003" & year < 2003)
+      !(variable == "educ2003" & year < 2006)
     ) %>% 
     group_by(year, variable, level) %>% 
     summarise(
@@ -778,9 +778,8 @@ for (var in variables) {
   message("Saved figure for variable: ", var)
 }
 ```
-Check to make sure garbage coding is correct
+Check to make sure garbage coding is correct.
 ```{r}
-## ── Manual check: any X-category on the garbage list (first 250, 2021) ──────
 library(arrow)
 library(dplyr)
 library(stringr)
@@ -843,6 +842,353 @@ x_garbage_check <- x_garbage_any %>%
 print(x_garbage_check)
 write_csv(x_garbage_check, "overdose_classification.csv")
 
+
+```
+
+COMPLETENESS:Create timeseries of completeness of dataset.
+```{r}
+## ── 0 · Setup ───────────────────────────────────────────────────────────────
+library(arrow)      # v15+
+library(dplyr)
+library(tidyr)
+library(ggplot2)
+library(purrr)
+library(furrr)      # parallel map
+library(future)     # for plan()
+library(scales)
+
+plan(multisession)                      # use all local cores
+
+fig_dir     <- "/Users/amymann/Documents/Data Quality Project/data_quality/figures"
+parquet_dir <- "/Users/amymann/Documents/Data Quality Project/data/parquet"
+dir.create(fig_dir, recursive = TRUE, showWarnings = FALSE)
+
+years_wanted  <- 1999:2023
+vars_to_check <- c("marstat", "weekday", "placdth", "age", "educ", "mandeath")
+
+unknown_codes <- list(
+  marstat   = c("9", "U", "Unknown", "", NA),
+  weekday   = c("9", "U", "", NA, "Unknown"),
+  placdth   = c("9", "U", "Unknown", "", NA),
+  age       = c("999", "9999", NA, "Unknown"),
+  educ      = c("9", "U", "", NA),
+  mandeath  = c("9", "U", "", NA, "Unknown"))
+
+## Fast vectorised helper -----------------------------------------------------
+is_known_fast <- function(x, unk) !(x %in% unk | is.na(x))
+
+## Harmonise education --------------------------------------------------------
+harmonise_educ <- function(dat) {
+  edu_cols <- c("educ", "educ89", "educ1989", "educ2003")
+  missing  <- setdiff(edu_cols, names(dat))
+  if (length(missing) > 0) dat[missing] <- NA_character_
+
+  dat %>%
+    mutate(across(any_of(edu_cols), as.character)) %>%
+    mutate(
+      educ = case_when(
+        year >= 1999 & year <= 2002 ~ educ,
+        year >= 2003 & year <= 2005 ~ educ89,
+        year == 2006                ~ educ1989,
+        year >= 2007                ~ educ2003,
+        TRUE                        ~ NA_character_
+      )
+    )
+}
+
+## ── 1 · Year-by-year processing (vectorised) ────────────────────────────────
+process_year <- function(yr) {
+
+  ## • Locate & read ----------------------------------------------------------
+  file <- file.path(parquet_dir, sprintf("mort%04d.parquet", yr))
+  if (!file.exists(file)) {
+    message("⚠️  Missing file for ", yr, " – skipping")
+    return(NULL)
+  }
+
+  cols_needed <- c("ucr39", vars_to_check,
+                   "educ89", "educ1989", "educ2003")
+
+  dat <- arrow::read_parquet(file, col_select = any_of(cols_needed)) %>%
+    mutate(year = yr,
+           ucr39 = as.character(ucr39)) %>%
+    harmonise_educ() %>%
+    mutate(across(all_of(vars_to_check), as.character)) %>%
+    collect()
+
+  ## • 1a  Time-series summary -----------------------------------------------
+  ts <- map_dfr(vars_to_check, function(v) {
+    known_vec <- is_known_fast(dat[[v]], unknown_codes[[v]])
+    tibble(
+      year         = yr,
+      variable     = v,
+      total_n      = length(known_vec),
+      known_TRUE   = sum(known_vec),
+      known_FALSE  = length(known_vec) - known_TRUE,
+      prop_known   = known_TRUE / total_n,
+      summary_type = "ts"
+    )
+  })
+
+  ## • 1b  By-UCR39 summary ---------------------------------------------------
+  ucr <- map_dfr(vars_to_check, function(v) {
+    unk <- unknown_codes[[v]]
+
+    dat %>%
+      transmute(
+        ucr39,
+        variable  = v,
+        is_known  = !(!!rlang::sym(v) %in% unk | is.na(!!rlang::sym(v)))
+      ) %>%
+      group_by(ucr39, variable) %>%
+      summarise(
+        total_n    = n(),
+        known_TRUE = sum(is_known),
+        .groups    = "drop"
+      ) %>%
+      mutate(
+        known_FALSE = total_n - known_TRUE,
+        prop_known  = known_TRUE / total_n,
+        summary_type = "ucr",
+        year         = yr
+      )
+  })
+
+  bind_rows(ts, ucr)
+}
+
+## ── 2 · Run all years in parallel ───────────────────────────────────────────
+yearly_summaries <- future_map_dfr(
+  years_wanted,
+  process_year,
+  .progress = TRUE,
+  .options  = furrr_options(packages = c("dplyr", "tibble", "rlang"))
+)
+
+plan(sequential)   # reset default
+
+## ── 3 · Split, plot, export (unchanged) ─────────────────────────────────────
+ts_completeness <- yearly_summaries %>%
+  filter(summary_type == "ts") %>%
+  select(-summary_type)
+
+by_ucr39 <- yearly_summaries %>%
+  filter(summary_type == "ucr") %>%
+  select(-summary_type, -year) %>%
+  arrange(variable, desc(prop_known))
+
+prop_known_plot <- ggplot(ts_completeness,
+                          aes(year, prop_known, colour = variable)) +
+  geom_line(linewidth = 0.8) +
+  scale_y_continuous(labels = percent, limits = c(0, 1)) +
+  scale_colour_brewer(palette = "Dark2") +
+  labs(title = "Completeness of certificate fields, 1999–2023",
+       x = NULL, y = "Proportion known", colour = "Field")
+
+ggsave(file.path(fig_dir, "completeness_over_time.png"),
+       prop_known_plot, width = 8, height = 5, dpi = 300)
+
+write.csv(by_ucr39,
+          file.path(fig_dir, "completeness_by_ucr39.csv"),
+          row.names = FALSE)
+
+message("✅ Done: summaries written and plot saved.")
+
+```
+
+LIGHT GARBAGE: Calcualtes proportion of light garbage and runs demographic analysis.
+```{r}
+###############################################################################
+##  0 · Packages & parallel plan  #############################################
+###############################################################################
+library(arrow)      # v15+ for Arrow dplyr
+library(dplyr)
+library(purrr)
+library(readr)
+library(tidyr)      # only for pivot_longer later (not used inside Arrow)
+library(ggplot2)
+library(broom)
+library(future)
+library(furrr)
+library(scales)
+
+plan(multisession, workers = 2)     # adjust or use plan(sequential)
+
+###############################################################################
+##  1 · Paths & constants #####################################################
+###############################################################################
+parquet_dir <- "/Users/amymann/Documents/Data Quality Project/data/parquet"
+fig_dir     <- "/Users/amymann/Documents/Data Quality Project/data_quality/figures"
+dir.create(fig_dir, recursive = TRUE, showWarnings = FALSE)
+
+years_wanted <- 1999:2023
+EDUC_START   <- 2006                       # first year with educ2003
+
+needed_cols <- c("year", "ucr39", "sex", "race5", "marstat",
+                 "placdth", "ucod", "ranum")
+extra_cols  <- "educ2003"
+sec_cols    <- paste0("record_",  2:20)     # secondary-cause columns
+keep_cols   <- c(needed_cols, extra_cols, sec_cols)
+
+###############################################################################
+##  2 · Light-garbage lookup ##################################################
+###############################################################################
+light_codes_path <- "/Users/amymann/Documents/Data Quality Project/data_quality/light_garbage_codes.csv"
+light_garbage    <- read_csv(light_codes_path, col_names = FALSE,
+                             show_col_types = FALSE)$X1
+
+###############################################################################
+##  3 · Summarise one file (per-file Arrow) ###################################
+###############################################################################
+summarise_file <- function(path) {
+
+  ds <- open_dataset(path, format = "parquet") |>
+        select(any_of(keep_cols))
+
+  # ensure missing columns exist
+  if (!"educ2003" %in% names(ds))
+    ds <- ds |> mutate(educ2003 = NA_character_)
+
+  ds <- ds |>
+        mutate(
+          year     = arrow::cast(year,     arrow::int32()),
+          ranum    = arrow::cast(ranum,    arrow::int64()),
+          ucr39    = arrow::cast(ucr39,    arrow::string()),
+          educ2003 = arrow::cast(educ2003, arrow::string())
+        )
+
+  # helper: one secondary column → long form
+  longify_one <- function(col) {
+    ds |>
+      transmute(
+        year, ranum, ucr39, sex, race5, marstat, placdth, educ2003,
+        icd10 = arrow::cast(!!sym(col), arrow::string())
+      )
+  }
+
+  present_cols <- intersect(sec_cols, names(ds))
+
+  purrr::map(present_cols, longify_one) |>
+    purrr::reduce(union_all) |>
+    filter(!(icd10 == "" | icd10 == "nan"))|> 
+    mutate(is_light = icd10 %in% light_garbage) |>
+    group_by(year, ranum, ucr39, sex, race5, marstat,
+             placdth, educ2003) |>
+    summarise(
+      total_contrib = n(),
+      light_contrib = sum(is_light),
+      .groups = "drop"
+    ) |>
+    filter(total_contrib > 0) |>               # exclude 0-contrib certs
+    collect() |>
+    mutate(year = as.integer(year))
+}
+
+###############################################################################
+##  4 · Read & summarise all years ###########################################
+###############################################################################
+parquet_files <- list.files(parquet_dir, "\\.parquet$", full.names = TRUE)
+
+cert_level_all <- future_map_dfr(
+  parquet_files, summarise_file,
+  .options  = furrr_options(seed = TRUE),
+  .progress = TRUE
+)
+
+###############################################################################
+##  5 · Collapse to demographic counts ########################################
+###############################################################################
+all_years <- cert_level_all |>
+  group_by(year, ucr39, sex, race5, marstat, placdth, educ2003) |>
+  summarise(
+    light = sum(light_contrib),
+    total = sum(total_contrib),
+    .groups = "drop"
+  ) |>
+  mutate(prop_light = light / total)
+
+###############################################################################
+##  6 · Time-series plot ######################################################
+###############################################################################
+ts_light <- all_years |>
+  group_by(year) |>
+  summarise(prop = sum(light) / sum(total), .groups = "drop")
+
+p <- ggplot(ts_light, aes(year, prop)) +
+        geom_line() +
+        scale_y_continuous(labels = percent) +
+        labs(title = "% of contributing causes that are light garbage",
+             x = NULL, y = "Average % per death")
+print(p)
+ggsave(file.path(fig_dir, "prop_light_timeseries.png"),
+       plot = p, width = 7, height = 4, dpi = 300)
+
+###############################################################################
+##  7 · Demographic breakdowns ###############################################
+###############################################################################
+demo_vars <- c("sex", "race5", "marstat", "placdth", "educ2003")
+
+ts_demo <- all_years |>
+  pivot_longer(cols = all_of(demo_vars),
+               names_to  = "variable",
+               values_to = "level") |>
+  group_by(year, variable, level) |>
+  summarise(prop_light = sum(light) / sum(total), .groups = "drop") |>
+  filter(!(variable == "educ2003" & year < EDUC_START))
+
+walk(demo_vars, \(v) {
+  g <- ggplot(filter(ts_demo, variable == v),
+              aes(year, prop_light, colour = level)) +
+         geom_line() +
+         scale_y_continuous(labels = percent) +
+         labs(title  = paste("% light garbage by", v),
+              x = NULL, y = "% light garbage", colour = v)
+  ggsave(file.path(fig_dir, paste0("prop_light_by_", v, ".png")),
+         plot = g, width = 7, height = 4, dpi = 300)
+})
+
+###############################################################################
+##  8 · Logistic regression (counts)  — overflow-safe #########################
+###############################################################################
+pooled <- all_years %>%
+  filter(year >= EDUC_START, total > 0) %>%   # 1. keep only informative rows
+  mutate(weight = as.numeric(total))          # 2. 64-bit double weights
+
+# Convert predictors to factors if they are character
+factor_vars <- c("sex","race5","marstat","placdth","educ2003","ucr39")
+pooled[factor_vars] <- lapply(pooled[factor_vars], factor)
+
+glm_fit <- glm(
+  cbind(light, total - light) ~
+    sex + race5 + marstat + placdth + educ2003 + ucr39,
+  family  = binomial(),
+  data    = pooled,
+  weights = weight                           # use the double version
+)
+
+pooled_or <- broom::tidy(glm_fit, conf.int = TRUE, exponentiate = TRUE)
+write_csv(pooled_or, file.path(fig_dir, "pooled_light_or.csv"))
+
+## ---- separate model per year ----------------------------------------------
+fit_year <- function(yr) {
+  df  <- filter(all_years, year == yr)
+  fml <- if (yr < EDUC_START) {
+           cbind(light, total - light) ~ sex + race5 + marstat + placdth + ucr39
+         } else {
+           cbind(light, total - light) ~ sex + race5 + marstat + placdth + educ2003 + ucr39
+         }
+  tidy(glm(fml, family = binomial(), data = df, weights = total),
+       conf.int = TRUE, exponentiate = TRUE) |>
+    mutate(year = yr, term = as.character(term))
+}
+
+ors_by_year <- map_dfr(years_wanted, fit_year)
+write_csv(ors_by_year, file.path(fig_dir, "light_or_by_year.csv"))
+
+###############################################################################
+##  9 · Done ##################################################################
+###############################################################################
+message("All outputs saved to: ", fig_dir)
 
 ```
 
