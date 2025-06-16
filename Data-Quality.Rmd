@@ -1075,7 +1075,7 @@ summarise_file <- function(path) {
     group_by(year, ranum, ucr39, sex, race5, marstat,
              placdth, educ2003) |>
     summarise(
-      total_contrib = n(),
+      total_detail = n(),
       light_contrib = sum(is_light),
       .groups = "drop"
     ) |>
@@ -1189,6 +1189,145 @@ write_csv(ors_by_year, file.path(fig_dir, "light_or_by_year.csv"))
 ##  9 · Done ##################################################################
 ###############################################################################
 message("All outputs saved to: ", fig_dir)
+
+```
+
+ACCIDENTS DETAIL: Calculates level of death metric in accident deaths
+```{r}
+library(arrow)
+library(dplyr)
+library(purrr)
+library(tidyr)
+library(stringr)
+
+parquet_dir    <- "/Users/amymann/Documents/Data Quality Project/data/parquet"
+detail_csv     <- "/Users/amymann/Documents/Data Quality Project/data_quality/accident-detail-codes.csv"
+years_wanted   <- 1999:2023
+secondary_cols <- paste0("record_", 1:20)                 # add econd*/econds* if needed
+
+extra_cols     <- c("year", "sex", "race5", "educ2003", "marstat", "placdth")
+clean_icd <- function(x) {
+  x |> toupper() |>                # upper-case
+    str_remove_all("[^A-Z0-9]") |> # keep only A–Z / 0–9
+    str_trim()                     # drop leading/trailing spaces
+}
+
+ds0      <- open_dataset(parquet_dir, unify_schemas = FALSE)  # cheap scan
+sch_base <- ds0$schema
+
+stringify <- function(.schema, cols) {
+  new_fields <- purrr::map(cols, \(c) arrow::field(c, arrow::utf8()))
+  arrow::schema(!!!c(.schema$fields[!(names(.schema) %in% cols)], new_fields))
+}
+
+sec_cols_on_disk <- intersect(secondary_cols, names(sch_base))
+my_schema <- stringify(sch_base, sec_cols_on_disk)
+
+mort_ds <- open_dataset(parquet_dir, schema = my_schema)
+
+dict_raw <- readr::read_csv(detail_csv, na = c("", "NA"), show_col_types = FALSE)
+
+detail_dict <- dict_raw |>
+  mutate(across(starts_with("detail"), clean_icd),
+         ucod = clean_icd(ucod)) |>
+  pivot_longer(starts_with("detail"),
+               names_to  = NULL,
+               values_to = "detail") |>
+  filter(detail != "" & !is.na(detail), detail != ucod) |>
+  distinct(ucod, detail)
+
+accident_ucods <- unique(detail_dict$ucod)
+
+accident_flagged <- map_dfr(years_wanted, function(yr) {
+  message("Year ", yr, " …")
+
+  ## columns that actually exist for this year's Parquet files
+  extra_on_disk <- intersect(extra_cols, names(mort_ds))
+
+  df <- mort_ds |>
+    filter(year == yr) |>
+    select(all_of(c("ucod", extra_on_disk, sec_cols_on_disk))) |>
+    collect() |>
+    mutate(row_id = row_number(),                   # ← unique per certificate
+           across(all_of(sec_cols_on_disk), clean_icd),
+           ucod = clean_icd(ucod)) |>
+    filter(ucod %in% accident_ucods)
+
+  missing <- setdiff(extra_cols, names(df))
+  if (length(missing) > 0) {
+    df[missing] <- NA_character_
+  }
+
+  sec_long <- df |>
+    pivot_longer(all_of(sec_cols_on_disk),
+                 names_to = NULL,
+                 values_to = "detail") |>
+    filter(detail != "")
+
+  hits <- sec_long |>
+    inner_join(detail_dict, by = c("ucod", "detail")) |>
+    distinct(row_id) |>
+    mutate(has_detail = "Y")
+
+  df |>
+    left_join(hits, by = "row_id") |>
+    mutate(has_detail = replace_na(has_detail, "N"))
+})
+```
+
+```{r}
+library(dplyr)
+library(tidyr)
+library(stringr)
+
+# ── 0 · Helper (same cleaner you used in the pipeline) ----------------------
+clean_icd <- function(x) {
+  x |>
+    toupper() |>
+    str_remove_all("[^A-Z0-9\\.]") |>
+    str_trim()
+}
+
+# ── 1 · Grab the 519 067-th row *by position* ------------------------------
+row_idx <- 519067                        # ← the index you care about
+
+row_one <- accident_flagged %>%          # the final tibble you already built
+  slice(row_idx)                         # pick that row by position
+
+if (nrow(row_one) == 0) {
+  stop("Row ", row_idx, " does not exist in accident_flagged.")
+}
+
+# ── 2 · Pivot its secondary codes into long form ---------------------------
+sec_one <- row_one %>%
+  pivot_longer(starts_with("record_"),      # record_1 … record_20
+               names_to  = "slot",
+               values_to = "detail") %>%
+  mutate(
+    ucod   = clean_icd(ucod),
+    detail = clean_icd(detail)
+  ) %>%
+  filter(detail != "", detail != ucod)      # drop blanks + self-matches
+
+# ── 3 · See what hit the dictionary ----------------------------------------
+matches <- sec_one %>%
+  inner_join(detail_dict, by = c("ucod", "detail"))
+
+cat("Row index:", row_idx,
+    "\nCertificate UCOD:", row_one$ucod,
+    "\nHas_detail flag:", row_one$has_detail, "\n\n")
+
+if (nrow(matches) == 0) {
+  cat("→   No secondary code in this certificate appears in the dictionary.\n",
+      "    The flag should be **N**.  If it shows **Y**, check your\n",
+      "    joins or earlier mutate steps for an unintended self-match.\n")
+} else {
+  cat("→   The following secondary code(s) triggered **Y**:\n\n")
+  print(matches %>% select(slot, detail), row.names = FALSE)
+}
+
+cat("\nFull list of secondary codes in this certificate:\n")
+print(sec_one %>% select(slot, detail), row.names = FALSE)
 
 ```
 
