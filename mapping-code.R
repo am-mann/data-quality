@@ -1,0 +1,211 @@
+suppressPackageStartupMessages({
+  library(arrow); library(dplyr); library(purrr)
+  library(stringr); library(binom); library(readr); library(tidyr)
+})
+
+# ————————————————————————————————————————————————————————————————
+# 0. Paths & settings
+# ————————————————————————————————————————————————————————————————
+parquet_dir    <- "/Users/amymann/Documents/Data Quality Project/data/parquet"
+dictionary_dir <- "/Users/amymann/Documents/Data Quality Project/data_quality/cause-codes"
+out_csv        <- "county_year_quality_metrics.csv"
+
+county_var     <- "cnty_fips"
+years_wanted   <- NULL
+key_demo_vars  <- c("marstat", "placdth", "edummc2003", "mandeath")
+
+# ————————————————————————————————————————————————————————————————
+# 1. Dictionaries & helpers
+# ————————————————————————————————————————————————————————————————
+lookup_garbage <- read_csv(file.path(dictionary_dir,
+                                     "gbd_garbage_codes_without_overdose.csv"),
+                           show_col_types = FALSE) %>%
+  transmute(icd10 = str_to_upper(icd10),
+            gbd_severity = as.integer(gbd_severity)) %>%
+  distinct(icd10, .keep_all = TRUE)
+
+light_garbage <- read_csv(file.path(dictionary_dir, "light_garbage_codes.csv"),
+                          show_col_types = FALSE)$icd10 %>%
+  str_to_upper()
+
+overdose_path <- file.path(dictionary_dir, "overdose_ucod.csv")
+overdose_ucod <- if (file.exists(overdose_path)) {
+  read_csv(overdose_path, show_col_types = FALSE)$icd10 %>% str_to_upper()
+} else {
+  c(sprintf("X%02d", 40:44), sprintf("X%02d", 60:64), "X85", paste0("Y", 10:14))
+}
+
+# Accident-detail lookup
+accident_detail_lookup <- read_csv(
+  file.path(dictionary_dir, "accident-detail-codes-v2.csv"),
+  show_col_types = FALSE
+) %>%
+  pivot_longer(starts_with("detail_"),
+               values_to = "detail",
+               values_drop_na = TRUE) %>%
+  transmute(ucod = str_to_upper(str_trim(ucod)),
+            detail = str_to_upper(str_trim(detail))) %>%
+  filter(detail != "") %>%
+  distinct()
+
+accident_ucod_set   <- unique(accident_detail_lookup$ucod)
+accident_detail_set <- unique(accident_detail_lookup$detail)
+
+# Helpers
+clean_icd <- function(x) str_remove_all(str_to_upper(x), "[^A-Z0-9\\.]")
+
+num <- function(x) if (bit64::is.integer64(x)) as.numeric(x) else as.numeric(x)
+
+wilson_lower <- function(k, n) {
+  k <- num(k); n <- num(n)
+  out <- rep(NA_real_, length(k))
+  ok  <- n > 0 & !is.na(n)
+  if (any(ok)) out[ok] <- binom.confint(k[ok], n[ok], methods = "wilson")$lower
+  out
+}
+wilson_upper <- function(k, n) {
+  k <- num(k); n <- num(n)
+  out <- rep(NA_real_, length(k))
+  ok  <- n > 0 & !is.na(n)
+  if (any(ok)) out[ok] <- binom.confint(k[ok], n[ok], methods = "wilson")$upper
+  out
+}
+
+sec_cols <- paste0("record_", 1:20)
+invalid  <- c("", "9", "U", "Unknown")
+
+# ————————————————————————————————————————————————————————————————
+# 2. Summarise a single Parquet file
+# ————————————————————————————————————————————————————————————————
+summarise_year_file <- function(file) {
+  this_year <- as.integer(str_extract(basename(file), "\\d{4}"))
+  message("→ Processing ", this_year)
+  
+  cols_needed <- c("ranum", "ucod", county_var, key_demo_vars, sec_cols)
+  ds <- read_parquet(
+    file,
+    as_data_frame = TRUE,
+    col_select = intersect(cols_needed,
+                           names(read_parquet(file, as_data_frame = FALSE)$schema))
+  )
+  
+  # Hygiene
+  for (v in setdiff(key_demo_vars, names(ds))) ds[[v]] <- NA_character_
+  if (!county_var %in% names(ds)) {
+    set.seed(this_year)
+    ds[[county_var]] <- sprintf("%05d", sample(10001:56045, nrow(ds), TRUE))
+  }
+  if (!"year" %in% names(ds)) ds$year <- this_year
+  if (this_year < 2004) ds$educ2003 <- NA_character_
+  demo_vars <- if (this_year < 2004) setdiff(key_demo_vars, "educ2003") else key_demo_vars
+  
+  # 2.3 Cert-level flags
+  cert_tbl <- ds %>%
+    mutate(icd10 = clean_icd(ucod)) %>%
+    left_join(lookup_garbage, by = "icd10") %>%
+    mutate(needs_detail = icd10 %in% accident_ucod_set)
+  
+  # 2.4 Contributing causes
+  present_sec <- intersect(sec_cols, names(ds))
+  contrib_long <- if (length(present_sec) == 0) {
+    tibble(ranum = integer(), detail = character())
+  } else {
+    present_sec %>%
+      map(~ ds %>% select(ranum, detail = !!sym(.x))) %>%
+      list_rbind() %>%
+      mutate(detail = clean_icd(detail)) %>%
+      filter(detail %in% accident_detail_set)
+  }
+  
+  # Counts of total/light contributors
+  contrib_counts <- contrib_long %>%
+    mutate(is_light = detail %in% light_garbage) %>%
+    group_by(ranum) %>%
+    summarise(total_contrib = n(),
+              light_contrib = sum(is_light), .groups = "drop")
+  
+  cert_tbl <- cert_tbl %>%
+    left_join(contrib_counts, by = "ranum") %>%
+    mutate(
+      total_contrib = replace_na(total_contrib, 0L),
+      light_contrib = replace_na(light_contrib, 0L),
+      is_overdose   = icd10 %in% overdose_ucod,
+      is_garbage    = case_when(
+        is.na(gbd_severity)                          ~ FALSE,
+        !str_starts(icd10, "X")                      ~ TRUE,
+        str_starts(icd10, "X") & light_contrib == 0  ~ TRUE,
+        TRUE                                         ~ FALSE
+      )
+    )
+  
+  # 2.5 Required-detail flag (safe)
+  need_tbl <- cert_tbl %>%
+    filter(needs_detail) %>%
+    distinct(ranum, icd10)
+  
+  required_hits <- contrib_long %>%
+    inner_join(need_tbl, by = "ranum", relationship = "many-to-many") %>%
+    semi_join(accident_detail_lookup, by = c("icd10" = "ucod", "detail")) %>%
+    distinct(ranum) %>%
+    mutate(has_required_detail = TRUE)
+  
+  cert_tbl <- cert_tbl %>%
+    left_join(required_hits, by = "ranum") %>%
+    mutate(has_required_detail = replace_na(has_required_detail, FALSE))
+  
+  # 2.6 Completeness
+  valid_mat <- !as.matrix(cert_tbl[demo_vars]) %in% invalid &
+    !is.na(as.matrix(cert_tbl[demo_vars]))
+  cert_tbl$complete_all <- rowSums(valid_mat) == length(demo_vars)
+  
+  # 2.7 Collapse
+  cert_tbl %>%
+    group_by(.data[[county_var]], year) %>%
+    summarise(
+      n_cert               = n(),
+      garb_k               = sum(is_garbage),
+      prop_garbage         = garb_k / n_cert,
+      prop_garbage_low     = wilson_lower(garb_k, n_cert),
+      prop_garbage_hi      = wilson_upper(garb_k, n_cert),
+      contrib_n            = sum(total_contrib),
+      light_k              = sum(light_contrib),
+      prop_light           = ifelse(contrib_n > 0, light_k / contrib_n, NA_real_),
+      prop_light_low       = wilson_lower(light_k, contrib_n),
+      prop_light_hi        = wilson_upper(light_k, contrib_n),
+      acc_n                = sum(needs_detail),
+      acc_miss_k           = sum(needs_detail & !has_required_detail),
+      pct_acc_miss         = ifelse(acc_n > 0, acc_miss_k / acc_n, NA_real_),
+      pct_acc_miss_low     = wilson_lower(acc_miss_k, acc_n),
+      pct_acc_miss_hi      = wilson_upper(acc_miss_k, acc_n),
+      complete_k           = sum(complete_all),
+      prop_complete_all    = complete_k / n_cert,
+      prop_complete_all_low = wilson_lower(complete_k, n_cert),
+      prop_complete_all_hi  = wilson_upper(complete_k, n_cert),
+      across(all_of(key_demo_vars),
+             ~ {
+               valid <- !(.x %in% invalid | is.na(.x))
+               if (all(is.na(.x))) NA_integer_ else sum(valid)
+             },
+             .names = "{.col}_comp_k"),
+      .groups = "drop"
+    )
+}
+
+# ————————————————————————————————————————————————————————————————
+# 3. Run across all years
+# ————————————————————————————————————————————————————————————————
+parquet_files <- list.files(parquet_dir, "\\.parquet$", full.names = TRUE)
+if (!is.null(years_wanted)) {
+  parquet_files <- parquet_files[
+    str_extract(basename(parquet_files), "\\d{4}") %in% years_wanted
+  ]
+}
+county_year_all <- map_dfr(parquet_files, summarise_year_file)
+
+# ————————————————————————————————————————————————————————————————
+# 4. Write output
+# ————————————————————————————————————————————————————————————————
+write_csv(county_year_all, out_csv)
+message("✔ County-year quality metrics written")
+
+
