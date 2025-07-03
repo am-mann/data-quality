@@ -4,7 +4,6 @@ output: html_notebook
 ---
 
 Load data and packages
-
 ```{r}
 library(arrow)
 library(tidyverse)
@@ -21,12 +20,11 @@ library(patchwork)
 library(broom)
 
 year <- "2020"
-garbage <- read_csv("/Users/amymann/Documents/Data Quality Project/data_quality/cause-codes/gbd_garbage_codes_with_descr.csv")
+garbage <- read_csv("/Users/amymann/Documents/Data Quality Project/data_quality/cause-codes/gbd_garbage_codes_with_descr_no_overdose.csv")
 path = "/Users/amymann/Documents/Data Quality Project/data/parquet/"
 setwd(path)
-mortality <- read_parquet("mort2020.parquet")
+mortality <- read_parquet("mort2017.parquet")
 ```
-
 Calculate fraction of ‘garbage’ codes in the data, their GBD severity profiles, and the top garbage codes.
 ```{r}
 clean_icd <- function(x) {
@@ -73,7 +71,6 @@ top_garbage_10
 write_csv(top_garbage_10, paste("top_garbage_10", year, ".csv", sep=""))
 
 ```
-
 Demographic breakdown the proportion of garbage codes.
 ```{r}
 clean_icd <- function(x) {
@@ -171,7 +168,6 @@ p <- ggplot(by_age_grp_labeled,
                                    hjust = 1))
 ggsave("garbage_by_age52.png", plot = p, width = 10, height = 6, dpi = 300)
 ```
-
 Determine the number of different codes used. ***Note that this method might have a bug in it.
 ```{r}
 library(readr); library(dplyr); library(stringr);library(tidyverse)
@@ -203,7 +199,6 @@ level_of_detail
 
 
 ```
-
 Frequency of autopsies with demographic breakdown.
 ```{r}
 
@@ -355,8 +350,7 @@ write_csv(autopsy_breakdown,
           "autopsy_breakdown_demographics_2016.csv")  
 print(head(autopsy_breakdown, 20))
 ```
-
-Is the male/female difference in autopsy simply a result of men dying younger? The rest of it could be the way men are dying? 
+Is the male/female difference in autopsy simply a result of men dying younger? The rest of it could be the way men are dying?
 ```{r}
 reg_dat <- mort %>%                               # keep only Yes/No rows
   filter(autopsy_flag %in% c("Yes", "No")) %>%
@@ -385,7 +379,6 @@ bind_rows(
   tidy(m3) %>% mutate(model = "Age only")
 )
 ```
-
 What is the effect of marital status on autopsy after controlling for age?
 ```{r}
 reg_dat <- mortality %>%
@@ -411,7 +404,6 @@ bind_rows(
   tidy(m2) %>% mutate(model = "Marital status + age"),
 )
 ```
-
 Make plots for autopsy data!
 ```{r}
 
@@ -493,7 +485,6 @@ ggsave("autopsy_by_cause113_2016.png",
        cause_plot, width = 16, height = 6, dpi = 300)
 
 ```
-
 Average number of secondary factors listed 
 ```{r}
 demo_vars <- c("race", "racer5", "educ2003", "sex", "ager52", "marstat", "ucr39")
@@ -566,7 +557,6 @@ age_plot <- ggplot(age_means,
 ggsave("mean_extra_factors_by_age.png", age_plot, width = 8, height = 4, dpi = 300)
 
 ```
-
 Frequency of 0 secondary factors listed 
 ```{r}
 demo_vars <- c("racer3", "racer5", "educ2003", "sex", "ager52", "marstat")
@@ -628,7 +618,6 @@ ggplot(age_prop_zero, aes(factor(.data[[age_var]]), prop_zero)) +
 ggsave("prop_no_secondary_by_age.png", width = 8, height = 4, dpi = 300)
 
 ```
-
 Can sex/marital differences in frequency of 0 secondary factors listed be explained by cause of death and/or age of death?
 ```{r}
 mort <- mortality %>% 
@@ -645,7 +634,6 @@ m1 <- lm(has_extra_factor ~ marstat + as.numeric(ager52), data = mort)
 
 summary(m1)          
 ```
-
 How correlated are the various indices (no secondary factors, average number of secondary factors, proportion of garbage codes, and whether or not their is an autopsy)?
 ```{r}
 library(dplyr)
@@ -772,15 +760,579 @@ results$correlation_matrix
 results$pairwise_table
 
 ```
-
-Occupation data
+Stand alone chunk. Uses occupation data as a proxy for income
 ```{r}
+##############################################################################
+#  BUILD OCCUPATION-INCOME LOOK-UP  (CensusOcc  ↔  Median Earnings, 2021 ACS)
+##############################################################################
+
+library(readxl)      # read_xls(), read_xlsx()
+library(dplyr)       # wrangling verbs
+library(stringr)     # string helpers
+library(fuzzyjoin)   # stringdist_left_join()
+library(scales)      # percent() for the match-rate message
+
+# ── 0.  File paths (edit to suit) ───────────────────────────────────────────
+cross_path <- "/Users/amymann/Documents/Data Quality Project/data/income/2010-occ-codes-with-crosswalk-from-2002-2011.xls"
+earn_path  <- "/Users/amymann/Documents/Data Quality Project/data/income/median-earnings-2020.xlsx"
+
+# ── 1.  Helper to normalise occupation titles --------------------------------
+clean_title <- function(x) {
+  x |>
+    str_to_lower() |>
+    str_replace_all("[^a-z0-9]+", " ") |>
+    str_squish()
+}
+
+# ── 2.  CROSS-WALK  (2010 CensusOcc ↔ title) ---------------------------------
+cross_raw <- read_xls(
+  cross_path,
+  col_names = FALSE,
+  skip      = 13             # first 13 rows are boilerplate
+)
+
+names(cross_raw)[2:3] <- c("occupation_title", "census_occ")
+
+cross <- cross_raw %>% 
+  transmute(
+    census_occ = census_occ,
+    occ_title  = clean_title(occupation_title)
+  ) %>% 
+  filter(!is.na(census_occ)) %>% 
+  ungroup()
+
+# ── 3.  ACS MEDIAN-EARNINGS TABLE  (title ↔ median_income) -------------------
+earnings_raw <- read_xlsx(earn_path, skip = 2)   # first 7 rows are notes
+
+title_col <- names(earnings_raw)[11]   # column 2 holds the occupation title text
+med_col   <- names(earnings_raw)[19]  # column 12 holds median annual earnings
+
+earnings <- earnings_raw %>% 
+  transmute(
+    occ_title     = clean_title(.data[[title_col]]),
+    median_income = as.numeric(.data[[med_col]])
+  ) %>% 
+  filter(!is.na(median_income)) %>% 
+  ungroup()
+
+# ── 4.  FUZZY JOIN  (attach CensusOcc to each ACS row) --------------------
+occ_income <- stringdist_left_join(
+                earnings, cross,
+                by           = c(occ_title = "occ_title"),
+                method       = "jw",
+                max_dist     = 0.05,
+                distance_col = "dist"
+              ) %>% 
+              # the join creates occ_title.x (ACS) and occ_title.y (cross-walk)
+              rename(
+                occ_title     = occ_title.x,   # keep the ACS wording
+                occ_title_cw  = occ_title.y    # cross-walk version (optional)
+              ) %>% 
+              select(census_occ, median_income, occ_title, dist) %>% 
+              filter(!is.na(census_occ))       # drop unmatched rows
+
+# Quick check: how many matched?
+cat("Matched", nrow(occ_income), "of", nrow(earnings),
+    "ACS rows (", scales::percent(nrow(occ_income)/nrow(earnings), 0.1), ").\n")
+
+##############################################################################
+# 5.  SUMMARISE THE MORTALITY PARQUET  (deaths & garbage counts by CensusOcc)
+##############################################################################
+
+library(arrow)        # open_dataset()
+library(dplyr)        # (already loaded)
+
+mort_occ <- mortality_flagged |>
+  select(CensusOcc, gbd_severity) |>
+  mutate(garbage = !is.na(gbd_severity)) |>
+  group_by(CensusOcc) |>
+  summarise(
+    deaths_total   = n(),
+    deaths_garbage = sum(garbage),
+    .groups        = "drop"
+  ) |>
+  collect() |>
+  rename(census_occ = CensusOcc)       # to match occ_income
+
+##############################################################################
+# 6.  MERGE WITH INCOME  +  COMPUTE GARBAGE-CODE RATES BY INCOME QUARTILE
+##############################################################################
+
+# -- 6·1  Left-join: keep only occupations that have an income figure --------
+mort_inc <- mort_occ |>
+  left_join(occ_income, by = "census_occ") |>
+  filter(!is.na(median_income))
+
+# -- 6·2  Create income strata (quartiles) -----------------------------------
+mort_inc <- mort_inc |>
+  mutate(income_q = ntile(median_income, 8))   # 1 = lowest earnings quartile
+
+# -- 6·3  Aggregate to quartile level ----------------------------------------
+garbage_by_income <- mort_inc |>
+  group_by(income_q) |>
+  summarise(
+    deaths_total   = sum(deaths_total),
+    deaths_garbage = sum(deaths_garbage),
+    prop_garbage   = deaths_garbage / deaths_total,
+    median_income  = median(median_income),
+    .groups        = "drop"
+  )
+
+print(garbage_by_income)
+write_csv(garbage_by_income, "garbage_by_income.csv")
+
+##############################################################################
+# 7.  OPTIONAL: VISUALISE  (loess curve + points) ----------------------------
+##############################################################################
+
+library(ggplot2)
+
+p <- ggplot(garbage_by_income,
+       aes(x = median_income, y = prop_garbage)) +
+  geom_point(size = 3) +
+  geom_smooth(method = "loess", se = FALSE) +
+  scale_x_continuous(labels = scales::dollar_format()) +
+  scale_y_continuous(labels = scales::percent_format(accuracy = 1)) +
+  labs(title = "Proportion of garbage-coded deaths by occupation-income 20-tile",
+       x = "Median annual earnings (ACS 2021)",
+       y = "Garbage-code share of deaths") +
+  theme_minimal(base_size = 12)
+
+##############################################################################
+# 8.  RESULT
+# ----------------------------------------------------------------------------
+# • `garbage_by_income`   → tidy table (one row per income quartile)
+# • Plot                 → visual check of monotonicity / gradient
+##############################################################################
+
+ggsave("garbage_by_income.png", plot = p, width = 10, height = 6, dpi = 300)
 
 ```
+Plot regression coeffients controlling for ucr39
+```{r}
+##############################################################################
+# PREREQS (run the earlier blocks first)
+#   • occ_income      -- created in the fuzzy-join step
+#   • mort_inc        -- table with census_occ + income_q (quartile 1–4)
+#   • ds              -- open_dataset() handle to your parquet mortality files
+##############################################################################
 
-Add a new chunk by clicking the *Insert Chunk* button on the toolbar or by pressing *Cmd+Option+I*.
+library(arrow)
+library(dplyr)
+library(broom)
+library(stringr)
 
-When you save the notebook, an HTML file containing the code and output will be saved alongside it (click the *Preview* button or press *Cmd+Shift+K* to preview the HTML file). 
+# -- 6·2  Create income strata (quartiles) -----------------------------------
+mort_inc <- mort_occ |>
+  left_join(occ_income, by = "census_occ") |>
+  filter(!is.na(median_income))
 
-The preview shows you a rendered HTML copy of the contents of the editor. Consequently, unlike *Knit*, *Preview* does not run any R code chunks. Instead, the output of the chunk when it was last run in the editor is displayed.
+# ── A.  Build a tiny lookup: CensusOcc → income_q --------------------------
+occ_quartile_lookup <- mort_inc %>% 
+  distinct(census_occ, median_income)
+
+# ── B.  Aggregate Arrow data to (income_q × ucr39) counts ------------------
+mortality_flagged <- mortality_flagged %>%
+  mutate(
+    is_garbage = !is.na(gbd_severity)        # TRUE if it's garbage-coded
+  ) %>%
+  left_join(
+    occ_quartile_lookup,                     # add income quartile
+    by = c("CensusOcc" = "census_occ")
+  )
+
+reg_ds <-mortality_flagged %>% filter(!is.na(median_income))
+
+mod <- lm(is_garbage ~ median_income + ucr39,
+  data    = reg_ds)
+summary(mod)
+# ── D.  Extract & print the income-quartile coefficients --------------------
+coef_tab <- tidy(mod, conf.int = TRUE) %>% 
+  filter(str_detect(term, "median_income")) %>% 
+  mutate(
+    OR      = exp(estimate),
+    OR_low  = exp(conf.low),
+    OR_high = exp(conf.high)
+  ) %>% 
+  select(term, OR, OR_low, OR_high, p.value)
+
+print(coef_tab, digits = 3)
+
+```
+Find most common contributing causes.
+```{r}
+library(tidyr)
+library(dplyr)
+library(stringr)
+library(readr)
+
+## --- helper ---------------------------------------------------------------
+clean_icd <- function(x) {
+  x <- toupper(x)
+  x <- str_remove_all(x, "[^A-Z0-9\\.]")   # keep A-Z, 0-9, dots
+  str_trim(x)
+}
+
+## --- 1 · reshape mortality to long form -----------------------------------
+#   • one row per contributing cause per death
+contrib_long <- mortality %>%
+  select(ranum, starts_with("record_")) %>%        # keep just the record_* cols
+  pivot_longer(
+    cols      = record_2:record_20,                # ignore record_1 (usually ucod)
+    names_to  = "position",
+    values_to = "icd_raw",
+    values_drop_na = TRUE
+  ) %>%
+  mutate(
+    icd10 = clean_icd(icd_raw)
+  ) %>%
+  filter(icd10 != "")                              # drop empty strings if any
+
+## --- 2 · flag garbage codes ------------------------------------------------
+contrib_flagged <- contrib_long %>%
+  left_join(
+    garbage %>%
+      select(icd10, description, gbd_severity) %>%
+      distinct(icd10, .keep_all = TRUE),   # <- NEW: make the key unique
+    by = "icd10"
+  )
+
+## --- 3 · summary statistics -----------------------------------------------
+garbage_fraction <- mean(!is.na(contrib_flagged$gbd_severity))
+
+contrib_garbage <- contrib_flagged %>%
+  filter(!is.na(gbd_severity))
+
+severity_counts <- contrib_garbage %>%
+  count(gbd_severity, name = "deaths")
+
+total_garbage_deaths <- sum(severity_counts$deaths)
+
+severity_profile <- severity_counts %>%
+  mutate(share = deaths / total_garbage_deaths)
+
+top_garbage <- contrib_garbage %>%
+  count(icd10, description, gbd_severity, sort = TRUE, name = "deaths") %>%
+  mutate(share = deaths / sum(deaths))
+
+top_garbage_10 <- slice_head(top_garbage, n = 30)
+
+## --- 4 · output ------------------------------------------------------------
+garbage_fraction
+severity_profile
+top_garbage_10
+
+write_csv(top_garbage_10,
+          paste0("top_contrib_garbage_10_", year, ".csv"))
+```
+For each underlying condition, the expected number of secondary factors and the expected secondary factors as well as the deviation from this. 
+```{r}                          
+library(tidyr)
+dat21 <- mortality %>%
+  mutate(
+    ucod   = clean_icd(ucod),
+    ucod3  = str_sub(ucod, 1, 3)                 # 3-digit underlying cause
+  ) %>%
+  rowwise() %>%
+  ungroup()
+
+# ── 2 · Average # secondary factors per ucod3 ───────────────────────────────
+expected_sec <- dat21 %>%
+  group_by(ucod3) %>%
+  summarise(avg_sec = mean(as.numeric(ranum)-1), .groups = "drop")
+
+sec_cols <- c(paste0("record_",  2:20))
+# ── 3 · Top-3 most common contributing causes per ucod3 ─────────────────────
+common_contrib <- dat21 %>%
+  select(ucod3, all_of(sec_cols)) %>%
+  pivot_longer(cols = all_of(sec_cols),
+               values_to = "icd10",
+               names_to  = NULL) %>%             # position not needed
+  filter(!is.na(icd10) & icd10 != "") %>%
+  count(ucod3, icd10, sort = TRUE) %>%
+  group_by(ucod3) %>%
+  slice_max(order_by = n, n = 3, with_ties = FALSE) %>%
+  summarise(most_common = paste(icd10, collapse = ", "),
+            .groups = "drop")
+
+# ── 4 · Combine expectations & add the “detail” column ──────────────────────
+## put this just above the join so it’s in scope
+lookup_avg  <- setNames(expected_sec$avg_sec,  expected_sec$ucod3)
+lookup_comm <- setNames(common_contrib$most_common, common_contrib$ucod3)
+
+dat21_enhanced <- dat21 %>%
+  ## one cheap vectorised lookup instead of two joins
+  mutate(
+    avg_sec     = lookup_avg[ucod3],
+    most_common = lookup_comm[ucod3],
+    ## use the real count column — num_sec — not ranum
+    detail      = as.numeric(ranum) - avg_sec
+  )
+```
+Finding the common contributing causes for each ucod.
+```{r}
+# ── 0 · Packages (unchanged) ────────────────────────────────────────────────
+library(dplyr)
+library(tidyr)   # pivot_longer()
+library(readr)   # write_csv()
+
+# sec_cols already defined: paste0("record_", 1:20)
+
+all_sec_by_ucod <- dat21 %>% 
+  select(ucod, all_of(sec_cols)) %>% 
+  mutate(across(all_of(sec_cols), ~ na_if(.x, ""))) %>%        # blanks → NA
+  pivot_longer(
+    all_of(sec_cols),
+    values_to      = "icd10",
+    values_drop_na = TRUE,
+    names_to       = NULL
+  ) %>% 
+  count(ucod, icd10, sort = TRUE) %>%                          # freq per ucod/icd10
+  group_by(ucod) %>% 
+  arrange(desc(n), icd10, .by_group = TRUE) %>%                # highest-freq first
+  slice(-(1:2)) %>%                                            # <-- drop top two
+  summarise(
+    all_secondary = paste(icd10, collapse = ", "),             # remaining codes
+    .groups       = "drop"
+  )
+
+write_csv(all_sec_by_ucod, "all_secondary_by_ucod_2021.csv")
+
+
+# ── 2 · Frequency of each ucod in 2021 (unchanged) ─────────────────────────
+top_ucods <- dat21 %>%
+  count(ucod, sort = TRUE)
+
+write_csv(top_ucods, "top_ucod_counts_2021.csv")
+# (Optional) quick peek in the console
+# head(top_ucods, 20)
+```
+Finding the common contributing causes for UCR113.
+```{r}
+library(dplyr)
+library(tidyr)
+library(readr)
+
+# `sec_cols` and `dat21` should already exist and include:
+#   • ucr130   – 130-group underlying-cause code
+#   • num_sec  – per-row count of contributing factors
+
+# ── 1 · Median # secondary factors per UCR130 ───────────────────────────────
+ucr113_median <- dat21 %>%
+  group_by(ucr113) %>%
+  summarise(median_sec = median(as.integer(ranum)), .groups = "drop") %>%
+  mutate(k = pmax(1L, 2L * as.integer(round(median_sec))))   # 2n (min 1)
+
+# ── 2 · Frequency of each contributing code within each UCR130  ────────────
+sec_counts <- dat21 %>%
+  select(ucr113, all_of(sec_cols)) %>%
+  mutate(across(all_of(sec_cols), ~ na_if(.x, ""))) %>%       # blanks → NA
+  pivot_longer(all_of(sec_cols),
+               values_to      = "icd10",
+               values_drop_na = TRUE,
+               names_to       = NULL) %>%
+  count(ucr113, icd10, name = "freq")
+
+# ── 3 · For each UCR113, keep the top-k = 2·median(icd) codes ──────────────
+top_sec_by_ucr113 <- sec_counts %>%
+  left_join(ucr113_median, by = "ucr113") %>%   # brings in k
+  group_by(ucr113) %>%
+  arrange(desc(freq)) %>%                       # highest first
+  filter(row_number() <= first(k)) %>%          # keep top-k rows in each group
+  summarise(
+    median_sec = first(median_sec),
+    top_sec    = paste(icd10, collapse = ", "),
+    .groups    = "drop"
+  )
+# ── 4 · Optional: write to CSV ──────────────────────────────────────────────
+write_csv(top_sec_by_ucr113, "top_2n_secondary_by_ucr113_2021.csv")
+```
+Break down level of detail by demographics. (note that the metric still needs trouble shooting and to understand exactly what is going. figure out what the most common secondary codes are by ucod)
+```{r}
+# ── 0 · Packages ───────────────────────────────────────────────────────────
+library(dplyr)
+library(broom)  
+
+# ── 1 · Minimal recode / factor preparation ───────────────────────────────
+# • Rac e & education already exist in your file under these names.
+# • ucr39 is a numeric or character with 39 collapsed categories.
+dat21_reg <- dat21_enhanced %>%
+  mutate(
+    educ2003 = factor(educ2003, exclude = NULL),
+    race5    = factor(racer5,    exclude = NULL),
+    marstat  = factor(marstat,  exclude = NULL),
+    ucr39    = factor(ucr39,    exclude = NULL)
+  ) %>%
+  # option: drop incomplete cases (speeds model fit)
+  filter(!is.na(detail), !is.na(ucr39))
+
+# ── 2 · Single model with all three demographics ──────────────────────────
+mod_all <- lm(
+  detail ~ educ2003 + race5 + marstat + ucr39,
+  data = dat21_reg
+)
+
+coef_all <- tidy(mod_all, conf.int = TRUE)
+# head(coef_all)  # inspect if desired
+
+# ── 3 · Separate models (one focal var at a time) ─────────────────────────
+mod_educ <- lm(detail ~ educ2003 + ucr39, data = dat21_reg)
+mod_race <- lm(detail ~ race5    + ucr39, data = dat21_reg)
+mod_mar  <- lm(detail ~ marstat  + ucr39, data = dat21_reg)
+
+coefs_educ <- tidy(mod_educ, conf.int = TRUE)
+coefs_race <- tidy(mod_race, conf.int = TRUE)
+coefs_mar  <- tidy(mod_mar,  conf.int = TRUE)
+
+# ── 4 · Optional: adjusted means (“least-squares means”) ───────────────────
+# if (requireNamespace("emmeans", quietly = TRUE)) {
+#   emm_educ <- emmeans::emmeans(mod_educ, "educ2003")
+#   emm_race <- emmeans::emmeans(mod_race, "race5")
+#   emm_mar  <- emmeans::emmeans(mod_mar,  "marstat")
+# }
+
+# ── 5 · Quick diagnostic check (optional, interactive) ─────────────────────
+# par(mfrow = c(2, 2))
+# plot(mod_all)        # residuals, QQ-plot, leverage, etc.
+# par(mfrow = c(1, 1))
+
+# ── 6 · Ready for export or further plotting ─────────────────────────────—
+# write_csv(coef_all,   "coefficients_all_demographics.csv")
+# write_csv(coefs_educ, "coefficients_education.csv")
+# write_csv(coefs_race, "coefficients_race.csv")
+# write_csv(coefs_mar,  "coefficients_marstat.csv")
+```
+Sample 250 mortality data with two or more secondary factors.
+```{r}
+library(dplyr)
+library(readr)
+
+sec_cols <- paste0("record_", 1:20)   # already in your script
+
+sample_250 <- dat21 %>%
+  mutate(
+    num_sec = rowSums(across(all_of(sec_cols), ~ !is.na(.x) & .x != ""))
+  ) %>%
+  filter(num_sec >= 2) %>%            # keep rows with ≥ 2 contributing causes
+  slice_sample(n = 250)               # random sample of 250 rows
+
+write_csv(sample_250,
+          "sample_250_two_or_more_secondary_2021.csv")
+```
+Recodes I64 death using rule in July 7th powerpoint slides.
+```{r}
+# ── libraries ─────────────────────────────────────────────────────────────
+library(dplyr)
+library(stringr)
+library(tidyr)
+library(purrr)
+library(tibble)          # for tribble()
+
+# ── 0 · helpers ───────────────────────────────────────────────────────────
+secondary_cols <- paste0("record_", 1:20)   # adapt to your file
+entropy_bits <- function(p) { p <- p[p > 0]; -sum(p * log2(p)) }
+
+# ── 1 · probability look-ups (***replace with estimates later***) ─────────
+prior_vec <- c(I60 = 0.045, I61 = 0.250, I62 = 0.058, I63 = 0.647)
+
+prob_hem_grid <- tribble(
+  ~tier, ~subtype, ~p_I60, ~p_I61, ~p_I62, ~p_I63,
+  "T1", "I60", 0.92, 0.03, 0.02, 0.03,
+  "T1", "I61", 0.05, 0.85, 0.07, 0.03,
+  "T1", "I62", 0.05, 0.20, 0.70, 0.05,
+  "T2", NA,    0.25, 0.45, 0.20, 0.10,
+  "T3", NA,    0.50, 0.20, 0.10, 0.20,
+  "T4", NA,    0.15, 0.40, 0.25, 0.20
+)
+
+prob_isch_grid <- tribble(                 # minimal demo
+  ~pattern,    ~p_I60, ~p_I61, ~p_I62, ~p_I63,
+  "AF+CA+MI",   0.02,   0.05,   0.03,   0.90,
+  "AF+CA",      0.04,   0.06,   0.03,   0.87,
+  "AF+MI",      0.05,   0.07,   0.03,   0.85,
+  "CA+MI",      0.06,   0.08,   0.04,   0.82,
+  "AF",         0.08,   0.10,   0.05,   0.77,
+  "CA",         0.10,   0.12,   0.05,   0.73,
+  "MI",         0.11,   0.14,   0.05,   0.70
+)
+
+# ── 3 · tag evidence  ─────────────────────────────────────────────────────
+i64_cases <- mortality %>% 
+  filter(ucod == "I64") %>%
+  mutate(
+    codes = pmap(across(all_of(secondary_cols)), c) |>   # list-col of vectors
+            map(~ .x[!is.na(.x) & .x != ""])
+  ) %>% 
+  rowwise() %>% 
+  mutate(
+    ## ── haemorrhage tiers ------------------------------------------------
+    bleed_specific = detect(codes, \(z) str_detect(z, "^I6[0-2]"),
+                            .default = NA_character_),
+    bleed_tier = case_when(
+      !is.na(bleed_specific)                               ~ "T1",
+      any(str_detect(codes, "^I69\\.[012]"))               ~ "T2",
+      any(str_detect(codes, "^I67\\.1|^Q28\\.2"))          ~ "T3",
+      any(str_detect(codes, "^D68\\.3|^T45\\.515"))        ~ "T4",
+      TRUE                                                 ~ NA_character_
+    ),
+    rule_T1  = bleed_tier == "T1",
+    rule_hem = bleed_tier %in% c("T2","T3","T4"),
+
+    ## ── ischaemic triad --------------------------------------------------
+    tri_af      = any(str_detect(codes, "^I48")),
+    tri_carotid = any(str_detect(codes, "^I65|^I66")),
+    tri_old_mi  = any(str_detect(codes, "^I25")),
+    triad_pattern = case_when(
+      tri_af & tri_carotid & tri_old_mi ~ "AF+CA+MI",
+      tri_af & tri_carotid              ~ "AF+CA",
+      tri_af & tri_old_mi               ~ "AF+MI",
+      tri_carotid & tri_old_mi          ~ "CA+MI",
+      tri_af                             ~ "AF",
+      tri_carotid                        ~ "CA",
+      tri_old_mi                         ~ "MI",
+      TRUE                               ~ NA_character_
+    ),
+    rule_isch = !is.na(triad_pattern) & !rule_hem & !rule_T1
+  ) %>% 
+  ungroup()
+
+# ── 4 · build probability vector & entropy  ──────────────────────────────
+get_prob_vec <- function(row){
+  if (isTRUE(row$rule_T1)) {                   # ← isTRUE() treats NA as FALSE
+    pv <- prob_hem_grid %>% 
+          filter(tier == "T1",
+                 subtype == substr(row$bleed_specific, 1, 3))
+    return(c(I60 = pv$p_I60, I61 = pv$p_I61,
+             I62 = pv$p_I62, I63 = pv$p_I63))
+  }
+  if (isTRUE(row$rule_hem)) {
+    pv <- prob_hem_grid %>% 
+          filter(tier == row$bleed_tier, is.na(subtype))
+    return(c(I60 = pv$p_I60, I61 = pv$p_I61,
+             I62 = pv$p_I62, I63 = pv$p_I63))
+  }
+  if (isTRUE(row$rule_isch)) {
+    pv <- prob_isch_grid %>% filter(pattern == row$triad_pattern)
+    return(c(I60 = pv$p_I60, I61 = pv$p_I61,
+             I62 = pv$p_I62, I63 = pv$p_I63))
+  }
+  prior_vec
+}
+
+reassigned <- i64_cases %>% 
+  rowwise() %>% 
+  mutate(
+    prob_vec = list(get_prob_vec(cur_data())),
+    H_bits   = entropy_bits(unlist(prob_vec)),
+    new_ucod = case_when(
+      rule_T1                        ~ substr(bleed_specific,1,3),
+      rule_hem  & H_bits < 0.9       ~ paste0("Haem ", bleed_tier," recode"),
+      rule_isch & H_bits < 0.9       ~ "I63 (ischaemic)",
+      TRUE                           ~ "Proportional split"
+    )
+  ) %>% 
+  ungroup()
+
+
+```
 
