@@ -1335,4 +1335,156 @@ reassigned <- i64_cases %>%
 
 
 ```
+Tests three approaches to calculate P(c | x) for I64: 1. linear modelling; 2. Coarse matching; 3. Machine learning
+```{r}
+##############################################################################
+#  Three alternative models to estimate P(c | x) for I64 deaths  ── ORIGINAL
+#  ▸ Model 1 – penalised multinomial logit  (Linear, Foreman style)
+#  ▸ Model 2 – coarsened-exact matching     (Polish 2021 CEM)
+#  ▸ Model 3 – gradient-boosted trees       (non-linear, XGBoost)
+##############################################################################
+library(dplyr);  library(stringr);  library(Matrix)
+library(glmnet); library(cem);      library(xgboost)
+library(caret);  library(tidyr);    library(purrr)
+
+## ---------- 1 · feature engineering  ----------------------------------------
+stroke_codes <- c("I60","I61","I62","I63","I64")
+sec_cols     <- paste0("record_", 2:20)
+
+clean_icd3 <- function(x){
+  x |> str_trim() |> toupper() |> str_remove_all("[^A-Z0-9]") |> str_sub(1,3)
+}
+
+mortality <- mortality |> mutate(mort_id = row_number())
+
+meta <- mortality |> 
+  select(mort_id, ucod, all_of(sec_cols)) |> 
+  mutate(
+    ucod = clean_icd3(ucod),
+    has_AF      = +(rowSums(across(all_of(sec_cols), ~ .x == "I48"), na.rm = TRUE) > 0),
+    has_carotid = +(rowSums(across(all_of(sec_cols), ~ str_detect(.x, "^I6[56]")), na.rm = TRUE) > 0),
+    has_HTN     = +(rowSums(across(all_of(sec_cols), ~ .x == "I10"), na.rm = TRUE) > 0),
+    hem_tier = case_when(
+      rowSums(across(all_of(sec_cols), ~ .x %in% c("I60","I61","I62")), na.rm = TRUE) > 0 ~ "T1",
+      rowSums(across(all_of(sec_cols), ~ str_detect(.x, "^I69\\.[012]")), na.rm = TRUE) > 0 ~ "T2",
+      rowSums(across(all_of(sec_cols), ~ .x == "I67"), na.rm = TRUE) > 0 ~ "T3",
+      TRUE ~ "T4")
+  )
+
+## sparse ICD-feature matrix (top-500 three-char codes) ------------------------
+long_codes <- mortality |> 
+  select(mort_id, all_of(sec_cols)) |> 
+  pivot_longer(cols = all_of(sec_cols), values_to = "code", values_drop_na = TRUE) |>
+  filter(code != "") |> 
+  mutate(code3 = clean_icd3(code))
+
+top_feats <- long_codes |> count(code3, sort = TRUE) |> slice_head(n = 500) |> pull(code3)
+filtered  <- long_codes |> filter(code3 %in% top_feats)
+
+mat_sparse <- sparseMatrix(
+  i = match(filtered$mort_id, meta$mort_id),
+  j = match(filtered$code3 , top_feats),
+  x = 1L,
+  dims = c(nrow(meta), length(top_feats)),
+  dimnames = list(meta$mort_id, top_feats))
+
+X_sparse <- mat_sparse                          # features only
+
+## ---------- 2 · train/test split (on I60-I63) --------------------------------
+idx_all <- which(meta$ucod %in% stroke_codes[1:4])
+train_ids <- createDataPartition(idx_all, p = .75, list = FALSE)
+idx_tr <- idx_all[train_ids];  idx_te <- setdiff(idx_all, idx_tr)
+
+X_train <- X_sparse[idx_tr, ];  y_train <- factor(meta$ucod[idx_tr], stroke_codes[1:4])
+X_test  <- X_sparse[idx_te , ]; y_test  <- factor(meta$ucod[idx_te ], stroke_codes[1:4])
+
+## ---------- 3 · Model 1 — glmnet --------------------------------------------
+set.seed(123)
+fit_glmnet <- cv.glmnet(X_train, y_train,
+                        family = "multinomial",
+                        type.multinomial = "ungrouped",
+                        nfolds = 5)
+
+pred_glmnet <- predict(fit_glmnet, X_test, s = "lambda.min",
+                       type = "response")[,,1]
+
+## ---------- 4 · Model 2 — CEM -----------------------------------------------
+coarse_vars <- c("hem_tier","has_AF","has_carotid","has_HTN")
+
+train_cem <- meta[idx_tr, ] |> 
+  select(mort_id, ucod, all_of(coarse_vars)) |> 
+  mutate(hem_tier = factor(hem_tier, levels = c("T1","T2","T3","T4")))
+
+set.seed(123)
+cem_fit <- cem("ucod", data = train_cem,
+               grouping = list(hem_tier = list(c("T1"),c("T2"),c("T3"),c("T4"))))
+
+strata_vec <- integer(nrow(train_cem))
+for(k in seq_along(cem_fit$strata)) strata_vec[cem_fit$strata[[k]]] <- k
+train_cem <- mutate(train_cem, strataID = strata_vec)
+
+strat_weights <- train_cem |> 
+  count(strataID, ucod) |> 
+  group_by(strataID) |> mutate(w = n/sum(n)) |> ungroup() |> 
+  pivot_wider(names_from = ucod, values_from = w, values_fill = 0)
+
+test_cem <- meta[idx_te, ] |> 
+  select(mort_id, ucod, all_of(coarse_vars)) |> 
+  left_join(train_cem |> select(strataID, all_of(coarse_vars)) |> distinct(),
+            by = coarse_vars) |> 
+  left_join(strat_weights, by = "strataID")
+
+prob_cols <- stroke_codes[1:4]
+for(cl in prob_cols) test_cem[[cl]][is.na(test_cem[[cl]])] <- 0.25   # flat prior
+pred_cem <- as.matrix(test_cem[, prob_cols])
+
+## ---------- 5 · Model 3 — XGBoost (single spec) -----------------------------
+dtrain <- xgb.DMatrix(X_train, label = as.integer(y_train)-1)
+param  <- list(objective = "multi:softprob", num_class = 4,
+               eval_metric = "mlogloss", max_depth = 6, eta = 0.15,
+               subsample = 0.8, colsample_bytree = 0.8)
+set.seed(123)
+fit_xgb <- xgb.train(params = param, data = dtrain,
+                     nrounds = 250, verbose = 0)
+pred_xgb <- predict(fit_xgb, xgb.DMatrix(X_test)) |>
+            matrix(ncol = 4, byrow = TRUE)
+
+## ---------- 6 · Evaluation ---------------------------------------------------
+logloss <- function(pred, truth){
+  eps <- 1e-15; Y <- model.matrix(~ truth-1); pred <- pmax(pmin(pred,1-eps),eps)
+  -mean(rowSums(Y*log(pred)))
+}
+
+loss_tbl <- tibble(
+  model    = c("glmnet","CEM","XGBoost"),
+  log_loss = c(logloss(pred_glmnet, y_test),
+               logloss(pred_cem   , y_test),
+               logloss(pred_xgb   , y_test))
+)
+print(loss_tbl)
+
+best_model <- loss_tbl$model[which.min(loss_tbl$log_loss)]
+cat("Best model:", best_model, "\n")
+
+## ---------- 7 · Apply best model to I64 --------------------------------------
+i64_idx <- which(meta$ucod == "I64"); X_i64 <- X_sparse[i64_idx, ]
+
+probs <- switch(best_model,
+  "glmnet" = predict(fit_glmnet, X_i64, s = "lambda.min", type = "response")[,,1],
+  "CEM"    = {
+     i64_tbl <- meta[i64_idx, ] |> 
+       left_join(train_cem |> select(strataID, all_of(coarse_vars)) |> distinct(),
+                 by = coarse_vars) |>
+       left_join(strat_weights, by = "strataID")
+     for(cl in prob_cols) i64_tbl[[cl]][is.na(i64_tbl[[cl]])] <- 0.25
+     as.matrix(i64_tbl[, prob_cols])
+  },
+  "XGBoost" = predict(fit_xgb, xgb.DMatrix(X_i64)) |>
+              matrix(ncol = 4, byrow = TRUE)
+)
+
+colnames(probs) <- prob_cols
+i64_probs <- bind_cols(mort_id = meta$mort_id[i64_idx], as.data.frame(probs))
+write_csv(i64_probs, "i64_reassigned_probs.csv")
+```
 
