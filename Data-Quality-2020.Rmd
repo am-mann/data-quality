@@ -1335,7 +1335,7 @@ reassigned <- i64_cases %>%
 
 
 ```
-Tests three approaches to calculate P(c | x) for I64: 1. linear modelling; 2. Coarse matching; 3. Machine learning
+Tests three approaches to calculate P(c | x) for I64: 1. linear modelling; 2. Coarse matching; 3. Machine learning - no age sex considered
 ```{r}
 ##############################################################################
 #  Three alternative models to estimate P(c | x) for I64 deaths  ── ORIGINAL
@@ -1346,6 +1346,8 @@ Tests three approaches to calculate P(c | x) for I64: 1. linear modelling; 2. Co
 library(dplyr);  library(stringr);  library(Matrix)
 library(glmnet); library(cem);      library(xgboost)
 library(caret);  library(tidyr);    library(purrr)
+library(keras)  # for neural network
+
 
 ## ---------- 1 · feature engineering  ----------------------------------------
 stroke_codes <- c("I60","I61","I62","I63","I64")
@@ -1449,42 +1451,83 @@ fit_xgb <- xgb.train(params = param, data = dtrain,
 pred_xgb <- predict(fit_xgb, xgb.DMatrix(X_test)) |>
             matrix(ncol = 4, byrow = TRUE)
 
-## ---------- 6 · Evaluation ---------------------------------------------------
+## ---------- 6 · Model 4 — Neural Net (Keras) -------------------------------
+set.seed(123)
+
+# Dense versions of design matrices
+X_train_dense <- as.matrix(X_train)
+X_test_dense  <- as.matrix(X_test)
+
+# One-hot encode y for Keras
+y_train_keras <- to_categorical(as.integer(y_train) - 1, num_classes = 4)
+
+# Build, compile, and train the model
+model_keras <- keras_model_sequential() |>
+  layer_dense(units = 64, activation = "relu", input_shape = ncol(X_train_dense)) |>
+  layer_dropout(rate = 0.30) |>
+  layer_dense(units = 4, activation = "softmax")
+
+model_keras %>% compile(
+  optimizer = "adam",
+  loss      = "categorical_crossentropy",
+  metrics   = "accuracy"
+)
+
+history <- model_keras %>% fit(
+  x               = X_train_dense,
+  y               = y_train_keras,
+  epochs          = 30,
+  batch_size      = 128,
+  validation_split= 0.20,
+  verbose         = 0
+)
+
+# Predict class probabilities
+pred_keras <- model_keras %>% predict(X_test_dense)
+
+## ---------- 7 · Evaluation ---------------------------------------------------
 logloss <- function(pred, truth){
-  eps <- 1e-15; Y <- model.matrix(~ truth-1); pred <- pmax(pmin(pred,1-eps),eps)
-  -mean(rowSums(Y*log(pred)))
+  eps  <- 1e-15
+  Y    <- model.matrix(~ truth - 1)
+  pred <- pmax(pmin(pred, 1-eps), eps)
+  -mean(rowSums(Y * log(pred)))
 }
 
-loss_tbl <- tibble(
-  model    = c("glmnet","CEM","XGBoost"),
-  log_loss = c(logloss(pred_glmnet, y_test),
-               logloss(pred_cem   , y_test),
-               logloss(pred_xgb   , y_test))
-)
-print(loss_tbl)
+ids_cem <- test_cem$mort_id
+y_cem   <- factor(meta$ucod[match(ids_cem, meta$mort_id)], levels = stroke_codes[1:4])
 
+loss_tbl <- tibble(
+  model    = c("glmnet", "CEM", "XGBoost", "NeuralNet"),
+  log_loss = c(logloss(pred_glmnet, y_test),
+               logloss(pred_cem,    y_cem),
+               logloss(pred_xgb,    y_test),
+               logloss(pred_keras,  y_test))      # << uses Keras preds
+)
+
+print(loss_tbl)
 best_model <- loss_tbl$model[which.min(loss_tbl$log_loss)]
 cat("Best model:", best_model, "\n")
 
-## ---------- 7 · Apply best model to I64 --------------------------------------
-i64_idx <- which(meta$ucod == "I64"); X_i64 <- X_sparse[i64_idx, ]
+## ---------- 8 · Apply best model to I64 --------------------------------------
+i64_idx <- which(meta$ucod == "I64")
+X_i64   <- X_sparse[i64_idx, ]
 
 probs <- switch(best_model,
-  "glmnet" = predict(fit_glmnet, X_i64, s = "lambda.min", type = "response")[,,1],
-  "CEM"    = {
-     i64_tbl <- meta[i64_idx, ] |> 
-       left_join(train_cem |> select(strataID, all_of(coarse_vars)) |> distinct(),
-                 by = coarse_vars) |>
-       left_join(strat_weights, by = "strataID")
-     for(cl in prob_cols) i64_tbl[[cl]][is.na(i64_tbl[[cl]])] <- 0.25
-     as.matrix(i64_tbl[, prob_cols])
+  "glmnet"    = predict(fit_glmnet, X_i64, s = "lambda.min", type = "response")[,,1],
+  "CEM"       = {
+    i64_tbl <- meta[i64_idx, ] |>
+      left_join(train_cem |> select(strataID, all_of(coarse_vars)) |> distinct(),
+                by = coarse_vars) |>
+      left_join(strat_weights, by = "strataID")
+    for(cl in prob_cols) i64_tbl[[cl]][is.na(i64_tbl[[cl]])] <- 0.25
+    as.matrix(i64_tbl[, prob_cols])
   },
-  "XGBoost" = predict(fit_xgb, xgb.DMatrix(X_i64)) |>
-              matrix(ncol = 4, byrow = TRUE)
+  "XGBoost"   = predict(fit_xgb, xgb.DMatrix(X_i64)) |>
+                matrix(ncol = 4, byrow = TRUE),
+  "NeuralNet" = model_keras %>% predict(as.matrix(X_i64))     # << Keras
 )
 
 colnames(probs) <- prob_cols
 i64_probs <- bind_cols(mort_id = meta$mort_id[i64_idx], as.data.frame(probs))
 write_csv(i64_probs, "i64_reassigned_probs.csv")
 ```
-
