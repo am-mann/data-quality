@@ -24,8 +24,8 @@ names = ["blank1", "restatus", "blank2", "educ1989", "educ2003", "educflag",
 
 # === 2. Set file paths ===
 
-txt_path = "/Users/amymann/Documents/Data Quality Project/data/txt/VS15MORT.DUSMCPUB"
-parquet_path = "/Users/amymann/Documents/Data Quality Project/data/mortality2015.parquet"
+txt_path = "/Users/amymann/Documents/Data Quality Project/data/txt/VS19MORT.DUSMCPUB_r20210304"
+parquet_path = "/Users/amymann/Documents/Data Quality Project/data/mort2019.parquet"
 
 # === 3. Determine non-blank columns ===
 
