@@ -1,0 +1,1333 @@
+---
+title: "Data Quality Project"
+output: html_notebook
+---
+Load packages and summarize data.
+```{r}
+##############################################################################
+#  Summarise proportion of garbage-coded deaths by demographic variable
+#  (1999–2023, multiple Parquet files)
+##############################################################################
+
+## ── 0 · Packages ────────────────────────────────────────────────────────────
+library(arrow)
+library(dplyr)
+library(tidyr)
+library(purrr)
+library(stringr)
+library(readr)
+library(janitor)
+library(ggplot2)
+
+## ── 1 · Parameters ──────────────────────────────────────────────────────────
+parquet_dir   <- "/Users/amymann/Documents/Data Quality Project/data/parquet"
+garbage_path  <- "/Users/amymann/Documents/Data Quality Project/data_quality/cause-codes/gbd_garbage_codes_with_descr.csv"
+
+needed_cols   <- c("year", "sex", "race5", "marstat",
+                   "placdth", "ucod", "ranum")
+extra_cols    <- "educ2003"                  # only present ≥2003
+
+## the 60 secondary-factor columns you care about
+sec_cols <- c(paste0("record_",  1:20),
+              paste0("econdp_",  1:20),
+              paste0("econds_",  1:20))
+
+keep_cols <- c(needed_cols, extra_cols, sec_cols)
+
+## ── 2 · Garbage-code lookup table ───────────────────────────────────────────
+garbage_lu <- read_csv(garbage_path, show_col_types = FALSE) %>% 
+  transmute(
+    icd10        = str_to_upper(icd10),
+    gbd_severity = as.integer(gbd_severity)
+  )
+
+clean_icd <- function(x) {
+  str_remove_all(str_to_upper(x), "[^A-Z0-9\\.]")
+}
+
+## ── 3 · File-level summariser ───────────────────────────────────────────────
+summarise_file <- function(path) {
+
+  ## read only the columns we need
+  dat <- read_parquet(path, col_select = any_of(keep_cols)) %>% 
+         as.data.frame()
+
+  ## which of the 60 secondary columns actually exist in this file?
+  sec_cols_here <- intersect(sec_cols, names(dat))        # ← FIX
+
+  ## garbage classification
+  dat <- dat %>% 
+    mutate(
+      year  = as.integer(year),
+      icd10 = clean_icd(ucod)
+    ) %>% 
+    left_join(garbage_lu, by = "icd10")
+
+  ## TRUE if *any* secondary factor is a T-code AND not “… .9”
+  if (length(sec_cols_here)) {
+    is_good_T <- function(x) {
+      x <- toupper(x)
+      startsWith(x, "T") & substr(x, 4L, 4L) != "9"
+    }
+    has_specific_T <- Reduce(`|`, lapply(dat[sec_cols_here], is_good_T))
+  } else {
+    has_specific_T <- rep(FALSE, nrow(dat))
+  }
+
+  dat <- dat %>% 
+    mutate(
+      is_garbage = case_when(
+        is.na(gbd_severity)                      ~ FALSE,  # not on garbage list
+        !str_starts(icd10, "X")                  ~ TRUE,   # garbage, not X-code
+        str_starts(icd10, "X") & !has_specific_T ~ TRUE,   # X w/o good T
+        TRUE                                     ~ FALSE   # X w/ good T
+      )
+    )
+
+  ## collapse to long format
+  dat %>% 
+    select(-any_of(c("ucod", "icd10", "gbd_severity", sec_cols_here))) %>% 
+    pivot_longer(
+      -c(year, is_garbage),
+      names_to  = "variable",
+      values_to = "level",
+      values_transform = list(level = as.character)
+    ) %>% 
+    filter(
+      !is.na(level),
+      !(variable == "educ2003" & year < 2006)
+    ) %>% 
+    group_by(year, variable, level) %>% 
+    summarise(
+      total_n      = n(),
+      garbage_n    = sum(is_garbage),
+      prop_garbage = garbage_n / total_n,
+      .groups      = "drop"
+    )
+}
+
+## ── 4 · Run over all Parquet files ──────────────────────────────────────────
+file_paths <- list.files(parquet_dir, "\\.parquet$", full.names = TRUE)
+ts_long    <- map_dfr(file_paths, summarise_file)
+
+## ── 5 · Add yearly totals ----------------------------------------------------
+totals_by_year <- ts_long %>% 
+  group_by(year) %>% 
+  summarise(
+    total_n      = sum(total_n),
+    garbage_n    = sum(garbage_n),
+    prop_garbage = garbage_n / total_n,
+    .groups      = "drop"
+  ) %>% 
+  mutate(variable = "ALL", level = "ALL")
+
+ts_long <- bind_rows(ts_long, totals_by_year)
+
+```
+Plots of proportion of garbage codes overtime and average severity overtime 
+```{r}
+fig_dir <- "/Users/amymann/Documents/Data Quality Project/data_quality/figures"
+dir.create(fig_dir, recursive = TRUE, showWarnings = FALSE)
+
+ts_garbage <- ts_long %>%
+  filter(variable == "garbage_n") %>% 
+  group_by(year) 
+
+prop_garbage_plot<-ts_garbage %>%
+  filter(level == "Garbage") %>% 
+  ggplot(aes(year, prop)) +
+    geom_line(color = "black") +
+    scale_y_continuous(labels = scales::percent) +
+    labs(title = "Proportion of deaths classified as garbage",
+         x = NULL, y = "Proportion of deaths")
+
+avg_severity_ts <- ts_long %>% 
+  filter(variable == "gbd_severity", level != "0-Non") %>% 
+  mutate(
+    severity = as.numeric(level),
+    n        = as.numeric(total_n)) %>% 
+  group_by(year) %>% 
+  summarise(
+    total_deaths = sum(n),
+    avg_severity = sum(severity * total_n) / total_deaths,
+    .groups      = "drop" )
+
+severity_plot <- ggplot(avg_severity_ts, aes(year, avg_severity)) +
+  geom_line() +
+  scale_y_continuous(limits = c(1, 4)) +
+  labs(title = "Average garbage-code severity, 1999–2023",
+       x = NULL, y = "Average severity (scale 1-4)")
+
+## 1 ── make (or reuse) the yearly-total table -----------------------
+totals_by_year <- ts_long %>%           # if you haven’t built it yet
+  group_by(year) %>% 
+  summarise(
+    total_n      = sum(total_n),
+    garbage_n    = sum(garbage_n),
+    prop_garbage = garbage_n / total_n,
+    .groups      = "drop"
+  ) %>% 
+  mutate(variable = "ALL", level = "ALL")
+
+## 2 ── plot the proportion ------------------------------------------
+prop_garbage_plot <- ggplot(totals_by_year,
+                            aes(year, prop_garbage)) +
+  geom_line(colour = "black") +
+  scale_y_continuous(labels = scales::percent) +
+  labs(title = "Proportion of deaths classified as garbage",
+       x = NULL, y = "Proportion of deaths")
+
+ggsave(file.path(fig_dir, "prop_garbage_over_time.png"),
+       plot   = prop_garbage_plot,
+       width  = 7, height = 4, dpi = 300)
+
+ggsave(file.path(fig_dir, "avg_garbage_severity_over_time.png"),
+       plot   = severity_plot,
+       width  = 7, height = 4, dpi = 300)
+
+```
+Demographics v.s. proportion garbage codes overtime
+```{r}
+# assumes `ts_demo` and `fig_dir` already exist
+demo_vars <- c("sex", "race5", "marstat", "placdth", "educ2003", "popsizeoc", "stateoc")
+
+walk(demo_vars, \(v) {
+  p <- ggplot(filter(ts_long, variable == v),
+              aes(year, prop_garbage, colour = level)) +
+         geom_line() +
+         scale_y_continuous(labels = percent) +
+         labs(title  = paste("Proportion of garbage-coded deaths –", v),
+              x = NULL, y = "Proportion of deaths", colour = v)
+
+  ggsave(file.path(fig_dir, paste0("prop_garbage_by_", v, ".png")),
+         plot = p, width = 7, height = 4, dpi = 300)
+})
+
+```
+Controlling for cause of death, plots odds ratios for place of death, sex, and marital status.
+```{r}
+# ── 0.  Packages ─────────────────────────────────────────────────────────────
+library(arrow)
+library(dplyr)
+library(stringr)
+library(purrr)
+library(readr)
+library(broom)
+library(ggplot2)
+library(tidyr)
+
+# ── 1.  Paths & constants ────────────────────────────────────────────────────
+parquet_dir <- "/Users/amymann/Documents/Data Quality Project/data/parquet"
+garbage_path <- file.path(
+  "/Users/amymann/Documents/Data Quality Project",
+  "data_quality/cause-codes",
+  "gbd_garbage_codes_with_descr.csv"
+)
+
+years_wanted   <- 1999:2023
+vars_interest  <- c("placdth", "sex", "marstat")
+
+base_cols  <- c("year", "ucr39", "ucod", "ranum", vars_interest)
+extra_cols <- "educ2003"                      # present only ≥2003
+
+## all 60 secondary-factor columns you might need
+sec_cols   <- c(paste0("record_",  1:20),
+                paste0("econdp_",  1:20),
+                paste0("econds_",  1:20))
+
+keep_cols  <- c(base_cols, extra_cols, sec_cols)
+
+garbage_lu <- read_csv(garbage_path, show_col_types = FALSE) %>%
+  transmute(
+    icd10        = str_to_upper(icd10),
+    gbd_severity = as.integer(gbd_severity)
+  )
+
+clean_icd <- function(x) str_remove_all(str_to_upper(x), "[^A-Z0-9\\.]")
+
+# ── helper: identify “good” T-codes vectorised over a whole column ───────────
+is_good_T <- function(x) {
+  x <- toupper(x)
+  startsWith(x, "T") & substr(x, 4L, 4L) != "9"
+}
+
+# ── 2.  Fit *separate* models for each variable in one file/year ────────────
+fit_year <- function(path) {
+
+  ## read only available columns in this parquet
+  dat <- read_parquet(path, col_select = any_of(keep_cols)) %>% 
+    as.data.frame()
+
+  ## which secondary columns exist in this particular file?
+  sec_cols_here <- intersect(sec_cols, names(dat))
+
+  ## -------------------------------------------------------------------------
+  ## garbage-code flag with the new overdose rule
+  ## -------------------------------------------------------------------------
+  dat <- dat %>% 
+    mutate(
+      year  = as.integer(year),
+      icd10 = clean_icd(ucod)
+    ) %>% 
+    left_join(garbage_lu, by = "icd10")
+
+  ## TRUE for at least one specific T-code (vectorised OR)
+  if (length(sec_cols_here)) {
+    has_specific_T <- Reduce(`|`, lapply(dat[sec_cols_here], is_good_T))
+  } else {
+    has_specific_T <- rep(FALSE, nrow(dat))
+  }
+
+  dat <- dat %>% 
+    mutate(
+      is_garbage = case_when(
+        is.na(gbd_severity)                         ~ FALSE,            # not on list
+        !str_starts(icd10, "X")                     ~ TRUE,             # garbage, not X
+        str_starts(icd10, "X") & !has_specific_T    ~ TRUE,             # X, no good T
+        TRUE                                        ~ FALSE             # X with good T
+      ),
+      ucr39 = factor(ucr39)
+    ) %>% 
+    select(-ucod, -icd10, -gbd_severity, -any_of(sec_cols_here))
+
+  yr <- unique(dat$year)
+  stopifnot(length(yr) == 1)
+
+  ## ── run separate models for each focal variable ──────────────────────────
+  bind_rows(lapply(vars_interest, function(var) {
+
+    if (!(var %in% names(dat))) return(NULL)
+
+    dat_var <- dat %>% 
+      mutate(across(all_of(var), factor)) %>% 
+      filter(!is.na(.data[[var]]), !is.na(ucr39)) %>% 
+      droplevels()
+
+    if (nlevels(dat_var[[var]]) < 2 || nlevels(dat_var$ucr39) < 2)
+      return(NULL)
+
+    fmla <- as.formula(paste("is_garbage ~", var, "+ ucr39"))
+    mod  <- glm(fmla, family = binomial("logit"), data = dat_var)
+
+    broom::tidy(mod, conf.int = FALSE, exponentiate = FALSE) %>% 
+      filter(term != "(Intercept)", !startsWith(term, "ucr39")) %>% 
+      mutate(
+        conf.low  = estimate - 1.96 * std.error,
+        conf.high = estimate + 1.96 * std.error,
+        estimate  = exp(estimate),
+        conf.low  = exp(conf.low),
+        conf.high = exp(conf.high),
+        year      = yr,
+        variable  = var
+      )
+  }))
+}
+
+# ── 3.  Run every file/year ──────────────────────────────────────────────────
+file_paths <- list.files(parquet_dir, "\\.parquet$", full.names = TRUE)
+coefs      <- map_dfr(file_paths, fit_year)
+
+out_dir <- "/Users/amymann/Documents/Data Quality Project/data_quality/figures"
+dir.create(out_dir, recursive = TRUE, showWarnings = FALSE)
+write_csv(coefs, file.path(out_dir, "garbage_logit_coefs.csv"))
+
+# ── 5.  Prep for plotting ────────────────────────────────────────────────────
+plot_dat <- coefs %>% 
+  mutate(level = str_remove(term, paste0("^", variable))) %>% 
+  arrange(variable, level, year)
+
+# ── 6.  Plot: odds-ratio trajectories ────────────────────────────────────────
+or_plot <- ggplot(plot_dat,
+                  aes(x = year, y = estimate,
+                      colour = level, fill = level, group = level)) +
+  geom_ribbon(aes(ymin = conf.low, ymax = conf.high),
+              alpha = 0.20, linewidth = 0) +
+  geom_line(linewidth = 0.7) +
+  scale_y_log10(expand = expansion(mult = c(0.05, 0.05))) +
+  facet_wrap(~ variable, scales = "free_y") +
+  labs(title = "Odds ratios for garbage cause-of-death coding, 1999–2023",
+       subtitle = "Separate logistic models adjusting for ICD-39 category (ucr39)",
+       y = "Odds ratio (log scale)", x = NULL,
+       colour = "Level", fill = "Level") +
+  theme_minimal(base_size = 11) +
+  theme(legend.position = "bottom")
+
+ggsave(file.path(out_dir, "odds_ratios_over_time.png"),
+       or_plot, width = 8, height = 4.5, dpi = 320)
+
+# ── 7.  Quick look if you’re in RStudio ──────────────────────────────────────
+print(or_plot)
+
+```
+Controlling for cause of death, plots odds ratios for race and educational attainment.
+```{r}
+library(arrow)
+library(dplyr)
+library(stringr)
+library(purrr)
+library(readr)
+library(broom)
+library(ggplot2)
+library(tidyr)
+
+## ─────────────────────────── 1 · Paths & constants ────────────────────────
+parquet_dir <- "/Users/amymann/Documents/Data Quality Project/data/parquet"
+
+garbage_path <- file.path(
+  "/Users/amymann/Documents/Data Quality Project",
+  "data_quality/cause-codes",
+  "gbd_garbage_codes_with_descr.csv"
+)
+
+years_wanted  <- 1999:2023
+
+## focal predictors — *just* race and education -----------------------------
+vars_interest <- c("race5", "educ2003")   # <-- change made here
+
+base_cols  <- c("year", "ucr39", "ucod", "ranum", vars_interest)
+extra_cols <- "educ2003"                  # present only ≥2003
+
+## all 20 potential secondary-factor columns
+sec_cols <- c(paste0("record_",  2:20))
+
+keep_cols <- c(base_cols, extra_cols, sec_cols)
+
+garbage_lu <- read_csv(garbage_path, show_col_types = FALSE) %>%
+  transmute(
+    icd10        = str_to_upper(icd10),
+    gbd_severity = as.integer(gbd_severity)
+  )
+
+clean_icd <- function(x)
+  str_remove_all(str_to_upper(x), "[^A-Z0-9\\.]")
+
+## ── helper: identify “good” T-codes (vectorised) ───────────────────────────
+is_good_T <- function(x) {
+  x <- toupper(x)
+  startsWith(x, "T") & substr(x, 4L, 4L) != "9"
+}
+
+## ───────────────────── 2 · Fit models for one file/year ────────────────────
+fit_year <- function(path) {
+
+  ## read only available columns
+  dat <- read_parquet(path, col_select = any_of(keep_cols)) |>
+         as.data.frame()
+
+  ## which secondary columns exist here?
+  sec_cols_here <- intersect(sec_cols, names(dat))
+
+  ## ── garbage flag with overdose rule ──────────────────────────────────────
+  dat <- dat %>%
+    mutate(
+      year  = as.integer(year),
+      icd10 = clean_icd(ucod)
+    ) %>%
+    left_join(garbage_lu, by = "icd10")
+
+  ## TRUE if any secondary column contains a specific T-code
+  has_specific_T <-
+    if (length(sec_cols_here))
+      Reduce(`|`, lapply(dat[sec_cols_here], is_good_T))
+    else
+      rep(FALSE, nrow(dat))
+
+  dat <- dat %>%
+    mutate(
+      is_garbage = case_when(
+        is.na(gbd_severity)                      ~ FALSE,           # not on list
+        !str_starts(icd10, "X")                  ~ TRUE,            # garbage, not X
+        str_starts(icd10, "X") & !has_specific_T ~ TRUE,            # X with no good T
+        TRUE                                     ~ FALSE            # X with good T
+      ),
+      ucr39 = factor(ucr39)
+    ) %>%
+    select(-ucod, -icd10, -gbd_severity, -any_of(sec_cols_here))
+
+  yr <- unique(dat$year)
+  stopifnot(length(yr) == 1)
+
+  ## ── separate models for each focal variable ──────────────────────────────
+  bind_rows(lapply(vars_interest, function(var) {
+
+    if (!(var %in% names(dat))) return(NULL)
+
+    dat_var <- dat %>%
+      mutate(across(all_of(var), factor)) %>%
+      filter(!is.na(.data[[var]]), !is.na(ucr39)) %>%
+      droplevels()
+
+    if (nlevels(dat_var[[var]]) < 2 || nlevels(dat_var$ucr39) < 2)
+      return(NULL)
+
+    fmla <- as.formula(paste("is_garbage ~", var, "+ ucr39"))
+    mod  <- glm(fmla, family = binomial("logit"), data = dat_var)
+
+    broom::tidy(mod, conf.int = FALSE, exponentiate = FALSE) %>%
+      filter(term != "(Intercept)", !startsWith(term, "ucr39")) %>%
+      mutate(
+        conf.low  = estimate - 1.96 * std.error,
+        conf.high = estimate + 1.96 * std.error,
+        estimate  = exp(estimate),
+        conf.low  = exp(conf.low),
+        conf.high = exp(conf.high),
+        year      = yr,
+        variable  = var
+      )
+  }))
+}
+
+## ───────────────────── 3 · Run across all parquet files ────────────────────
+file_paths <- list.files(parquet_dir, "\\.parquet$", full.names = TRUE)
+coefs      <- map_dfr(file_paths, fit_year)
+
+out_dir <- "/Users/amymann/Documents/Data Quality Project/data_quality/figures"
+dir.create(out_dir, recursive = TRUE, showWarnings = FALSE)
+write_csv(coefs, file.path(out_dir, "garbage_logit_coefs.csv"))
+
+## ────────────────────────── 4 · Prepare for plotting ───────────────────────
+plot_dat <- coefs %>%
+  mutate(level = str_remove(term, paste0("^", variable))) %>%
+  arrange(variable, level, year)
+
+## ─────────────────────────── 5 · Plot trajectories ─────────────────────────
+or_plot <- ggplot(plot_dat,
+                  aes(x = year, y = estimate,
+                      colour = level, fill = level, group = level)) +
+  geom_ribbon(aes(ymin = conf.low, ymax = conf.high),
+              alpha = 0.20, linewidth = 0) +
+  geom_line(linewidth = 0.7) +
+  scale_y_log10(expand = expansion(mult = c(0.05, 0.05))) +
+  facet_wrap(~ variable, scales = "free_y") +
+  labs(title = "Odds ratios for garbage cause-of-death coding, 1999–2023",
+       subtitle = "Separate logistic models adjusting for ICD-39 category (ucr39)",
+       y = "Odds ratio (log scale)", x = NULL,
+       colour = "Level", fill = "Level") +
+  theme_minimal(base_size = 11) +
+  theme(legend.position = "bottom")
+
+ggsave(file.path(out_dir, "odds_ratios_over_time.png"),
+       or_plot, width = 8, height = 4.5, dpi = 320)
+
+## ───────────────────────────── 6 · Quick look ──────────────────────────────
+print(or_plot)
+
+```
+Calculate timeseries for no secondary factor, number of secondary factors and autopsy for place of death, education level, race, and marital status
+```{r}
+# ── 1b.  Pull only what we need ───────────────────────────────────────────────
+vars_interest <- c("placdth", "sex", "marstat", "race5")
+base_cols  <- c("year", "ucr39", "ucod", "ranum", vars_interest)
+extra_cols <- "educ2003"  # if you still need it elsewhere
+# ── 2c.  Summarize no‐secondary and avg‐secondary only ────────────────────────
+fit_secondary_models <- function(path) {
+  # 1. Read & preprocess
+  dat <- read_parquet(path, col_select = any_of(c(base_cols, extra_cols))) %>%
+    mutate(
+      year          = as.integer(year),
+      ranum         = as.integer(ranum),
+      no_secondary  = as.integer(ranum <= 1),
+      num_secondary = pmax(ranum - 1, 0),
+      ucr39         = factor(ucr39)
+    ) %>%
+    filter(year %in% years_wanted) %>%
+    select(year, all_of(vars_interest), no_secondary, num_secondary, ucr39)
+
+  yr <- unique(dat$year)
+  stopifnot(length(yr) == 1)
+  print(paste("Processing year:", yr))
+
+  # 2. Per-variable aggregation + fast GLMs with Wald CIs
+  bind_rows(lapply(vars_interest, function(var) {
+    if (!(var %in% names(dat))) return(NULL)
+
+    d <- dat %>%
+      filter(!is.na(.data[[var]])) %>%
+      mutate(across(all_of(var), factor)) %>%
+      droplevels()
+    if (nlevels(d[[var]]) < 2) return(NULL)
+
+    # 2a) logistic on aggregated counts
+    d_log <- d %>%
+      group_by(.data[[var]], ucr39) %>%
+      summarise(
+        success = sum(no_secondary),
+        failure = n() - sum(no_secondary),
+        .groups = "drop"
+      )
+    f1 <- as.formula(paste0("cbind(success, failure) ~ ", var, " + ucr39"))
+    m1 <- glm(f1, data = d_log, family = binomial())
+
+    t1 <- broom::tidy(m1, conf.int = FALSE, exponentiate = FALSE) %>%
+      filter(term != "(Intercept)", !grepl("^ucr39", term)) %>%
+      transmute(
+        year      = yr,
+        variable  = var,
+        outcome   = "No secondary factor (OR)",
+        level     = sub(paste0("^", var), "", term),
+        estimate  = exp(estimate),
+        standard_error = std.error,
+        conf.low  = exp(estimate - 1.96 * std.error),
+        conf.high = exp(estimate + 1.96 * std.error)
+      )
+
+    # 2b) Poisson on aggregated sums with offset
+    d_pois <- d %>%
+      group_by(.data[[var]], ucr39) %>%
+      summarise(
+        count    = sum(num_secondary),
+        exposure = n(),
+        .groups  = "drop"
+      )
+    f2 <- as.formula(paste0("count ~ ", var, " + ucr39 + offset(log(exposure))"))
+    m2 <- glm(f2, data = d_pois, family = poisson())
+
+    t2 <- broom::tidy(m2, conf.int = FALSE, exponentiate = FALSE) %>%
+      filter(term != "(Intercept)", !grepl("^ucr39", term)) %>%
+      transmute(
+        year      = yr,
+        variable  = var,
+        outcome   = "Secondary count (IRR)",
+        level     = sub(paste0("^", var), "", term),
+        estimate  = exp(estimate),
+        conf.low  = exp(estimate - 1.96 * std.error),
+        conf.high = exp(estimate + 1.96 * std.error)
+      )
+
+    bind_rows(t1, t2)
+  }))
+}
+
+# ── 3d.  Run over all years and collect coefficients ─────────────────────────
+file_paths <- list.files(parquet_dir, "\\.parquet$", full.names = TRUE)
+sec_coefs  <- map_dfr(file_paths, fit_secondary_models)
+
+# And to peek in R:
+print(sec_coefs)
+
+```
+Calculate timeseries for no secondary factor, number of secondary factors by education level
+```{r}
+# ── Education-only coefficient calculation (2003–2023) ──────────────────────
+
+library(stringr)
+library(purrr)
+library(dplyr)
+
+fit_secondary_models_educ2003 <- function(path) {
+  # 1) read only the columns we need and coerce year to integer
+  dat0 <- read_parquet(path,
+                       col_select = any_of(c("year", "ranum", "ucr39", "educ2003"))) %>%
+    mutate(
+      year = as.integer(year)
+    )
+
+  # 2) grab the single year, bail if something’s off
+  yr <- unique(dat0$year)
+  stopifnot(length(yr) == 1)
+  message("Processing year: ", yr)
+
+  # 3) skip files with no educ2003 column
+  if (!"educ2003" %in% names(dat0)) {
+    message("  → skipping: no educ2003 column")
+    return(NULL)
+  }
+
+  # 4) filter to our years and non‐missing educ2003
+  dat <- dat0 %>%
+    filter(year %in% years_wanted, !is.na(educ2003)) %>%
+    mutate(
+      ranum         = as.integer(ranum),
+      no_secondary  = as.integer(ranum <= 1),
+      num_secondary = pmax(ranum - 1, 0),
+      ucr39         = factor(ucr39),
+      educ2003      = factor(educ2003)
+    ) %>%
+    select(year, educ2003, no_secondary, num_secondary, ucr39)
+
+  # 5) if only one level, nothing to do
+  if (nlevels(dat$educ2003) < 2) {
+    message("  → skipping: only one educ2003 level")
+    return(NULL)
+  }
+
+  # 6a) logistic (OR) on aggregated counts
+  d_log <- dat %>%
+    group_by(educ2003, ucr39) %>%
+    summarise(
+      success = sum(no_secondary),
+      failure = n() - sum(no_secondary),
+      .groups = "drop"
+    )
+  m1 <- glm(cbind(success, failure) ~ educ2003 + ucr39,
+            data   = d_log,
+            family = binomial())
+  t1 <- broom::tidy(m1, conf.int = FALSE) %>%
+    filter(!grepl("^(Intercept|ucr39)", term)) %>%
+    transmute(
+      year      = yr,
+      variable  = "educ2003",
+      outcome   = "No secondary factor (OR)",
+      level     = sub("^educ2003", "", term),
+      estimate  = exp(estimate),
+      conf.low  = exp(estimate - 1.96 * std.error),
+      conf.high = exp(estimate + 1.96 * std.error)
+    )
+
+  # 6b) Poisson (IRR) on aggregated sums
+  d_pois <- dat %>%
+    group_by(educ2003, ucr39) %>%
+    summarise(
+      count    = sum(num_secondary),
+      exposure = n(),
+      .groups  = "drop"
+    )
+  m2 <- glm(count ~ educ2003 + ucr39 + offset(log(exposure)),
+            data   = d_pois,
+            family = poisson())
+  t2 <- broom::tidy(m2, conf.int = FALSE) %>%
+    filter(!grepl("^(Intercept|ucr39)", term)) %>%
+    transmute(
+      year      = yr,
+      variable  = "educ2003",
+      outcome   = "Secondary count (IRR)",
+      level     = sub("^educ2003", "", term),
+      estimate  = exp(estimate),
+      conf.low  = exp(estimate - 1.96 * std.error),
+      conf.high = exp(estimate + 1.96 * std.error)
+    )
+
+  # 7) return combined results (year is now always integer)
+  bind_rows(t1, t2)
+}
+
+
+years_wanted <- 2006:2023
+file_paths_edu <- list.files(parquet_dir, "\\.parquet$", full.names = TRUE) %>%
+  keep(~ as.integer(str_extract(basename(.), "\\d{4}")) %in% years_wanted)
+
+# Run the (efficient) model‐fitting function over those files
+sec_coefs <- map_dfr(file_paths_edu, fit_secondary_models_educ2003) %>%
+  filter(variable == "educ2003")
+
+# Inspect the first few rows
+head(sec_coefs)
+
+```
+Plot the time series
+```{r}
+# ── 4d.  Plot each variable in its own two‐panel figure (dropping any intercept rows) ────────
+library(ggplot2)
+library(patchwork)
+
+out_dir <- "/Users/amymann/Documents/Data Quality Project/data_quality/figures/"
+
+# Remove any rows corresponding to the intercept before plotting
+plot_dat_sec <- sec_coefs %>%
+  filter(level != "(Intercept)") %>%
+  arrange(variable, outcome, level)
+
+# Loop over each demographic variable
+variables <- unique(plot_dat_sec$variable)
+for (var in variables) {
+  df_var <- plot_dat_sec %>% filter(variable == var)
+
+  # 1) No secondary factor (OR)
+  p_or <- ggplot(
+    df_var %>% filter(outcome == "No secondary factor (OR)"),
+    aes(x = year, y = estimate, colour = level, fill = level, group = level)
+  ) +
+    geom_line(size = 0.7) +
+    scale_y_log10(expand = expansion(mult = c(0.05, 0.05))) +
+    labs(
+      title  = paste0(var, ": Odds of No Secondary Factor"),
+      x      = NULL,
+      y      = "Odds Ratio (log scale)",
+      colour = "Level",
+      fill   = "Level"
+    ) +
+    theme_minimal(base_size = 11) +
+    theme(legend.position = "bottom")
+
+  # 2) Secondary count (IRR)
+  p_irr <- ggplot(
+    df_var %>% filter(outcome == "Secondary count (IRR)"),
+    aes(x = year, y = estimate, colour = level, fill = level, group = level)
+  ) +
+    geom_line(size = 0.7) +
+    scale_y_log10(expand = expansion(mult = c(0.05, 0.05))) +
+    labs(
+      title  = paste0(var, ": Rate of Secondary Factors"),
+      x      = NULL,
+      y      = "Incidence Rate Ratio (log scale)",
+      colour = "Level",
+      fill   = "Level"
+    ) +
+    theme_minimal(base_size = 11) +
+    theme(legend.position = "bottom")
+
+  # Combine vertically and save
+  combined <- p_or / p_irr + plot_layout(ncol = 1, heights = c(1, 1))
+
+  ggsave(
+    filename = file.path(out_dir, paste0("secondary_effects_", var, ".png")),
+    plot     = combined,
+    width    = 8, height = 10, dpi = 320
+  )
+
+  message("Saved figure for variable: ", var)
+}
+```
+Check to make sure garbage coding is correct.
+```{r}
+library(arrow)
+library(dplyr)
+library(stringr)
+
+mort_2021_path <- file.path(parquet_dir, "mort2021.parquet")   # adjust if needed
+
+# 1.  Read only the columns you need ------------------------------------------
+dat_raw <- read_parquet(mort_2021_path,
+                        col_select = any_of(keep_cols)) |>
+           as.data.frame()
+
+# 2.  Determine which secondary-factor columns exist ---------------------------
+sec_cols_here <- intersect(sec_cols, names(dat_raw))
+
+# 3.  Clean ICD-10 and attach lookup ------------------------------------------
+dat21 <- dat_raw |>
+  mutate(
+    icd10_full = clean_icd(ucod),              # keep full version
+    icd10_cat  = substr(icd10_full, 1, 3)      # 3-char “category”
+  )
+
+# 3a.  Build a *category-level* garbage look-up for X codes -------------------
+garbage_x_cat <- garbage_lu |>
+  filter(str_starts(icd10, "X")) |>
+  mutate(icd10_cat = substr(icd10, 1, 3)) |>
+  distinct(icd10_cat)                          # just the unique 3-char prefixes
+
+# 4.  Helper flag: “good” T-code in any secondary position --------------------
+is_good_T <- function(x) {
+  x <- toupper(x)
+  startsWith(x, "T") & substr(x, 4L, 4L) != "9"
+}
+
+has_specific_T <- if (length(sec_cols_here)) {
+  Reduce(`|`, lapply(dat21[sec_cols_here], is_good_T))
+} else {
+  rep(FALSE, nrow(dat21))
+}
+
+# 5.  Compute garbage flag (still useful to display) --------------------------
+dat21 <- dat21 |>
+  mutate(
+    has_specific_T = has_specific_T,
+    is_garbage = case_when(
+      icd10_cat %in% garbage_x_cat$icd10_cat &           # X-category on list
+        !has_specific_T                                   ~ TRUE,
+      icd10_cat %in% substr(garbage_lu$icd10, 1, 3) &     # non-X garbage
+        !str_starts(icd10_cat, "X")                       ~ TRUE,
+      TRUE                                                ~ FALSE
+    )
+  )
+
+x_garbage_any <- dat21 %>% filter(str_starts(ucod, "X"), is_garbage) %>% group_by(icd10_cat) %>% slice_head(n = 100) # 250 from *each* category ungroup()
+# 7. Columns to inspect
+x_garbage_check <- x_garbage_any %>%
+  select(ranum, ucod, icd10_full, icd10_cat,
+         has_specific_T, is_garbage,
+         any_of(sec_cols_here))
+
+print(x_garbage_check)
+write_csv(x_garbage_check, "overdose_classification.csv")
+
+
+```
+
+COMPLETENESS:Create timeseries of completeness of dataset.
+```{r}
+## ── 0 · Setup ───────────────────────────────────────────────────────────────
+library(arrow)      # v15+
+library(dplyr)
+library(tidyr)
+library(ggplot2)
+library(purrr)
+library(furrr)      # parallel map
+library(future)     # for plan()
+library(scales)
+
+plan(multisession)                      # use all local cores
+
+fig_dir     <- "/Users/amymann/Documents/Data Quality Project/data_quality/figures"
+parquet_dir <- "/Users/amymann/Documents/Data Quality Project/data/parquet"
+dir.create(fig_dir, recursive = TRUE, showWarnings = FALSE)
+
+years_wanted  <- 1999:2023
+vars_to_check <- c("marstat", "weekday", "placdth", "age", "educ", "mandeath")
+
+unknown_codes <- list(
+  marstat   = c("9", "U", "Unknown", "", NA),
+  weekday   = c("9", "U", "", NA, "Unknown"),
+  placdth   = c("9", "U", "Unknown", "", NA),
+  age       = c("999", "9999", NA, "Unknown"),
+  educ      = c("9", "U", "", NA),
+  mandeath  = c("9", "U", "", NA, "Unknown"))
+
+## Fast vectorised helper -----------------------------------------------------
+is_known_fast <- function(x, unk) !(x %in% unk | is.na(x))
+
+## Harmonise education --------------------------------------------------------
+harmonise_educ <- function(dat) {
+  edu_cols <- c("educ", "educ89", "educ1989", "educ2003")
+  missing  <- setdiff(edu_cols, names(dat))
+  if (length(missing) > 0) dat[missing] <- NA_character_
+
+  dat %>%
+    mutate(across(any_of(edu_cols), as.character)) %>%
+    mutate(
+      educ = case_when(
+        year >= 1999 & year <= 2002 ~ educ,
+        year >= 2003 & year <= 2005 ~ educ89,
+        year == 2006                ~ educ1989,
+        year >= 2007                ~ educ2003,
+        TRUE                        ~ NA_character_
+      )
+    )
+}
+
+## ── 1 · Year-by-year processing (vectorised) ────────────────────────────────
+process_year <- function(yr) {
+
+  ## • Locate & read ----------------------------------------------------------
+  file <- file.path(parquet_dir, sprintf("mort%04d.parquet", yr))
+  if (!file.exists(file)) {
+    message("⚠️  Missing file for ", yr, " – skipping")
+    return(NULL)
+  }
+
+  cols_needed <- c("ucr39", vars_to_check,
+                   "educ89", "educ1989", "educ2003")
+
+  dat <- arrow::read_parquet(file, col_select = any_of(cols_needed)) %>%
+    mutate(year = yr,
+           ucr39 = as.character(ucr39)) %>%
+    harmonise_educ() %>%
+    mutate(across(all_of(vars_to_check), as.character)) %>%
+    collect()
+
+  ## • 1a  Time-series summary -----------------------------------------------
+  ts <- map_dfr(vars_to_check, function(v) {
+    known_vec <- is_known_fast(dat[[v]], unknown_codes[[v]])
+    tibble(
+      year         = yr,
+      variable     = v,
+      total_n      = length(known_vec),
+      known_TRUE   = sum(known_vec),
+      known_FALSE  = length(known_vec) - known_TRUE,
+      prop_known   = known_TRUE / total_n,
+      summary_type = "ts"
+    )
+  })
+
+  ## • 1b  By-UCR39 summary ---------------------------------------------------
+  ucr <- map_dfr(vars_to_check, function(v) {
+    unk <- unknown_codes[[v]]
+
+    dat %>%
+      transmute(
+        ucr39,
+        variable  = v,
+        is_known  = !(!!rlang::sym(v) %in% unk | is.na(!!rlang::sym(v)))
+      ) %>%
+      group_by(ucr39, variable) %>%
+      summarise(
+        total_n    = n(),
+        known_TRUE = sum(is_known),
+        .groups    = "drop"
+      ) %>%
+      mutate(
+        known_FALSE = total_n - known_TRUE,
+        prop_known  = known_TRUE / total_n,
+        summary_type = "ucr",
+        year         = yr
+      )
+  })
+
+  bind_rows(ts, ucr)
+}
+
+## ── 2 · Run all years in parallel ───────────────────────────────────────────
+yearly_summaries <- future_map_dfr(
+  years_wanted,
+  process_year,
+  .progress = TRUE,
+  .options  = furrr_options(packages = c("dplyr", "tibble", "rlang"))
+)
+
+plan(sequential)   # reset default
+
+## ── 3 · Split, plot, export (unchanged) ─────────────────────────────────────
+ts_completeness <- yearly_summaries %>%
+  filter(summary_type == "ts") %>%
+  select(-summary_type)
+
+by_ucr39 <- yearly_summaries %>%
+  filter(summary_type == "ucr") %>%
+  select(-summary_type, -year) %>%
+  arrange(variable, desc(prop_known))
+
+prop_known_plot <- ggplot(ts_completeness,
+                          aes(year, prop_known, colour = variable)) +
+  geom_line(linewidth = 0.8) +
+  scale_y_continuous(labels = percent, limits = c(0, 1)) +
+  scale_colour_brewer(palette = "Dark2") +
+  labs(title = "Completeness of certificate fields, 1999–2023",
+       x = NULL, y = "Proportion known", colour = "Field")
+
+ggsave(file.path(fig_dir, "completeness_over_time.png"),
+       prop_known_plot, width = 8, height = 5, dpi = 300)
+
+write.csv(by_ucr39,
+          file.path(fig_dir, "completeness_by_ucr39.csv"),
+          row.names = FALSE)
+
+message("✅ Done: summaries written and plot saved.")
+
+```
+
+LIGHT GARBAGE: Calcualtes proportion of light garbage and runs demographic analysis.
+```{r}
+###############################################################################
+##  0 · Packages & parallel plan  #############################################
+###############################################################################
+library(arrow)      # v15+ for Arrow dplyr
+library(dplyr)
+library(purrr)
+library(readr)
+library(tidyr)      # only for pivot_longer later (not used inside Arrow)
+library(ggplot2)
+library(broom)
+library(future)
+library(furrr)
+library(scales)
+
+plan(multisession, workers = 2)     # adjust or use plan(sequential)
+
+###############################################################################
+##  1 · Paths & constants #####################################################
+###############################################################################
+parquet_dir <- "/Users/amymann/Documents/Data Quality Project/data/parquet"
+fig_dir     <- "/Users/amymann/Documents/Data Quality Project/data_quality/figures"
+dir.create(fig_dir, recursive = TRUE, showWarnings = FALSE)
+
+years_wanted <- 1999:2023
+EDUC_START   <- 2006                       # first year with educ2003
+
+needed_cols <- c("year", "ucr39", "sex", "race5", "marstat",
+                 "placdth", "ucod", "ranum")
+extra_cols  <- "educ2003"
+sec_cols    <- paste0("record_",  2:20)     # secondary-cause columns
+keep_cols   <- c(needed_cols, extra_cols, sec_cols)
+
+###############################################################################
+##  2 · Light-garbage lookup ##################################################
+###############################################################################
+light_codes_path <- "/Users/amymann/Documents/Data Quality Project/data_quality/light_garbage_codes.csv"
+light_garbage    <- read_csv(light_codes_path, col_names = FALSE,
+                             show_col_types = FALSE)$X1
+
+###############################################################################
+##  3 · Summarise one file (per-file Arrow) ###################################
+###############################################################################
+summarise_file <- function(path) {
+
+  ds <- open_dataset(path, format = "parquet") |>
+        select(any_of(keep_cols))
+
+  # ensure missing columns exist
+  if (!"educ2003" %in% names(ds))
+    ds <- ds |> mutate(educ2003 = NA_character_)
+
+  ds <- ds |>
+        mutate(
+          year     = arrow::cast(year,     arrow::int32()),
+          ranum    = arrow::cast(ranum,    arrow::int64()),
+          ucr39    = arrow::cast(ucr39,    arrow::string()),
+          educ2003 = arrow::cast(educ2003, arrow::string())
+        )
+
+  # helper: one secondary column → long form
+  longify_one <- function(col) {
+    ds |>
+      transmute(
+        year, ranum, ucr39, sex, race5, marstat, placdth, educ2003,
+        icd10 = arrow::cast(!!sym(col), arrow::string())
+      )
+  }
+
+  present_cols <- intersect(sec_cols, names(ds))
+
+  purrr::map(present_cols, longify_one) |>
+    purrr::reduce(union_all) |>
+    filter(!(icd10 == "" | icd10 == "nan"))|> 
+    mutate(is_light = icd10 %in% light_garbage) |>
+    group_by(year, ranum, ucr39, sex, race5, marstat,
+             placdth, educ2003) |>
+    summarise(
+      total_detail = n(),
+      light_contrib = sum(is_light),
+      .groups = "drop"
+    ) |>
+    filter(total_contrib > 0) |>               # exclude 0-contrib certs
+    collect() |>
+    mutate(year = as.integer(year))
+}
+
+###############################################################################
+##  4 · Read & summarise all years ###########################################
+###############################################################################
+parquet_files <- list.files(parquet_dir, "\\.parquet$", full.names = TRUE)
+
+cert_level_all <- future_map_dfr(
+  parquet_files, summarise_file,
+  .options  = furrr_options(seed = TRUE),
+  .progress = TRUE
+)
+
+###############################################################################
+##  5 · Collapse to demographic counts ########################################
+###############################################################################
+all_years <- cert_level_all |>
+  group_by(year, ucr39, sex, race5, marstat, placdth, educ2003) |>
+  summarise(
+    light = sum(light_contrib),
+    total = sum(total_contrib),
+    .groups = "drop"
+  ) |>
+  mutate(prop_light = light / total)
+
+###############################################################################
+##  6 · Time-series plot ######################################################
+###############################################################################
+ts_light <- all_years |>
+  group_by(year) |>
+  summarise(prop = sum(light) / sum(total), .groups = "drop")
+
+p <- ggplot(ts_light, aes(year, prop)) +
+        geom_line() +
+        scale_y_continuous(labels = percent) +
+        labs(title = "% of contributing causes that are light garbage",
+             x = NULL, y = "Average % per death")
+print(p)
+ggsave(file.path(fig_dir, "prop_light_timeseries.png"),
+       plot = p, width = 7, height = 4, dpi = 300)
+
+###############################################################################
+##  7 · Demographic breakdowns ###############################################
+###############################################################################
+demo_vars <- c("sex", "race5", "marstat", "placdth", "educ2003")
+
+ts_demo <- all_years |>
+  pivot_longer(cols = all_of(demo_vars),
+               names_to  = "variable",
+               values_to = "level") |>
+  group_by(year, variable, level) |>
+  summarise(prop_light = sum(light) / sum(total), .groups = "drop") |>
+  filter(!(variable == "educ2003" & year < EDUC_START))
+
+walk(demo_vars, \(v) {
+  g <- ggplot(filter(ts_demo, variable == v),
+              aes(year, prop_light, colour = level)) +
+         geom_line() +
+         scale_y_continuous(labels = percent) +
+         labs(title  = paste("% light garbage by", v),
+              x = NULL, y = "% light garbage", colour = v)
+  ggsave(file.path(fig_dir, paste0("prop_light_by_", v, ".png")),
+         plot = g, width = 7, height = 4, dpi = 300)
+})
+
+###############################################################################
+##  8 · Logistic regression (counts)  — overflow-safe #########################
+###############################################################################
+pooled <- all_years %>%
+  filter(year >= EDUC_START, total > 0) %>%   # 1. keep only informative rows
+  mutate(weight = as.numeric(total))          # 2. 64-bit double weights
+
+# Convert predictors to factors if they are character
+factor_vars <- c("sex","race5","marstat","placdth","educ2003","ucr39")
+pooled[factor_vars] <- lapply(pooled[factor_vars], factor)
+
+glm_fit <- glm(
+  cbind(light, total - light) ~
+    sex + race5 + marstat + placdth + educ2003 + ucr39,
+  family  = binomial(),
+  data    = pooled,
+  weights = weight                           # use the double version
+)
+
+pooled_or <- broom::tidy(glm_fit, conf.int = TRUE, exponentiate = TRUE)
+write_csv(pooled_or, file.path(fig_dir, "pooled_light_or.csv"))
+
+## ---- separate model per year ----------------------------------------------
+fit_year <- function(yr) {
+  df  <- filter(all_years, year == yr)
+  fml <- if (yr < EDUC_START) {
+           cbind(light, total - light) ~ sex + race5 + marstat + placdth + ucr39
+         } else {
+           cbind(light, total - light) ~ sex + race5 + marstat + placdth + educ2003 + ucr39
+         }
+  tidy(glm(fml, family = binomial(), data = df, weights = total),
+       conf.int = TRUE, exponentiate = TRUE) |>
+    mutate(year = yr, term = as.character(term))
+}
+
+ors_by_year <- map_dfr(years_wanted, fit_year)
+write_csv(ors_by_year, file.path(fig_dir, "light_or_by_year.csv"))
+
+###############################################################################
+##  9 · Done ##################################################################
+###############################################################################
+message("All outputs saved to: ", fig_dir)
+
+```
+
+ACCIDENTS DETAIL: Calculates level of death metric in accident deaths
+```{r}
+library(arrow)
+library(dplyr)
+library(purrr)
+library(tidyr)
+library(stringr)
+
+parquet_dir    <- "/Users/amymann/Documents/Data Quality Project/data/parquet"
+detail_csv     <- "/Users/amymann/Documents/Data Quality Project/data_quality/accident-detail-codes.csv"
+years_wanted   <- 1999:2023
+secondary_cols <- paste0("record_", 1:20)                 # add econd*/econds* if needed
+
+extra_cols     <- c("year", "sex", "race5", "educ2003", "marstat", "placdth")
+clean_icd <- function(x) {
+  x |> toupper() |>                # upper-case
+    str_remove_all("[^A-Z0-9]") |> # keep only A–Z / 0–9
+    str_trim()                     # drop leading/trailing spaces
+}
+
+ds0      <- open_dataset(parquet_dir, unify_schemas = FALSE)  # cheap scan
+sch_base <- ds0$schema
+
+stringify <- function(.schema, cols) {
+  new_fields <- purrr::map(cols, \(c) arrow::field(c, arrow::utf8()))
+  arrow::schema(!!!c(.schema$fields[!(names(.schema) %in% cols)], new_fields))
+}
+
+sec_cols_on_disk <- intersect(secondary_cols, names(sch_base))
+my_schema <- stringify(sch_base, sec_cols_on_disk)
+
+mort_ds <- open_dataset(parquet_dir, schema = my_schema)
+
+dict_raw <- readr::read_csv(detail_csv, na = c("", "NA"), show_col_types = FALSE)
+
+detail_dict <- dict_raw |>
+  mutate(across(starts_with("detail"), clean_icd),
+         ucod = clean_icd(ucod)) |>
+  pivot_longer(starts_with("detail"),
+               names_to  = NULL,
+               values_to = "detail") |>
+  filter(detail != "" & !is.na(detail), detail != ucod) |>
+  distinct(ucod, detail)
+
+accident_ucods <- unique(detail_dict$ucod)
+
+accident_flagged <- map_dfr(years_wanted, function(yr) {
+  message("Year ", yr, " …")
+
+  ## columns that actually exist for this year's Parquet files
+  extra_on_disk <- intersect(extra_cols, names(mort_ds))
+
+  df <- mort_ds |>
+    filter(year == yr) |>
+    select(all_of(c("ucod", extra_on_disk, sec_cols_on_disk))) |>
+    collect() |>
+    mutate(row_id = row_number(),                   # ← unique per certificate
+           across(all_of(sec_cols_on_disk), clean_icd),
+           ucod = clean_icd(ucod)) |>
+    filter(ucod %in% accident_ucods)
+
+  missing <- setdiff(extra_cols, names(df))
+  if (length(missing) > 0) {
+    df[missing] <- NA_character_
+  }
+
+  sec_long <- df |>
+    pivot_longer(all_of(sec_cols_on_disk),
+                 names_to = NULL,
+                 values_to = "detail") |>
+    filter(detail != "")
+
+  hits <- sec_long |>
+    inner_join(detail_dict, by = c("ucod", "detail")) |>
+    distinct(row_id) |>
+    mutate(has_detail = "Y")
+
+  df |>
+    left_join(hits, by = "row_id") |>
+    mutate(has_detail = replace_na(has_detail, "N"))
+})
+```
+
+```{r}
+library(dplyr)
+library(tidyr)
+library(stringr)
+
+# ── 0 · Helper (same cleaner you used in the pipeline) ----------------------
+clean_icd <- function(x) {
+  x |>
+    toupper() |>
+    str_remove_all("[^A-Z0-9\\.]") |>
+    str_trim()
+}
+
+# ── 1 · Grab the 519 067-th row *by position* ------------------------------
+row_idx <- 519067                        # ← the index you care about
+
+row_one <- accident_flagged %>%          # the final tibble you already built
+  slice(row_idx)                         # pick that row by position
+
+if (nrow(row_one) == 0) {
+  stop("Row ", row_idx, " does not exist in accident_flagged.")
+}
+
+# ── 2 · Pivot its secondary codes into long form ---------------------------
+sec_one <- row_one %>%
+  pivot_longer(starts_with("record_"),      # record_1 … record_20
+               names_to  = "slot",
+               values_to = "detail") %>%
+  mutate(
+    ucod   = clean_icd(ucod),
+    detail = clean_icd(detail)
+  ) %>%
+  filter(detail != "", detail != ucod)      # drop blanks + self-matches
+
+# ── 3 · See what hit the dictionary ----------------------------------------
+matches <- sec_one %>%
+  inner_join(detail_dict, by = c("ucod", "detail"))
+
+cat("Row index:", row_idx,
+    "\nCertificate UCOD:", row_one$ucod,
+    "\nHas_detail flag:", row_one$has_detail, "\n\n")
+
+if (nrow(matches) == 0) {
+  cat("→   No secondary code in this certificate appears in the dictionary.\n",
+      "    The flag should be **N**.  If it shows **Y**, check your\n",
+      "    joins or earlier mutate steps for an unintended self-match.\n")
+} else {
+  cat("→   The following secondary code(s) triggered **Y**:\n\n")
+  print(matches %>% select(slot, detail), row.names = FALSE)
+}
+
+cat("\nFull list of secondary codes in this certificate:\n")
+print(sec_one %>% select(slot, detail), row.names = FALSE)
+
+```
+
