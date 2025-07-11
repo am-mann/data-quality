@@ -35,6 +35,7 @@ PARALLELIZE <- TRUE
 #  load things + dictionaries + helpers
 # ————————————————————————————————————————————————————————————————
 parquet_dir    <- here("data_private", "mcod")  #### ***Change this line
+# parquet_dir    <- here("data_private", "mcod_sample") 
 dictionary_dir <- here("data_raw", "cause-codes") #### ***Change this line
 out_csv        <- here("data", "county_year_quality_metrics.csv")
 
