@@ -24,7 +24,6 @@ SAVE_DIR <- here("data_private", "mcod")
 load(here("data_raw", "mcod_fwf_dicts.rda"))
 
 for (y in YEARS) {
-    print(y)
     save_path <- here(SAVE_DIR, sprintf("mcod_%i.parquet", y))
     
     if (file_exists(save_path)) {
@@ -147,6 +146,7 @@ for (y in YEARS) {
     temp_df <- temp_df |>
         select(
             restatus,
+            countyrs, 
             educ,
             monthdth,
             sex,
@@ -185,4 +185,17 @@ for (y in YEARS) {
                   compression = "snappy",
                   use_dictionary = TRUE, 
                   write_statistics = TRUE)
+}
+
+## Make some fake debugging files ----
+for (f in dir_ls(SAVE_DIR, type = "file", glob = "*.parquet")) {
+    temp_df <- read_parquet(f)
+    
+    sub_df <- temp_df |> 
+        sample_frac(.2)
+    
+    sub_df$countyrs <- sample(temp_df$countyrs, NROW(sub_df), replace = TRUE)
+    
+    dir_create(here("data_private", "mcod_sample"))
+    write_parquet(sub_df, here("data_private", "mcod_sample", basename(f)))
 }
