@@ -1399,8 +1399,8 @@ idx_all <- which(meta$ucod %in% stroke_codes[1:4])
 train_ids <- createDataPartition(idx_all, p = .75, list = FALSE)
 idx_tr <- idx_all[train_ids];  idx_te <- setdiff(idx_all, idx_tr)
 
-X_train <- X_sparse[idx_tr, ];  y_train <- factor(meta$ucod[idx_tr], stroke_codes[1:4])
-X_test  <- X_sparse[idx_te , ]; y_test  <- factor(meta$ucod[idx_te ], stroke_codes[1:4])
+X_train <- X_sparse[idx_tr, ]
+X_test  <- X_sparse[idx_te , ]
 
 ## ---------- 3 · Model 1 — glmnet --------------------------------------------
 set.seed(123)
@@ -1443,7 +1443,7 @@ for(cl in prob_cols) test_cem[[cl]][is.na(test_cem[[cl]])] <- 0.25   # flat prio
 pred_cem <- as.matrix(test_cem[, prob_cols])
 
 ## ---------- 5 · Model 3 — XGBoost (single spec) -----------------------------
-dtrain <- xgb.DMatrix(X_train, label = as.integer(y_train)-1)
+dtrain <- xgb.DMatrix(X_train, label = y_train)
 param  <- list(objective = "multi:softprob", num_class = 4,
                eval_metric = "mlogloss", max_depth = 6, eta = 0.15,
                subsample = 0.8, colsample_bytree = 0.8)
@@ -2092,30 +2092,28 @@ train <- mort |>
   mutate(across(starts_with("record_"), clean_icd3)) |>
   select(uc3, age_grp, sex_male, starts_with("record_"))
 
-make_features_fast <- function(df){
-  setDT(df)                             # convert to data.table in-place
-  df[, rid := .I]                       # helper row id
-
-  # explode long
-  long <- melt(df,
-               id.vars      = c("rid","uc3","age_grp","sex_male"),
-               measure.vars = patterns("^record_"),
-               value.name   = "cc")[!is.na(cc) & cc != ""]
-
-  long[, cc := clean_icd3(cc)]
-  long <- unique(long[cc != ""])        # drop empties & dupes
-
-  # cast wide: one sparse indicator column per contributing cause
-  wide <- dcast(long,
-                rid + uc3 + age_grp + sex_male ~ cc,
-                fun.aggregate = length,
-                value.var     = "cc",
-                drop          = FALSE)
-
-  wide[, rid := NULL][]                 # drop helper and return
+make_features3 <- function(df){
+  df |>
+    select(-record_1) |>  # ← Drop record_1 here
+    rowwise() |>
+    mutate(
+      cc_list = list(
+        c_across(starts_with("record_")) |>
+        clean_icd3() |>
+        discard(~ is.na(.x) || .x == "" || toupper(.x) == "NAN")
+      )
+    ) |>
+    unnest_longer(cc_list) |>
+    distinct() |>
+    mutate(flag = 1L) |>
+    pivot_wider(names_from = cc_list,
+                names_prefix = "cc_",
+                values_from  = flag,
+                values_fill  = list(flag = 0L)) |>
+    ungroup()
 }
 
-train_feat  <- make_features_fast(train, bin_map)
+train_feat  <- make_features3(train)
 
 # drop rare bins (< 20)
 keep_cc <- names(
@@ -2130,7 +2128,7 @@ keep_cc <- names(
 train_tidy <- train_feat |>
   select(uc3, age_grp, sex_male, all_of(keep_cc)) |>
   mutate(
-    age_grp  = factor(age_grp, levels = levels(mort_df$age_grp)),
+    age_grp  = factor(age_grp, levels = levels(mort$age_grp)),
     sex_male = as.numeric(sex_male)      
   )
 
@@ -2224,17 +2222,11 @@ p_A <- ggplot(test_feat, aes(x = age_grp, y = entropy_A)) +
 ggsave("entropy_by_age_model_A.png", plot = p_A, width = 8, height = 5, dpi = 300)
 
 ```
-Calculate DQ score using linear model with age/sex for top ten garbage codes
+Calculate DQ score using linear model with age/sex for top ten garbage codes (slow version)
 ```{r}
-# ──────────────────────────────────────────────────────────────
-# Data-Quality Project · Garbage-Code DQ score
-# ORIGINAL WORKING VERSION – 2025-07-07
-# ──────────────────────────────────────────────────────────────
-
 ## 0 · Setup – packages, paths, helpers  ← unchanged
 required <- c("arrow", "dplyr", "tidyr", "stringr", "purrr",
-              "nnet", "matrixStats", "glue", "readr")
-missing  <- setdiff(required, rownames(installed.packages()))
+              "nnet", "matrixStats", "glue", "readr", "Matrix", "glmnet")
 if (length(missing)) install.packages(missing)
 invisible(lapply(required, library, character.only = TRUE))
 
@@ -2284,6 +2276,45 @@ make_features3 <- function(df) {
                 values_from  = flag,
                 values_fill  = list(flag = 0L)) |>
     ungroup()
+}
+
+fit_multinom <- function(tr, te) {
+
+  # expand design once, we can re-use it
+  X_tr <- sparse.model.matrix(~ . - uc3 - 1, data = tr)
+  X_te <- sparse.model.matrix(~ . - 1      , data = te,
+                              contrasts.arg = attr(X_tr, "contrasts"))
+  y_tr <- tr$uc3
+
+  k <- nlevels(y_tr)
+
+  if (k <= 10) {
+    ## ---- fallback to nnet ------------------------------------------------
+    dat_tr <- as.data.frame(as.matrix(X_tr))
+    dat_te <- as.data.frame(as.matrix(X_te))
+    dat_tr$uc3 <- y_tr
+
+    m <- nnet::multinom(uc3 ~ ., data = dat_tr, trace = FALSE, MaxNWts = 1e6)
+
+    pr <- predict(m, newdata = dat_te, type = "probs")
+    if (is.null(dim(pr))) {
+      lev <- m$lev
+      pr  <- cbind(setNames(1 - pr, lev[1]), setNames(pr, lev[2]))
+    }
+  } else {
+    ## ---- glmnet with moderate ridge -------------------------------------
+    tiny_lambda <- 1e-6
+    path <- 10^seq(-2, log10(tiny_lambda), length.out = 50)   # 0.01 … 1e-6
+
+    g <- glmnet(X_tr, y_tr, family = "multinomial",
+                alpha = 0, lambda = path,
+                standardize = FALSE,
+                type.multinomial = "ungrouped")
+
+    pr <- predict(g, X_te, s = tiny_lambda, type = "response")[ , , 1]
+  }
+
+  apply(pr, 1L, entropy_bits)
 }
 
 ## 1 · Load & pre-process 2020 mortality data  ← unchanged
@@ -2354,23 +2385,22 @@ compute_dq <- function(garbage_code, candidate_codes) {
 
   ## 2 b · TEST SET  (garbage-coded deaths)
   test <- mort |>
-    filter(uc4 == garbage_code) |>
-    mutate(across(starts_with("record_"), clean_icd3)) |>
-    select(age_grp, sex_male, starts_with("record_"))
+  filter(uc4 == garbage_code) |>
+  mutate(across(starts_with("record_"), clean_icd3)) |>
+  select(age_grp, sex_male, starts_with("record_"))
 
   if (nrow(test) == 0) {
     warning("No deaths coded as ", garbage_code, " – skipped.")
     return(NULL)
   }
-
-  test_feat <- make_features3(test) |>
-    select(age_grp, sex_male, all_of(keep_cc))
-
-  ## fill any cc_ columns that were present in training but absent here
+  
+  test_feat <- make_features3(test)
+  
+  ## ── pad any cc_* columns that were kept in training but absent here
   missing_cc <- setdiff(keep_cc, names(test_feat))
   if (length(missing_cc)) test_feat[missing_cc] <- 0L
-
-  ## reorder cols to match training
+  
+  ## final tidy, in training-column order
   test_feat <- test_feat |>
     select(age_grp, sex_male, all_of(keep_cc))
 
@@ -2401,24 +2431,8 @@ compute_dq <- function(garbage_code, candidate_codes) {
             select(-age_grp, -sex_male)
 
     if (nrow(tr) < 50 || nrow(te) < 10) next
-
-    fit_sub <- nnet::multinom(uc3 ~ .,
-                              data = tr,
-                              MaxNWts = 47128,
-                              trace   = FALSE)
-
-    probs_B <- predict(fit_sub, newdata = te, type = "probs")
-
-    ## multinom() returns a vector instead of a matrix if k = 2
-    if (is.null(dim(probs_B))) {
-      lev <- fit_sub$lev          # NB: *sub*, not fit_A
-      probs_B <- cbind(
-        setNames(1 - probs_B, lev[1]),
-        setNames(    probs_B, lev[2])
-      )
-    }
-
-    H_B[te_idx] <- apply(probs_B, 1, entropy_bits)
+    
+    H_B[te_idx] <- fit_multinom(tr, te)
   }
 
   DQ_B <- 1 - mean(H_B, na.rm = TRUE) / log2(length(candidate_codes))
@@ -2441,29 +2455,788 @@ print(dq_results, n = Inf)
 # write_csv(dq_results, "dq_scores_2020.csv")   # optional
 
 ```
+Calculate DQ score using linear model with age/sex for top ten garbage codes (fast version)
 ```{r}
-candidate_codes <- c("C54","C53")          # whatever the two targets are
-train <- mort %>% filter(uc3 %in% cand)
-garbage_code <- "C55"
+################################################################################
+## 0 · Setup – packages, paths, helpers
+################################################################################
 
 
-## 2 a · TRAINING SET  (specific deaths)
+required <- c(
+  "arrow", "dplyr", "tidyr", "stringr", "purrr",
+  "nnet", "matrixStats", "glue", "readr", "Matrix", "glmnet",
+  "data.table"
+)
+missing <- setdiff(required, rownames(installed.packages()))
+if (length(missing)) install.packages(missing)
+invisible(lapply(required, library, character.only = TRUE))
+
+parquet_dir <- "/Users/amymann/Documents/Data Quality Project/data/parquet"
+year_target <- 2020
+
+## 0 b · Load (garbage,target) pairs → look-up ----------------------------------
+target_map  <- read_csv("garbage_target_map.csv", show_col_types = FALSE) %>%
+  mutate(across(everything(), str_trim)) %>%
+  filter(str_detect(garbage, "^[A-Z][0-9]{2}$"),
+         str_detect(target , "^[A-Z][0-9]{2}$")) %>%
+  distinct()
+
+garbage_tbl <- target_map %>%
+  group_by(garbage) %>%
+  summarise(candidate_codes = list(unique(target)), .groups = "drop")
+
+## 0 c · Utility functions ------------------------------------------------------
+clean_icd4 <- function(x) {
+  x %>% str_trim() %>% str_to_upper() %>%
+    str_remove_all("[^A-Z0-9]") %>% str_sub(1, 4)
+}
+clean_icd3 <- function(x) {
+  x %>% str_trim() %>% str_to_upper() %>%
+    str_remove_all("[^A-Z0-9]") %>% str_sub(1, 3)
+}
+entropy_bits <- function(p) { p <- p[p > 0]; -sum(p * log2(p)) }
+
+## FAST helper – wide → sparse (data.table melt/dcast) -------------------------
+make_features3 <- function(df) {
+  DT <- as.data.table(df)
+  if (!"row_id" %in% names(DT)) DT[, row_id := .I]
+
+  cc_cols <- grep("^record_", names(DT), value = TRUE)
+
+  long <- melt(
+    DT,
+    id.vars      = "row_id",
+    measure.vars = cc_cols,
+    value.name   = "cc"
+  )[
+    , cc := substr(toupper(gsub("[^A-Z0-9]", "", trimws(cc))), 1L, 3L)
+  ][
+    nzchar(cc) & cc != "NAN"
+  ]
+
+  # map codes to consecutive integers
+  long[, cc_fac := factor(cc)]
+  n_rows <- max(long$row_id)
+  n_cols <- nlevels(long$cc_fac)
+
+  sparseMatrix(
+    i        = long$row_id,
+    j        = as.integer(long$cc_fac),
+    x        = 1L,
+    dims     = c(n_rows, n_cols),
+    dimnames = list(NULL, paste0("cc_", levels(long$cc_fac)))
+  )
+}
+
+
+## Ridge-path multinomial (glmnet) ---------------------------------------------
+fit_multinom <- function(tr, te) {
+
+  ## keep strictly numeric predictors -----------------------------------------
+  num_tr <- dplyr::select(tr, where(is.numeric))
+  num_te <- dplyr::select(te , where(is.numeric))
+
+  if (ncol(num_tr) == 0)            # nothing to learn from
+    return(rep(NA_real_, nrow(te)))
+
+    X_tr <- Matrix::Matrix(data.matrix(num_tr), sparse = TRUE)
+  X_te <- Matrix::Matrix(data.matrix(num_te), sparse = TRUE)
+
+  y_tr <- tr$uc3
+
+  freq <- table(y_tr)
+  keep <- names(freq[freq >= 20])
+  if (length(keep) < 2)             # too few classes
+    return(rep(NA_real_, nrow(te)))
+
+  sel  <- y_tr %in% keep
+  X_tr <- X_tr[sel , ]
+  y_tr <- factor(y_tr[sel])
+
+  g <- glmnet(X_tr, y_tr,
+              family           = "multinomial",
+              alpha            = 0,
+              lambda           = NULL,
+              standardize      = FALSE,
+              type.multinomial = "ungrouped",
+              maxit            = 1e5)
+
+  lam_min <- tail(g$lambda, 1L)
+  pr <- predict(g, X_te, s = lam_min, type = "response")[ , , 1]
+
+  apply(pr, 1L, entropy_bits)
+}
+
+################################################################################
+## 1 · Load & pre-process mortality data (2020)
+################################################################################
+ds   <- open_dataset(file.path(parquet_dir, glue("mort{year_target}.parquet")))
+mort <- collect(ds) %>%
+  mutate(
+    row_id   = row_number(),
+    uc4      = clean_icd4(ucod),
+    uc3      = clean_icd3(ucod),
+    across(starts_with("record_"), clean_icd4),
+    ager27   = factor(ager27),
+    sex_male = if_else(sex == "M", 1L, 0L, missing = 0L)
+  ) %>%
+  mutate(
+    age_grp = case_when(
+      ager27 %in% c("01","02","03","04","05","06","07",
+                    "08","09","10","11") ~ "0–49",
+      ager27 %in% c("12","13")            ~ "50–59",
+      ager27 == "14"                      ~ "60–64",
+      ager27 == "15"                      ~ "65–69",
+      ager27 == "16"                      ~ "70–74",
+      ager27 == "17"                      ~ "75–79",
+      ager27 == "18"                      ~ "80–84",
+      ager27 == "19"                      ~ "85–89",
+      ager27 == "20"                      ~ "90–94",
+      ager27 %in% as.character(21:27)     ~ "95+",
+      TRUE                                ~ NA_character_
+    ),
+    age_grp = factor(age_grp,
+                     levels = c("0–49","50–59","60–64","65–69",
+                                "70–74","75–79","80–84",
+                                "85–89","90–94","95+"))
+  )
+
+################################################################################
+## 2 · One-time heavy feature build (re-used by every garbage code)
+################################################################################
+all_feat <- mort %>%                      # <-- keep this
+  select(row_id, starts_with("record_")) %>%
+  make_features3()                        # returns dgCMatrix
+
+################################################################################
+## 3 · Core worker – conditional-entropy DQ for a garbage code
+################################################################################
+compute_dq <- function(garbage_code, candidate_codes) {
+
+  message(glue("\n▶ {garbage_code}  (k = {length(candidate_codes)})"))
+
+  ## TRAIN deaths (specific codes) ---------------------------------------------
+  train <- mort %>%
+    filter(uc3 %in% candidate_codes) %>%
+    select(row_id, uc3, age_grp, sex_male)
+  if (nrow(train) < 100) return(NULL)
+
+  ## TEST deaths (garbage-coded) -----------------------------------------------
+  test  <- mort %>%
+    filter(uc4 == garbage_code) %>%
+    select(row_id, age_grp, sex_male)
+  if (nrow(test) == 0) return(NULL)
+
+  ## Slice the pre-computed feature matrix -------------------------------------
+  train_rows <- train$row_id
+  test_rows  <- test$row_id
+
+  train_feat <- all_feat[train_rows, , drop = FALSE]  # dgCMatrix
+  test_feat  <- all_feat[test_rows , , drop = FALSE]
+
+  ## Keep cc_* columns observed ≥ 20× in training ------------------------------
+  nz_train    <- Matrix::colSums(train_feat)
+  keep_idx    <- which(nz_train >= 8)
+  keep_names  <- colnames(all_feat)[keep_idx]
+
+  ## Convert selected columns to data frames (dense) ---------------------------
+  train_cc_df <- as.data.frame(as.matrix(train_feat[ , keep_idx, drop = FALSE]))
+  test_cc_df  <- as.data.frame(as.matrix(test_feat [ , keep_idx, drop = FALSE]))
+
+  ## Ensure proper base types for joining --------------------------------------
+  train$age_grp  <- as.character(train$age_grp)
+  test$age_grp   <- as.character(test$age_grp)
+  train$sex_male <- as.character(train$sex_male)
+  test$sex_male  <- as.character(test$sex_male)
+
+  ## Combine with covariates ---------------------------------------------------
+  train_tidy <- dplyr::bind_cols(train, train_cc_df)
+
+  test_tidy  <- dplyr::bind_cols(test , test_cc_df)
+
+  if (interactive()) {
+  cat("\nColumn types right before count():\n")
+  print(vapply(train_tidy[c("age_grp", "sex_male")], class, character(1)))
+}
+  ## Stratify by age × sex -----------------------------------------------------
+  strata <- train_tidy %>%
+    dplyr::count(age_grp, sex_male, name = "n") %>%
+    dplyr::filter(n >= 100)
+
+  H_B <- rep(NA_real_, nrow(test_tidy))
+
+  for (i in seq_len(nrow(strata))) {
+    ag <- strata$age_grp[i]
+    sm <- strata$sex_male[i]
+
+    tr <- train_tidy %>%
+      filter(age_grp == ag, sex_male == sm) %>%
+      select(-age_grp, -sex_male)
+
+    te_idx <- which(test_tidy$age_grp == ag & test_tidy$sex_male == sm)
+
+    te <- test_tidy[te_idx, ] %>%
+      select(-age_grp, -sex_male)
+
+    if (nrow(tr) < 50 || nrow(te) < 10) next
+    H_B[te_idx] <- fit_multinom(tr, te)
+  }
+
+  DQ_B <- 1 - mean(H_B, na.rm = TRUE) / log2(length(candidate_codes))
+
+  tibble(
+    garbage_code = garbage_code,
+    n_garbage    = nrow(test_tidy),
+    k_targets    = length(candidate_codes),
+    DQ_B         = round(DQ_B, 3)
+  )
+}
+
+################################################################################
+## 4 · Run for every garbage code in the look-up
+################################################################################
+dq_results <- purrr::map_dfr(
+  seq_len(nrow(garbage_tbl)),
+  \(i) compute_dq(garbage_tbl$garbage[i],
+                  garbage_tbl$candidate_codes[[i]])
+)
+
+print(dq_results, n = Inf)
+# write_csv(dq_results, "dq_scores_2020.csv")
+
+################################################################################
+## 5 · Re-run worker while keeping record-level entropy ------------------------
+################################################################################
+
+compute_dq_collect <- function(garbage_code, candidate_codes) {
+
+  message(glue("\n▶ {garbage_code}  (k = {length(candidate_codes)})"))
+
+  # ---- TRAIN & TEST splits ---------------------------------------------------
+  train <- mort %>%
+    filter(uc3 %in% candidate_codes) %>%
+    select(row_id, uc3, age_grp, sex_male)
+
+  test  <- mort %>%
+    filter(uc4 == garbage_code) %>%
+    select(row_id, age_grp, sex_male)
+
+  if (nrow(train) < 100 || nrow(test) == 0) return(NULL)
+
+  # ---- Features --------------------------------------------------------------
+  train_rows <- train$row_id
+  test_rows  <- test$row_id
+  train_feat <- all_feat[train_rows, , drop = FALSE]
+  test_feat  <- all_feat[test_rows , , drop = FALSE]
+
+  nz_train <- Matrix::colSums(train_feat)
+  keep_idx <- which(nz_train >= 8)
+
+  train_cc_tbl <- tibble::as_tibble(as.matrix(train_feat[, keep_idx, drop = FALSE]),
+                                    .name_repair = "minimal")
+  test_cc_tbl  <- tibble::as_tibble(as.matrix(test_feat [, keep_idx, drop = FALSE]),
+                                    .name_repair = "minimal")
+
+  # ---- Build tidy frames (no list cols) --------------------------------------
+  train_tidy <- dplyr::bind_cols(
+      train %>% mutate(age_grp  = as.character(age_grp),
+                       sex_male = as.character(sex_male)),
+      train_cc_tbl
+    ) %>%
+    mutate(             # << force-flatten just in case
+      age_grp  = as.character(unlist(age_grp)),
+      sex_male = as.character(unlist(sex_male))
+    )
+
+  test_tidy <- dplyr::bind_cols(
+      test %>%  mutate(age_grp  = as.character(age_grp),
+                       sex_male = as.character(sex_male)),
+      test_cc_tbl
+    ) %>%
+    mutate(
+      age_grp  = as.character(unlist(age_grp)),
+      sex_male = as.character(unlist(sex_male))
+    )
+
+  # ---- one-time diagnostic ---------------------------------------------------
+  if (identical(garbage_code, garbage_tbl$garbage[[1]])) {
+    cat("\n[diag] class(age_grp)  =", class(train_tidy$age_grp),
+        " | class(sex_male) =", class(train_tidy$sex_male), "\n")
+  }
+
+  # ---- Stratify --------------------------------------------------------------
+  strata <- train_tidy %>%
+  dplyr::count(age_grp, sex_male, name = "n") %>%   # <- add dplyr::
+  filter(n >= 100)
+
+  H_B <- rep(NA_real_, nrow(test_tidy))
+
+  for (i in seq_len(nrow(strata))) {
+    ag <- strata$age_grp[i]; sm <- strata$sex_male[i]
+
+    tr <- train_tidy %>%
+      filter(age_grp == ag, sex_male == sm) %>%
+      select(-age_grp, -sex_male)
+
+    te_idx <- which(test_tidy$age_grp == ag & test_tidy$sex_male == sm)
+    if (length(te_idx) < 10 || nrow(tr) < 50) next
+
+    te <- test_tidy[te_idx, ] %>% select(-age_grp, -sex_male)
+    H_B[te_idx] <- fit_multinom(tr, te)
+  }
+
+  # ---- Summaries -------------------------------------------------------------
+  summary_tbl <- tibble(
+    garbage_code = garbage_code,
+    n_garbage    = nrow(test_tidy),
+    k_targets    = length(candidate_codes),
+    DQ_B         = round(1 - mean(H_B, na.rm = TRUE) /
+                           log2(length(candidate_codes)), 3)
+  )
+
+  entropy_tbl <- tibble(
+    row_id       = test$row_id,
+    garbage_code = garbage_code,
+    age_grp      = test$age_grp,
+    sex_male     = test$sex_male,
+    entropy_bits = H_B,
+    k_targets    = length(candidate_codes)
+  )
+
+  list(summary = summary_tbl, entropy = entropy_tbl)
+}
+
+
+## Run for every garbage code ---------------------------------------------------
+dq_list <- purrr::map(seq_len(nrow(garbage_tbl)), \(i)
+                      compute_dq_collect(garbage_tbl$garbage[i],
+                                         garbage_tbl$candidate_codes[[i]])) |>
+           purrr::compact()                                   # drop NULLs
+
+dq_results      <- purrr::map_dfr(dq_list, "summary")
+entropy_records <- purrr::map_dfr(dq_list, "entropy")
+
+################################################################################
+## 6 · Flatten results and visualise
+################################################################################
+library(dplyr)
+library(tidyr)
+library(ggplot2)
+library(forcats)
+
+## 6 a · Combine outputs --------------------------------------------------------
+dq_summary <- purrr::map_dfr(dq_list, "summary")
+dq_entropy <- purrr::map_dfr(dq_list, "entropy")
+
+## 6 b · Histogram of DQ_B ------------------------------------------------------
+p_hist <- ggplot(dq_summary, aes(DQ_B)) +
+  geom_histogram(binwidth = 0.05, boundary = 0, closed = "left",
+                 fill = "steelblue", colour = "black") +
+  labs(title = "Distribution of DQ scores (entropy-based)",
+       x = "DQ_B  (1 = max certainty, 0 = no info)",
+       y = "Number of garbage codes") +
+  theme_bw(base_size = 12)
+
+## 6 c · Bar plot – top 25 by n_garbage ----------------------------------------
+top25 <- dq_summary %>%
+  slice_max(n_garbage, n = 25, with_ties = FALSE) %>%
+  mutate(garbage_code = fct_reorder(garbage_code, DQ_B))
+
+p_bar <- ggplot(top25, aes(garbage_code, DQ_B, fill = DQ_B)) +
+  geom_col(show.legend = FALSE) +
+  coord_flip() +
+  scale_fill_viridis_c(option = "B", direction = -1) +
+  labs(title = "Top 25 garbage codes (by n)",
+       x = NULL, y = "DQ_B") +
+  theme_bw(base_size = 12)
+
+###############################################################################
+## 7 · Extra visualisations
+##     - Box-and-whisker: Entropy by age group
+##     - Density ridge  : Entropy by age group
+##     - Box-and-whisker: Entropy by sex
+###############################################################################
+library(ggplot2)
+library(forcats)
+library(ggridges)
+
+## a) Box-and-whisker – entropy by age group -----------------------------------
+p_box_age <- ggplot(dq_entropy, aes(age_grp, entropy_bits)) +
+  geom_boxplot(fill = "skyblue", colour = "black", outlier.alpha = 0.3) +
+  labs(title = "Entropy by Age Group",
+       x = "Age Group", y = "Entropy (bits)") +
+  theme_bw(base_size = 12)
+
+## b) Density ridge – entropy distribution by age group ------------------------
+p_ridge_age <- ggplot(dq_entropy,
+                      aes(entropy_bits,
+                          fct_rev(age_grp),  # highest age at top
+                          fill = age_grp)) +
+  geom_density_ridges(alpha = 0.8, scale = 1.2, colour = "black") +
+  scale_fill_viridis_d(option = "A") +
+  labs(title = "Entropy Distribution by Age Group",
+       x = "Entropy (bits)", y = NULL, fill = "Age Group") +
+  theme_bw(base_size = 12) +
+  theme(legend.position = "none")
+
+## c) Box-and-whisker – entropy by sex -----------------------------------------
+dq_entropy <- dq_entropy %>%
+  mutate(sex = ifelse(sex_male == 1, "Male",
+                      ifelse(sex_male == 0, "Female", NA)))
+
+p_box_sex <- ggplot(dq_entropy, aes(sex, entropy_bits, fill = sex)) +
+  geom_boxplot(colour = "black", outlier.alpha = 0.3) +
+  scale_fill_manual(values = c(Female = "#FFB6C1", Male = "#87CEFA")) +
+  labs(title = "Entropy by Sex",
+       x = NULL, y = "Entropy (bits)", fill = "Sex") +
+  theme_bw(base_size = 12) +
+  theme(legend.position = "none")
+
+## Display or save -------------------------------------------------------------
+print(p_box_age)
+print(p_ridge_age)
+print(p_box_sex)
+
+# Optional PNG exports (uncomment if desired)
+ggsave("entropy_box_age.png",  p_box_age,  width = 7, height = 4, dpi = 300)
+ggsave("entropy_ridge_age.png", p_ridge_age, width = 7, height = 5, dpi = 300)
+ggsave("entropy_box_sex.png",  p_box_sex,  width = 4, height = 4, dpi = 300)
+
+################################################################################
+## 7 · Train/test validation on non-garbage-coded deaths -----------------------
+################################################################################
+
+set.seed(2020)  # For reproducibility
+
+# 7 a · Sample target-coded deaths --------------------------------------------
+target_deaths <- mort %>%
+  filter(uc3 %in% unlist(garbage_tbl$candidate_codes)) %>%
+  select(row_id, uc3, age_grp, sex_male)
+
+freq_tbl <- dplyr::count(target_deaths, uc3) %>%
+  filter(n >= 100)
+
+# Train/test split (80/20 stratified)
+target_deaths <- target_deaths %>%
+  group_by(uc3) %>%
+  mutate(split = sample(c("train", "test"),
+                        size = n(),
+                        replace = TRUE,
+                        prob = c(0.8, 0.2))) %>%
+  ungroup()
+
+################################################################################
+## 7 · Train/test validation: multinomial model + logloss & accuracy
+################################################################################
+
+set.seed(2020)
+
+# Step 1: Stratified split of target-coded deaths
+target_deaths <- mort %>%
+  filter(uc3 %in% unlist(garbage_tbl$candidate_codes)) %>%
+  select(row_id, uc3, age_grp, sex_male)
+
+target_deaths <- target_deaths %>%
+  group_by(uc3) %>%
+  mutate(split = sample(c("train", "test"),
+                        size = n(),
+                        replace = TRUE,
+                        prob = c(0.8, 0.2))) %>%
+  ungroup()
+
+# Step 2: Filter TRAIN classes that have ≥ 20 examples
+freq_tbl <- target_deaths %>%
+  filter(split == "train") %>%
+  dplyr::count(uc3) %>%
+  filter(n >= 20)
+
+keep_codes <- freq_tbl$uc3
+
+train_deaths <- target_deaths %>%
+  filter(split == "train", uc3 %in% keep_codes)
+
+test_deaths <- target_deaths %>%
+  filter(split == "test",  uc3 %in% keep_codes)
+
+# Step 3: Extract sparse features and filter columns
+train_rows <- train_deaths$row_id
+test_rows  <- test_deaths$row_id
+
+X_train <- all_feat[train_rows, , drop = FALSE]
+X_test  <- all_feat[test_rows , , drop = FALSE]
+
+keep_cols <- which(Matrix::colSums(X_train) >= 20)
+X_train <- X_train[ , keep_cols]
+X_test  <- X_test  [ , keep_cols]
+
+y_train <- train_deaths$uc3
+y_test  <- test_deaths$uc3
+
+# Step 4: Fit multinomial ridge model
+library(glmnet)
+
+model <- glmnet(X_train, factor(y_train),
+                family = "multinomial",
+                alpha = 0,
+                lambda = NULL,
+                standardize = FALSE,
+                type.multinomial = "ungrouped")
+
+lambda_min <- tail(model$lambda, 1)
+
+# Step 5: Predict probabilities
+prob_mat <- predict(model, X_test, s = lambda_min, type = "response")[ , , 1]
+class_labels <- colnames(prob_mat)
+
+# Step 6: Compute log loss & accuracy
+true_idx <- match(y_test, class_labels)
+correct_probs <- prob_mat[cbind(seq_along(y_test), true_idx)]
+logloss <- -mean(log(pmax(correct_probs, 1e-15)))  # avoid log(0)
+
+pred_top1 <- apply(prob_mat, 1, function(p) class_labels[which.max(p)])
+accuracy <- mean(pred_top1 == y_test)
+
+# Step 7: Accuracy by entropy quartile
+entropy_bits <- function(p) { p <- p[p > 0]; -sum(p * log2(p)) }
+
+# Compute entropy per row of probability matrix
+entropy_vec <- apply(prob_mat, 1, entropy_bits)
+
+# Define quartiles
+quart <- cut(entropy_vec,
+             breaks = quantile(entropy_vec, probs = seq(0, 1, 0.25), na.rm = TRUE),
+             include.lowest = TRUE,
+             labels = paste0("Q", 1:4))
+
+quartile_tbl <- tibble(quartile = quart,
+  correct  = pred_top1 == y_test) %>%
+  group_by(quartile) %>%
+  summarise(n = n(), accuracy = mean(correct), .groups = "drop")
+
+# Step 8: Print summary
+cat("▶ Multinomial ridge model validation\n")
+cat(glue("- Overall top-1 accuracy: {round(accuracy * 100, 1)}%\n"))
+cat(glue("- Multiclass log loss   : {round(logloss, 4)}\n"))
+cat("- Accuracy by entropy quartile:\n")
+print(quartile_tbl, n = Inf)
+```
+Calculate DQ score using light GLM with age/sex for top ten garbage codes
+```{r}
+
+#!/usr/bin/env Rscript
+# ---------------------------------------------------------------------------
+#  Data-Quality (DQ) scores for garbage-coded deaths
+#  ▶ Multiclass LightGBM + entropy
+#  ▶ Copy-paste into an .R or .Rmd file and run
+# ---------------------------------------------------------------------------
+
+## 0 · Setup – packages, paths, helpers ---------------------------------------
+required <- c("arrow", "dplyr", "tidyr", "stringr", "purrr",
+              "Matrix", "lightgbm", "matrixStats", "glue", "readr",
+              "forcats", "ggplot2")  # <- added for plotting
+
+missing  <- setdiff(required, rownames(installed.packages()))
+if (length(missing)) install.packages(missing)
+invisible(lapply(required, library, character.only = TRUE))
+
+parquet_dir <- "/Users/amymann/Documents/Data Quality Project/data/parquet"
+year_target <- 2020                       # still a single year for now
+
+## 0 a · Cleaners --------------------------------------------------------------
+clean_icd4 <- function(x) {
+  x |> str_trim() |> str_to_upper() |>
+    str_remove_all("[^A-Z0-9]") |> str_sub(1, 4)
+}
+clean_icd3 <- function(x) {
+  x |> str_trim() |> str_to_upper() |>
+    str_remove_all("[^A-Z0-9]") |> str_sub(1, 3)
+}
+entropy_bits <- function(p) {             # Shannon entropy in bits
+  p <- p[p > 0]
+  -sum(p * log2(p))
+}
+
+## 0 b · Feature builder (multi-hot cc_* columns) ------------------------------
+make_features3 <- function(df) {
+  df |>
+    select(-record_1) |>
+    rowwise() |>
+    mutate(
+      cc_list = list(
+        c_across(starts_with("record_")) |>
+          clean_icd3() |>
+          purrr::discard(~ is.na(.x) || .x == "" ||
+                           toupper(.x) == "NAN")
+      )
+    ) |>
+    unnest_longer(cc_list) |>
+    distinct() |>
+    mutate(flag = 1L) |>
+    pivot_wider(names_from  = cc_list,
+                names_prefix = "cc_",
+                values_from  = flag,
+                values_fill  = list(flag = 0L)) |>
+    ungroup()
+}
+
+## 0 c · LightGBM helpers ------------------------------------------------------
+# --- build sparse matrix + keep cat columns native ---------------------------
+encode_lgb <- function(df, cats) {
+  x_cc <- sparse.model.matrix(~ . - 1, data = select(df, starts_with("cc_")))
+
+  if (length(cats)) {
+    cat_df  <- df[cats] |> mutate(across(everything(), as.integer))
+    cat_mat <- Matrix::Matrix(as.matrix(cat_df), sparse = TRUE)
+
+    # NEW: everything is sparse, so base cbind() works
+    x_all   <- cbind(cat_mat, x_cc)
+    cat_idx <- seq_along(cats) - 1L
+  } else {
+    x_all   <- x_cc
+    cat_idx <- integer()
+  }
+
+  list(X = x_all, cat_idx = cat_idx)
+}
+
+
+# --- fit LightGBM and return entropy vector ----------------------------------
+fit_lightgbm <- function(tr, te,
+                         nrounds = 600,      early_stop = 50,
+                         val_frac = 0.10,    min_data = 50,
+                         use_gpu = FALSE) {
+
+  if (nrow(te) == 0L) return(numeric(0))
+  tr <- tr |> filter(!is.na(uc3))
+  if (nrow(tr) < max(min_data, 2 / val_frac))
+    return(rep(NA_real_, nrow(te)))
+
+  cats <- c("age_grp", "sex_male")           # categorical columns
+  enc_tr <- encode_lgb(tr, cats); Xall <- enc_tr$X
+  yall   <- factor(tr$uc3); k <- nlevels(yall)
+
+  set.seed(1)
+  idx   <- sample.int(nrow(tr))
+  n_val <- floor(val_frac * length(idx))
+  val_i <- idx[seq_len(n_val)]; trn_i <- idx[-seq_len(n_val)]
+
+  dtrain <- lgb.Dataset(
+    data = Xall[trn_i, ],
+    label = as.integer(yall[trn_i]) - 1L,
+    categorical_feature = enc_tr$cat_idx
+  )
+  dvalid <- lgb.Dataset(
+    data = Xall[val_i, ],
+    label = as.integer(yall[val_i]) - 1L,
+    categorical_feature = enc_tr$cat_idx
+  )
+
+  params <- list(
+  objective         = if (k == 2) "binary" else "multiclass",
+  metric            = if (k == 2) "binary_logloss" else "multi_logloss",
+  learning_rate     = 0.03,
+  num_leaves        = 96,
+  max_depth         = -1,
+  min_data_in_leaf  = 20,
+  feature_fraction  = 0.8,
+  bagging_fraction  = 0.8,
+  bagging_freq      = 5,
+  lambda_l2         = 1.0,
+  seed              = 1,
+  device_type       = if (use_gpu) "gpu" else "cpu",
+  num_threads       = parallel::detectCores()
+)
+
+# ✨ Add this AFTER the list to explicitly set num_class when needed
+if (k > 2 || params$objective == "multiclass") {
+  params$num_class <- k
+}
+
+
+   bst <- lgb.train(
+    params                 = params,
+    data                   = dtrain,
+    nrounds                = nrounds,
+    valids                 = list(valid = dvalid),
+    early_stopping_rounds = early_stop,
+    verbose                = -1
+  )
+
+
+  enc_te <- encode_lgb(te, cats)
+  pmat <- predict(bst, enc_te$X)                  # returns flat vector if multiclass
+if (k > 2) {
+  pmat <- matrix(pmat, ncol = k, byrow = TRUE)  # reshape to n × k
+} else {
+  pmat <- cbind(1 - pmat, pmat)                 # binary case: make 2-column probs
+}
+  apply(pmat, 1L, entropy_bits)
+}
+
+## 1 · Load (garbage,target) pairs --------------------------------------------
+target_map <- read_csv("garbage_target_map.csv", show_col_types = FALSE) |>
+  mutate(across(everything(), str_trim)) |>
+  filter(str_detect(garbage, "^[A-Z][0-9]{2}$"),
+         str_detect(target , "^[A-Z][0-9]{2}$")) |>
+  distinct()
+
+garbage_tbl <- target_map |>
+  group_by(garbage) |>
+  summarise(candidate_codes = list(unique(target)), .groups = "drop")
+
+## 2 · Load & pre-process 2020 mortality data ---------------------------------
+ds <- open_dataset(file.path(parquet_dir, glue("mort{year_target}.parquet")))
+mort <- collect(ds) |>
+  mutate(
+    uc4      = clean_icd4(ucod),
+    uc3      = clean_icd3(ucod),
+    across(starts_with("record_"), clean_icd4),
+    ager27   = factor(ager27),
+    sex_male = if_else(sex == "M", 1, 0, missing = 0)
+  ) |>
+  mutate(
+    age_grp = dplyr::case_when(
+      ager27 %in% c("01","02","03","04","05","06","07",
+                    "08","09","10","11") ~ "0–49",
+      ager27 %in% c("12","13")            ~ "50–59",
+      ager27 == "14"                      ~ "60–64",
+      ager27 == "15"                      ~ "65–69",
+      ager27 == "16"                      ~ "70–74",
+      ager27 == "17"                      ~ "75–79",
+      ager27 == "18"                      ~ "80–84",
+      ager27 == "19"                      ~ "85–89",
+      ager27 == "20"                      ~ "90–94",
+      ager27 %in% as.character(21:27)     ~ "95+",
+      TRUE                                ~ NA_character_
+    ),
+    age_grp = factor(age_grp,
+                     levels = c("0–49","50–59","60–64","65–69",
+                                "70–74","75–79","80–84",
+                                "85–89","90–94","95+"))
+  )
+
+## 3 · Core worker -------------------------------------------------------------
+compute_dq <- function(garbage_code, candidate_codes) {
+
+  message(glue("\n▶ Processing {garbage_code} (k = {length(candidate_codes)})"))
+
+  ## 3 a · TRAINING SET (correctly coded deaths) ------------------------------
   train <- mort |>
     filter(uc3 %in% candidate_codes) |>
     mutate(across(starts_with("record_"), clean_icd3)) |>
     select(uc3, age_grp, sex_male, starts_with("record_"))
 
-  if (nrow(train) < 100){
+  if (nrow(train) < 100) {
     warning("Not enough training deaths for ", garbage_code, " – skipped.")
     return(NULL)
   }
-
   train_feat <- make_features3(train)
 
+  ## keep cc_* columns seen ≥ 20 times ----------------------------------------
   keep_cc <- names(
     which(
       colSums(
-        select(train_feat, starts_with("cc_")) |> 
+        select(train_feat, starts_with("cc_")) |>
           mutate(across(everything(), as.numeric)),
         na.rm = TRUE
       ) >= 20
@@ -2475,67 +3248,270 @@ garbage_code <- "C55"
     mutate(age_grp  = factor(age_grp, levels = levels(mort$age_grp)),
            sex_male = factor(sex_male))
 
-  ## 2 b · TEST SET  (garbage-coded deaths)
+  ## 3 b · TEST SET (garbage-coded deaths) ------------------------------------
   test <- mort |>
     filter(uc4 == garbage_code) |>
     mutate(across(starts_with("record_"), clean_icd3)) |>
     select(age_grp, sex_male, starts_with("record_"))
 
-  if (nrow(test) == 0){
+  if (nrow(test) == 0) {
     warning("No deaths coded as ", garbage_code, " – skipped.")
     return(NULL)
   }
+  test_feat <- make_features3(test)
 
-feature_cols <- setdiff(names(train_tidy), c("uc3", "age_grp", "sex_male"))
-test_feat <- test_feat %>%
-  select(age_grp, sex_male, all_of(intersect(feature_cols, names(.)))) %>%
-  { 
-    missing <- setdiff(feature_cols, names(.))
-    if (length(missing)) .[missing] <- 0L
-    .
-  } %>%
-  select(age_grp, sex_male, all_of(feature_cols))
-  test_feat <- test_feat %>% select(-starts_with("record_"))
+  missing_cc <- setdiff(keep_cc, names(test_feat))
+  if (length(missing_cc)) test_feat[missing_cc] <- 0L
 
-  ## 3 · MODEL A  (no age/sex)
-  set.seed(123)
-  fit_A <- nnet::multinom(uc3 ~ ., data = select(train_tidy, -age_grp, -sex_male),
-                          MaxNWts = 10500, trace = FALSE)
- probs_A <- predict(fit_A, newdata = select(test_feat, -age_grp, -sex_male),
-                     type = "probs")
- 
+  test_feat <- test_feat |>
+    select(age_grp, sex_male, all_of(keep_cc))
 
- 
-print(str(probs_A))             # vector vs. matrix?
-  H_A  <- apply(probs_A, 1, entropy_bits)
-  DQ_A <- 1 - mean(H_A) / log2(length(candidate_codes))
+  ## 3 c · Stratified modelling (age × sex) -----------------------------------
+  strata <- train_tidy |>
+    ungroup() |>
+    mutate(age_grp = as.character(age_grp),
+           sex_male = as.character(sex_male)) |>
+    group_by(age_grp, sex_male) |>
+    summarise(n = n(), .groups = "drop") |>
+    filter(n >= 100)
 
-  ## 4 · MODEL B  (stratified by age/sex)
-  strata <- count(train_tidy, age_grp, sex_male) |> filter(n >= 100)
   H_B <- rep(NA_real_, nrow(test_feat))
 
-  for (i in seq_len(nrow(strata))){
-    ag <- strata$age_grp[i]; sm <- strata$sex_male[i]
-    tr <- train_tidy |> filter(age_grp == ag, sex_male == sm) |> select(-age_grp, -sex_male)
-    te_idx <- which(test_feat$age_grp == ag & test_feat$sex_male == sm)
-    te <- test_feat[te_idx, ] |> select(-age_grp, -sex_male)
-    if (nrow(tr) < 50 || nrow(te) < 10) next
-    fit_sub <- nnet::multinom(uc3 ~ ., data = tr, MaxNWts = 10500, trace = FALSE)
-    H_B[te_idx] <- apply(predict(fit_sub, newdata = te, type = "probs"),
-                         1, entropy_bits)
-  }
+for (i in seq_len(nrow(strata))) {
+  ag <- strata$age_grp[i]; sm <- strata$sex_male[i]
+
+  # -- KEEP age_grp + sex_male ---------------------------------------------
+  tr <- train_tidy |>
+          filter(age_grp == ag, sex_male == sm)          #  <-- no select()
+
+  te_idx <- which(test_feat$age_grp == ag &
+                  test_feat$sex_male == sm)
+  te <- test_feat[te_idx, ]                              #  <-- no select()
+
+  if (nrow(tr) < 50 || nrow(te) < 10) next
+
+  H_B[te_idx] <- fit_lightgbm(tr, te, use_gpu = FALSE)
+}
+
+
   DQ_B <- 1 - mean(H_B, na.rm = TRUE) / log2(length(candidate_codes))
 
   tibble(
     garbage_code = garbage_code,
     n_garbage    = nrow(test_feat),
     k_targets    = length(candidate_codes),
-    DQ_A         = round(DQ_A, 3),
     DQ_B         = round(DQ_B, 3)
   )
+}
 
+## 4 · Run for every garbage code in the look-up ------------------------------
+dq_results <- purrr::map_dfr(seq_len(nrow(garbage_tbl)), \(i) {
+  compute_dq(garbage_tbl$garbage[i],
+             garbage_tbl$candidate_codes[[i]])
+})
 
-
+print(dq_results, n = Inf)
+# write_csv(dq_results, "dq_scores_2020.csv")   # optional
 ```
+Plots
+```{r}
+library(ggplot2)
+library(forcats)
 
+## Histogram of DQ_B values
+p_hist <- ggplot(dq_results, aes(DQ_B)) +
+  geom_histogram(binwidth = 0.05, boundary = 0, closed = "left", fill = "steelblue") +
+  labs(title = "Distribution of DQ scores (entropy-based)",
+       x = "DQ_B  (1 = max certainty, 0 = no info)",
+       y = "Number of garbage codes") +
+  theme_bw(base_size = 12)
+
+## Bar plot (top 25 garbage codes by sample size)
+top25 <- dq_results |>
+  slice_max(n_garbage, n = 25, with_ties = FALSE) |>
+  mutate(garbage_code = fct_reorder(garbage_code, DQ_B))
+
+p_bar <- ggplot(top25, aes(garbage_code, DQ_B, fill = DQ_B)) +
+  geom_col(show.legend = FALSE) +
+  coord_flip() +
+  scale_fill_viridis_c(option = "B", direction = -1) +
+  labs(title = "Top 25 garbage codes (by n)",
+       x = NULL, y = "DQ_B") +
+  theme_bw(base_size = 12)
+
+## Scatter plot: DQ_B vs. k_targets
+p_scatter <- ggplot(dq_results,
+                    aes(k_targets, DQ_B, size = n_garbage)) +
+  geom_point(alpha = 0.7, color = "black", fill = "lightblue", shape = 21) +
+  scale_size_area(max_size = 14) +
+  labs(title = "Certainty (DQ_B) vs. candidate pool size",
+       x = "Number of candidate true causes (k_targets)",
+       y = "DQ_B",
+       size = "n_garbage") +
+  theme_bw(base_size = 12)
+
+# Show plots
+print(p_bar)
+print(p_scatter)
+
+ggsave("dq_bar_top25.png", p_bar, width = 6, height = 6, dpi = 300)
+ggsave("dq_scatter.png", p_scatter, width = 6, height = 4, dpi = 300)
+```
+Validating LightGLM
+```{r}
+###############################################################################
+##  · Validation helper: 80/20 hold-out on correctly-coded deaths
+###############################################################################
+library(dplyr)
+library(Matrix)
+library(purrr)
+
+## ---- metric helpers ---------------------------------------------------------
+
+encode_lgb <- function(df, cats, feat_mat) {
+  if ("age_grp" %in% cats) {
+    df$age_grp <- factor(df$age_grp, levels = levels(mort$age_grp))
+  }
+  if ("sex_male" %in% cats) {
+    df$sex_male <- factor(df$sex_male, levels = c("0", "1"))
+  }
+  cat_mat <- sparse.model.matrix(~ . - 1, data = df[cats])
+  row_ids <- df$row_id
+  Matrix::cbind2(cat_mat, feat_mat[row_ids, , drop = FALSE])
+}
+
+
+## ---- metric helpers (replace the old ones) ----------------------------------
+multi_logloss <- function(pred, truth, class_levels) {
+  idx <- cbind(seq_len(nrow(pred)),
+               match(as.character(truth), class_levels))
+  -mean(log(pmax(pred[idx], 1e-15)))
+}
+
+top_k_acc <- function(pred, truth, class_levels, k = 1) {
+  topk <- apply(pred, 1L,
+                function(p) order(p, decreasing = TRUE)[seq_len(k)])
+  mean(class_levels[topk] ==
+         matrix(as.character(truth), nrow = nrow(pred), ncol = k))
+}
+
+entropy_bits_vec <- function(pmat) {
+  # pmat: n × k matrix of probs
+  apply(pmat, 1L, function(p) { p <- p[p > 0]; -sum(p * log2(p)) })
+}
+
+
+## ---- validation function ----------------------------------------------------
+validate_garbage_code <- function(garbage_code, candidate_codes,
+                                  val_frac = 0.2, seed = 42) {
+
+  message(glue::glue("\n[Val] {garbage_code}  (k = {length(candidate_codes)})"))
+
+  # 1)  pull correctly-coded deaths
+  dat <- mort %>%
+    filter(uc3 %in% candidate_codes) %>%
+    select(row_id, uc3, age_grp, sex_male)
+
+  if (nrow(dat) < 300) {
+    warning("Too few records for ", garbage_code, " – skipped.")
+    return(NULL)
+  }
+
+  # 2)  feature slice
+  feat <- all_feat
+  nz   <- Matrix::colSums(feat)
+  keep <- which(nz >= 30)
+  feat <- feat[, keep, drop = FALSE]
+
+  # 3)  train/test split (stratified on uc3)
+  set.seed(seed)
+  grp <- dat$uc3
+  val_idx <- unlist(tapply(seq_along(grp), grp, function(v) {
+    sample(v, ceiling(val_frac * length(v)))
+  }))
+  train_dat <- dat[-val_idx, ] %>%
+    mutate(age_grp = as.character(age_grp),
+           sex_male = as.character(sex_male))
+  test_dat <- dat[val_idx, ] %>%
+    mutate(age_grp = as.character(age_grp),
+           sex_male = as.character(sex_male))
+
+  # drop unused uc3 levels
+  train_dat$uc3 <- factor(train_dat$uc3, levels = candidate_codes) |> droplevels()
+  test_dat$uc3  <- factor(test_dat$uc3, levels = levels(train_dat$uc3))
+  class_levels  <- levels(train_dat$uc3)
+
+  if (length(class_levels) <= 1) {
+    warning("Only one class in training split for ", garbage_code, " – skipped.")
+    return(NULL)
+  }
+
+  # 4)  encode sparse + categorical features
+
+  cats <- c("age_grp", "sex_male")
+  X_tr <- encode_lgb(train_dat, cats, feat)
+  X_te <- encode_lgb(test_dat,  cats, feat)
+
+  # 5)  build LightGBM model
+  params <- list(
+    objective     = if (length(class_levels) == 2) "binary" else "multiclass",
+    metric        = if (length(class_levels) == 2) "binary_logloss" else "multi_logloss",
+    learning_rate = 0.03,
+    num_leaves    = 96,
+    num_threads   = parallel::detectCores()
+  )
+  if (length(class_levels) > 2) params$num_class <- length(class_levels)
+
+  bst <- lgb.train(
+    params = params,
+    data   = lgb.Dataset(X_tr, label = as.integer(train_dat$uc3) - 1L),
+    nrounds = 300,
+    verbose = -1
+  )
+
+# 6)  evaluate on test
+raw_pred <- predict(bst, X_te)
+
+if (length(class_levels) == 2) {
+  pred_mat <- cbind(1 - raw_pred, raw_pred)
+} else {
+  pred_mat <- matrix(raw_pred, ncol = length(class_levels), byrow = FALSE)
+}
+stopifnot(all(abs(rowSums(pred_mat) - 1) < 1e-6))
+
+
+  # 7)  metrics
+  multi_logloss <- function(pred, truth, class_levels) {
+    idx <- cbind(seq_len(nrow(pred)), match(as.character(truth), class_levels))
+    -mean(log(pmax(pred[idx], 1e-15)))
+  }
+  top_k_acc <- function(pred, truth, class_levels, k = 1) {
+    topk <- apply(pred, 1L, function(p) order(p, decreasing = TRUE)[seq_len(k)])
+    mean(class_levels[topk] == matrix(as.character(truth), nrow = nrow(pred), ncol = k))
+  }
+  entropy_bits_vec <- function(pmat) {
+    apply(pmat, 1L, function(p) { p <- p[p > 0]; -sum(p * log2(p)) })
+  }
+
+  ll   <- multi_logloss(pred_mat, test_dat$uc3, class_levels)
+  acc1 <- top_k_acc(pred_mat, test_dat$uc3, class_levels, k = 1)
+  acc3 <- top_k_acc(pred_mat, test_dat$uc3, class_levels, k = min(3, length(class_levels)))
+  mean_H <- mean(entropy_bits_vec(pred_mat))
+
+  tibble::tibble(
+    garbage_code = garbage_code,
+    n_train      = nrow(train_dat),
+    n_val        = nrow(test_dat),
+    k_targets    = length(class_levels),
+    logloss      = round(ll, 4),
+    acc_top1     = round(acc1, 4),
+    acc_top3     = round(acc3, 4),
+    mean_entropy = round(mean_H, 4)
+  )
+}
+val_summary <- purrr::map_dfr(seq_len(nrow(garbage_tbl)), \(i)
+  validate_garbage_code(garbage_tbl$garbage[i],
+                        garbage_tbl$candidate_codes[[i]])
+)
+```
 

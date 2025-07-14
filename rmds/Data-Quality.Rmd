@@ -2,6 +2,8 @@
 title: "Data Quality Project"
 output: html_notebook
 ---
+library(here)
+
 Load packages and summarize data.
 ```{r}
 ##############################################################################
@@ -18,10 +20,11 @@ library(stringr)
 library(readr)
 library(janitor)
 library(ggplot2)
+library(here)
 
 ## ── 1 · Parameters ──────────────────────────────────────────────────────────
-parquet_dir   <- "/Users/amymann/Documents/Data Quality Project/data/parquet"
-garbage_path  <- "/Users/amymann/Documents/Data Quality Project/data_quality/cause-codes/gbd_garbage_codes_with_descr.csv"
+parquet_dir   <- here("../data", "parquet")
+garbage_path  <- here("data_raw", "cause-codes", "gbd_garbage_codes_with_descr.csv")
 
 needed_cols   <- c("year", "sex", "race5", "marstat",
                    "placdth", "ucod", "ranum")
@@ -844,7 +847,6 @@ write_csv(x_garbage_check, "overdose_classification.csv")
 
 
 ```
-
 COMPLETENESS:Create timeseries of completeness of dataset.
 ```{r}
 ## ── 0 · Setup ───────────────────────────────────────────────────────────────
@@ -995,7 +997,6 @@ write.csv(by_ucr39,
 message("✅ Done: summaries written and plot saved.")
 
 ```
-
 LIGHT GARBAGE: Calcualtes proportion of light garbage and runs demographic analysis.
 ```{r}
 ###############################################################################
@@ -1191,7 +1192,6 @@ write_csv(ors_by_year, file.path(fig_dir, "light_or_by_year.csv"))
 message("All outputs saved to: ", fig_dir)
 
 ```
-
 ACCIDENTS DETAIL: Calculates level of death metric in accident deaths
 ```{r}
 library(arrow)
@@ -1201,19 +1201,40 @@ library(tidyr)
 library(stringr)
 
 parquet_dir    <- "/Users/amymann/Documents/Data Quality Project/data/parquet"
-detail_csv     <- "/Users/amymann/Documents/Data Quality Project/data_quality/accident-detail-codes.csv"
+detail_csv     <- "/Users/amymann/Documents/Data Quality Project/data_quality/cause-codes/accident-detail-codes-v2.csv"
 years_wanted   <- 1999:2023
 secondary_cols <- paste0("record_", 1:20)                 # add econd*/econds* if needed
 
-extra_cols     <- c("year", "sex", "race5", "educ2003", "marstat", "placdth")
+extra_cols     <- c("year", "sex", "race5", "educ2003", "marstat", "placdth", "ucr39")
 clean_icd <- function(x) {
   x |> toupper() |>                # upper-case
     str_remove_all("[^A-Z0-9]") |> # keep only A–Z / 0–9
     str_trim()                     # drop leading/trailing spaces
 }
 
-ds0      <- open_dataset(parquet_dir, unify_schemas = FALSE)  # cheap scan
+# ── 0 · scan *first* file to get initial schema (no merging) ────────────────
+ds0      <- open_dataset(parquet_dir, unify_schemas = FALSE)
 sch_base <- ds0$schema
+
+# ── 1 · Every column we **must** have (string if uncertain) ────────────────
+need_utf8 <- union(
+  secondary_cols,                # record_1 … record_20
+  c("educ2003")       # raceimp mismatched; educ2003 absent <2005
+)
+
+# helper: return a named list of fields (existing ones kept unless overridden)
+mk_fields <- function(base, force_utf8) {
+  out <- base$fields
+  for (c in force_utf8) out[[c]] <- arrow::field(c, arrow::utf8())
+  out
+}
+
+my_schema <- arrow::schema(!!!mk_fields(sch_base, need_utf8))
+
+# ── 2 · open the full dataset with *explicit* schema, no auto-merge ─────────
+mort_ds <- open_dataset(parquet_dir,
+                        schema         = my_schema,
+                        unify_schemas  = FALSE)
 
 stringify <- function(.schema, cols) {
   new_fields <- purrr::map(cols, \(c) arrow::field(c, arrow::utf8()))
@@ -1221,7 +1242,7 @@ stringify <- function(.schema, cols) {
 }
 
 sec_cols_on_disk <- intersect(secondary_cols, names(sch_base))
-my_schema <- stringify(sch_base, sec_cols_on_disk)
+my_schema <- stringify(my_schema, sec_cols_on_disk)
 
 mort_ds <- open_dataset(parquet_dir, schema = my_schema)
 
@@ -1273,61 +1294,336 @@ accident_flagged <- map_dfr(years_wanted, function(yr) {
     left_join(hits, by = "row_id") |>
     mutate(has_detail = replace_na(has_detail, "N"))
 })
-```
 
+
+```
+Plot timeseries of accident death details
 ```{r}
+# ── 2 · Adjusted yearly proportions (robust + correct formula) ───────────────
+adjusted_frames <- map_dfr(dem_vars, \(v) {
+
+  yrs <- if (is.null(years_wanted)) sort(unique(accident_flagged$year)) else years_wanted
+
+  map_dfr(yrs, \(yr) {
+
+  d <- accident_flagged %>%
+    filter(year == yr) %>%
+    mutate(
+  flag   = has_detail == "Y",
+  ucr39  = forcats::fct_explicit_na( as.factor(ucr39),  na_level = "Missing"),
+  group  = forcats::fct_explicit_na( as.factor(.data[[v]]), na_level = "Missing")
+)
+
+
+  # If (after adding “Missing”) the demo var still has only one level,
+  # a logistic model can’t estimate a slope – bail out with NA
+  if (n_distinct(d$group) < 2) {
+    return(tibble(
+      year     = yr,
+      variable = v,
+      group    = levels(d$group)[1],
+      pct_adj  = NA_real_
+    ))
+  }
+
+  fit <- glm(flag ~ group + ucr39, data = d, family = binomial())
+
+  d %>%
+    mutate(pred = predict(fit, newdata = d, type = "response")) %>%  # <- length matches!
+    group_by(year, variable = v, group) %>%
+    summarise(pct_adj = mean(pred), .groups = "drop")
+})
+
+})
+
+# ── 0 · Where to put the figures ────────────────────────────────────────────
+fig_dir <- "/Users/amymann/Documents/Data Quality Project/data_quality/figures"
+dir.create(fig_dir, recursive = TRUE, showWarnings = FALSE)
+dem_vars    <- c("educ2003", "marstat", "placdth", "mandeath", "sex", "race5")
+
+extra_cols  <- union(c("year", "ucr39"), dem_vars)   # ← now includes mandeath
+# ── 3 · Time-series figures ─────────────────────────────────────────────────
+walk(dem_vars, function(v) {
+
+  p <- adjusted_frames %>% 
+         filter(variable == v) %>% 
+         ggplot(aes(x = year, y = pct_adj, colour = group)) +
+         geom_line(linewidth = 0.9, na.rm = TRUE) +
+         geom_point(size = 2, na.rm = TRUE) +
+         scale_y_continuous(labels = percent_format(accuracy = 1)) +
+         labs(
+           x        = NULL,
+           y        = "% certificates with required detail (adjusted)",
+           colour   = NULL,
+           title    = paste("Detail completeness by", v),
+           subtitle = "Marginal means from yearly logistic models adjusted for UCR-39"
+         ) +
+         theme_minimal(base_size = 12)
+
+  ggsave(
+    filename = file.path(fig_dir, paste0("detail_ts_", v, ".png")),
+    plot     = p,
+    width    = 8,
+    height   = 5,
+    dpi      = 300
+  )
+})
+
+# ── 4 · Overall logistic coefficients & coefficient figures ────────────────
+coef_tbl <- map_dfr(dem_vars, function(v) {
+
+  fit <- glm(
+    as.formula(paste("I(has_detail == 'Y') ~", v, "+ ucr39")),
+    data   = accident_flagged %>% mutate(ucr39 = replace_na(ucr39, "Missing")),
+    family = binomial()
+  )
+
+  tidy(fit, conf.int = TRUE) %>%          # add 95 % CI
+    filter(str_detect(term, paste0("^", v))) %>%   # keep only demo terms
+    mutate(variable = v)
+})
+
+# save the full table once
+readr::write_csv(coef_tbl, file.path(fig_dir, "demo_coefficients.csv"))
+
+# one coefficient plot per variable
+walk(dem_vars, function(v) {
+
+  dat <- coef_tbl %>%
+           filter(variable == v) %>%
+           mutate(term = str_remove(term, paste0("^", v))) %>%  # strip var name
+           mutate(term = forcats::fct_reorder(term, estimate))
+
+  p <- ggplot(dat, aes(x = estimate, y = term)) +
+         geom_vline(xintercept = 0, linetype = "dashed") +
+         geom_errorbarh(aes(xmin = conf.low, xmax = conf.high), height = 0) +
+         geom_point(size = 2) +
+         labs(
+           x = "Log-odds ratio (reference = first level of variable)",
+           y = NULL,
+           title = paste("Adjusted odds of having required detail by", v),
+           subtitle = "Overall model controlling for UCR-39"
+         ) +
+         theme_minimal(base_size = 12)
+
+  ggsave(
+    filename = file.path(fig_dir, paste0("detail_coeff_", v, ".png")),
+    plot     = p,
+    width    = 7,
+    height   = 4,
+    dpi      = 300
+  )
+})
+```
+Checking that age demographics make sense
+```{r}
+###############################################################################
+##  0 · Packages & parallel plan  #############################################
+###############################################################################
+library(arrow)      # v15+
 library(dplyr)
-library(tidyr)
-library(stringr)
+library(purrr)
+library(ggplot2)
+library(future)
+library(furrr)
+library(scales)
+plan(multisession)                      # use all local cores
 
-# ── 0 · Helper (same cleaner you used in the pipeline) ----------------------
-clean_icd <- function(x) {
-  x |>
-    toupper() |>
-    str_remove_all("[^A-Z0-9\\.]") |>
-    str_trim()
+###############################################################################
+##  1 · Paths & year range ####################################################
+###############################################################################
+parquet_dir <- "/Users/amymann/Documents/Data Quality Project/data/parquet"
+out_dir     <- "/Users/amymann/Documents/Data Quality Project/data_quality"
+dir.create(out_dir, recursive = TRUE, showWarnings = FALSE)
+
+years_wanted <- 1999:2023              # change if needed
+
+###############################################################################
+##  Helper: decode the 4-digit NCHS age code → age in (fractional) years
+###############################################################################
+decode_age_years <- function(age_code) {
+  age_chr <- as.character(age_code)
+
+  age_unit <- substr(age_chr, 1, 1)           # “1” = years, “2” = months, …
+  age_val  <- as.numeric(substr(age_chr, 2, 4))
+
+  dplyr::case_when(
+    age_unit == "1" ~  age_val,                       # years
+    age_unit == "2" ~  age_val / 12,                  # months → years
+    age_unit == "3" ~  age_val / 365,                 # days   → years
+    age_unit == "4" ~  age_val / (365 * 24),          # hours  → years
+    age_unit == "5" ~  age_val / (365 * 24 * 60),     # minutes→ years
+    TRUE              ~ NA_real_                      # “9” = unknown
+  )
 }
 
-# ── 1 · Grab the 519 067-th row *by position* ------------------------------
-row_idx <- 519067                        # ← the index you care about
+###############################################################################
+##  Summary for one year – matches your tidyverse logic
+###############################################################################
+summarise_year <- function(yr) {
+  file <- file.path(parquet_dir, sprintf("mort%04d.parquet", yr))
+  if (!file.exists(file)) {
+    message("⚠️  Missing file for ", yr, " – skipping")
+    return(NULL)
+  }
 
-row_one <- accident_flagged %>%          # the final tibble you already built
-  slice(row_idx)                         # pick that row by position
+  # Read the data
+  mortality <- arrow::read_parquet(file, col_select = c("age", "ager52")) %>%
+    collect()
 
-if (nrow(row_one) == 0) {
-  stop("Row ", row_idx, " does not exist in accident_flagged.")
+  # Extract age in years
+  mortality <- mortality %>%
+    mutate(age_unit = substr(as.character(age), 1, 1),
+           age_val = as.numeric(substr(as.character(age), 2, 4)),
+           age_years = case_when(
+             age_unit == "1" ~ age_val,                 # years
+             age_unit == "2" ~ age_val / 12,            # months
+             age_unit == "3" ~ age_val / 365,           # days
+             age_unit == "4" ~ age_val / (365*24),      # hours
+             age_unit == "5" ~ age_val / (365*24*60),   # minutes
+             TRUE ~ NA_real_
+           ))
+
+  # 1. Implausibly old (ager52 > 49 = age group “100+” or unknown)
+  implausibly_old <- mortality %>%
+    filter(ager52 > 49) %>%
+    count(name = "implausibly_old_count") %>%
+    pull(implausibly_old_count)
+
+  # 2. % ages ending in 0 or 5, age 10–99
+  age_10_99 <- mortality %>%
+    filter(age_years >= 10, age_years <= 99)
+
+  age_ends_0_5 <- age_10_99 %>%
+    filter(age_years %% 5 == 0) %>%
+    count(name = "n_end_0_5")
+
+  percent_ends_0_5 <- if (nrow(age_10_99) > 0) {
+    age_ends_0_5$n_end_0_5 / nrow(age_10_99) * 100
+  } else {
+    NA_real_
+  }
+
+  # 3. Whipple’s Index (ages 23–62)
+  whipple_range <- mortality %>%
+    filter(age_years >= 23, age_years <= 62)
+
+  whipple_ends_0_5 <- whipple_range %>%
+    filter(age_years %% 5 == 0) %>%
+    count(name = "n_end_0_5")
+
+  whipple_index <- if (nrow(whipple_range) > 0) {
+    500 * whipple_ends_0_5$n_end_0_5 / nrow(whipple_range)
+  } else {
+    NA_real_
+  }
+
+  # 4. Myers’ Blended Index (ages 10–99)
+  myers_range <- age_10_99 %>%
+    mutate(last_digit = age_years %% 10)
+
+  digit_freq <- myers_range %>%
+    count(last_digit) %>%
+    complete(last_digit = 0:9, fill = list(n = 0)) %>%
+    mutate(prop = n / sum(n))
+
+  myers_index <- if (nrow(myers_range) > 0) {
+    0.5 * sum(abs(digit_freq$prop - 0.10)) * 100
+  } else {
+    NA_real_
+  }
+
+  # Return tidy summary
+  tibble(
+    year = yr,
+    implausibly_old = implausibly_old,
+    pct_end_0_or_5 = round(percent_ends_0_5, 2),
+    whipple_index = round(whipple_index, 2),
+    myers_blended_idx = round(myers_index, 2)
+  )
 }
 
-# ── 2 · Pivot its secondary codes into long form ---------------------------
-sec_one <- row_one %>%
-  pivot_longer(starts_with("record_"),      # record_1 … record_20
-               names_to  = "slot",
-               values_to = "detail") %>%
-  mutate(
-    ucod   = clean_icd(ucod),
-    detail = clean_icd(detail)
-  ) %>%
-  filter(detail != "", detail != ucod)      # drop blanks + self-matches
 
-# ── 3 · See what hit the dictionary ----------------------------------------
-matches <- sec_one %>%
-  inner_join(detail_dict, by = c("ucod", "detail"))
+###############################################################################
+##  4 · Run across all years (parallel) #######################################
+###############################################################################
+age_qc_ts <- future_map_dfr(years_wanted, summarise_year, .progress = TRUE)
 
-cat("Row index:", row_idx,
-    "\nCertificate UCOD:", row_one$ucod,
-    "\nHas_detail flag:", row_one$has_detail, "\n\n")
 
-if (nrow(matches) == 0) {
-  cat("→   No secondary code in this certificate appears in the dictionary.\n",
-      "    The flag should be **N**.  If it shows **Y**, check your\n",
-      "    joins or earlier mutate steps for an unintended self-match.\n")
-} else {
-  cat("→   The following secondary code(s) triggered **Y**:\n\n")
-  print(matches %>% select(slot, detail), row.names = FALSE)
-}
+###############################################################################
+##  5 · Save CSV  #############################################################
+###############################################################################
+readr::write_csv(age_qc_ts,
+  file.path(out_dir, "age_quality_timeseries_1999_2023.csv"))
+message("✅ CSV saved to ", out_dir)
 
-cat("\nFull list of secondary codes in this certificate:\n")
-print(sec_one %>% select(slot, detail), row.names = FALSE)
+library(ggplot2)
+library(scales)
+
+# Output directory
+plot_dir <- file.path(out_dir, "age_quality_plots")
+dir.create(plot_dir, showWarnings = FALSE, recursive = TRUE)
+
+# Minimal white theme
+white_theme <- theme_bw(base_size = 12) +
+  theme(
+    panel.grid.minor = element_blank(),
+    panel.grid.major.x = element_blank(),
+    plot.title = element_text(face = "bold", hjust = 0.5)
+  )
+
+# 1. Implausibly old count
+p1 <- ggplot(age_qc_ts, aes(year, implausibly_old)) +
+  geom_line(color = "#0072B2", linewidth = 1) +
+  labs(
+    title = "Implausibly Old (ager52 > 49)",
+    x = NULL,
+    y = "Count"
+  ) +
+  white_theme +
+  scale_y_continuous(labels = comma)
+
+ggsave(file.path(plot_dir, "implausibly_old.png"), p1, width = 7, height = 4, dpi = 320)
+
+# 2. Percent ending in 0 or 5
+p2 <- ggplot(age_qc_ts, aes(year, pct_end_0_or_5)) +
+  geom_line(color = "#009E73", linewidth = 1) +
+  labs(
+    title = "Ages Ending in 0 or 5 (10–99 y)",
+    x = NULL,
+    y = "Percent"
+  ) +
+  white_theme +
+  scale_y_continuous(labels = percent_format(scale = 1))
+
+ggsave(file.path(plot_dir, "percent_end_0_5.png"), p2, width = 7, height = 4, dpi = 320)
+
+# 3. Whipple’s Index
+p3 <- ggplot(age_qc_ts, aes(year, whipple_index)) +
+  geom_line(color = "#D55E00", linewidth = 1) +
+  labs(
+    title = "Whipple's Index (23–62 y)",
+    x = NULL,
+    y = "Index"
+  ) +
+  white_theme
+
+ggsave(file.path(plot_dir, "whipple_index.png"), p3, width = 7, height = 4, dpi = 320)
+
+# 4. Myers’ Blended Index
+p4 <- ggplot(age_qc_ts, aes(year, myers_blended_idx)) +
+  geom_line(color = "#CC79A7", linewidth = 1) +
+  labs(
+    title = "Myers' Blended Index (10–99 y)",
+    x = NULL,
+    y = "Index"
+  ) +
+  white_theme
+
+ggsave(file.path(plot_dir, "myers_blended_index.png"), p4, width = 7, height = 4, dpi = 320)
+
+message("✅ All four separate plots saved to ", plot_dir)
 
 ```
+
 

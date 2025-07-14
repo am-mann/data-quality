@@ -1,5 +1,5 @@
 ---
-title: "Data Quality Project"
+title: "Data Quality Project 2016"
 output: html_notebook
 ---
 
@@ -20,8 +20,8 @@ library(scales)
 library(patchwork)
 library(broom)
 
-garbage <- read_csv("/Users/amymann/Documents/Data Quality Project/data_quality/cause-codes/gbd_garbage_codes_with_descr.csv")
-path = "/Users/amymann/Documents/Data Quality Project/data/"
+garbage <- read_csv("/Users/amymann/Documents/Data Quality Project/data_quality/cause-codes/gbd_garbage_codes_with_descr_no_overdose.csv")
+path = "/Users/amymann/Documents/Data Quality Project/data/parquet/"
 setwd(path)
 mortality <- read_parquet("mort2016.parquet")
 ```
@@ -69,7 +69,7 @@ mortality <- mortality %>%
 
 # Perform a single join by icd10, adding gbd_severity from garbage
 mortality_flagged <- mortality %>%
-  left_join(garbage %>% select(icd10, description, gbd_severity), by = "icd10")
+  left_join(garbage %>% dplyr::select(icd10, description, gbd_severity), by = "icd10")
 
 # Compute the garbage fraction
 garbage_fraction <- mean(!is.na(mortality_flagged$gbd_severity), na.rm = TRUE)
@@ -80,22 +80,21 @@ mortality_garbage <- mortality_flagged %>%
 # Count deaths by severity category
 severity_counts <- mortality_garbage %>%
   count(gbd_severity, name = "deaths")
-
 # Calculate the total number of garbage-coded deaths
 total_garbage_deaths <- sum(severity_counts$deaths)
 
-# Calculate share of each severity category
+# Share of each severity category, rounded
 severity_profile <- severity_counts %>%
-  mutate(share = deaths / total_garbage_deaths)
+  mutate(share = round(deaths / total_garbage_deaths, 3))
 
-# Find the most common garbage codes
+# Most common garbage codes, rounded
 top_garbage <- mortality_garbage %>%    
   count(icd10, description, gbd_severity, sort = TRUE, name = "deaths") %>% 
-  mutate(share = deaths / sum(deaths))
+  mutate(share = round(deaths / sum(deaths), 3))
 
 top_garbage_10 <- top_garbage %>% slice_head(n = 10)
 
-garbage_fraction
+garbage_fraction            # if this is a scalar, round(garbage_fraction, 3)
 severity_profile
 top_garbage_10
 
@@ -120,18 +119,20 @@ mort <- mort |>
                           ~ .x != "" & !is.na(.x)>1))-1)
 
 mortality_flagged <- mort %>%
-  left_join(garbage %>% select(icd10, description, gbd_severity), by = "icd10")
+  left_join(garbage %>% dplyr::select(icd10, description, gbd_severity), by = "icd10")
 
 
 DT <- as.data.table(mortality_flagged)           # convert once
 DT[, garbage := !is.na(gbd_severity)]            # logical flag
 
 garbage_by <- function(dt, col) {
-  dt[, .(n_deaths = .N,
-         garbage   = sum(garbage),
-         prop_garbage = sum(garbage)/.N),
-     by = col][order(-prop_garbage)]
-}
+  dt[, .(
+      n_deaths     = .N,
+      garbage      = sum(garbage),
+      prop_garbage = round(sum(garbage) / .N, 3)   # ← here
+    ),
+    by = col
+  ][order(-prop_garbage)]}
 
 by_sex      <- garbage_by(DT, "sex")
 by_race     <- garbage_by(DT, "racer5")
@@ -140,18 +141,22 @@ by_educ     <- garbage_by(DT, "educ2003")
 by_marstat  <- garbage_by(DT, "marstat")
 by_weekday  <- garbage_by(DT, "weekday")
 by_placdth  <- garbage_by(DT, "placdth")
-by_has_secondary <- garbage_by(DT, "has_secondary")
+by_has_secondary <- garbage_by(DT, "has_factor")
 
 demog_detail <- rbindlist(list(
-  by_sex     [, .(demog = "sex",      group = sex,      n_deaths, garbage, prop_garbage)],
-  by_race    [, .(demog = "racer5",   group = racer5,   n_deaths, garbage, prop_garbage)],
-  by_age_grp [, .(demog = "ager52",   group = ager52,   n_deaths, garbage, prop_garbage)],
-  by_educ    [, .(demog = "education",group = educ2003, n_deaths, garbage, prop_garbage)],
-  by_marstat [, .(demog = "marstat",  group = marstat,  n_deaths, garbage, prop_garbage)],
-  by_weekday [, .(demog = "weekday",  group = weekday,  n_deaths, garbage, prop_garbage)],
-  by_placdth [, .(demog = "placdth",  group = placdth,  n_deaths, garbage, prop_garbage)],
-  by_has_secondary [, .(demog = "has_secondary",  group = has_secondary,  n_deaths, garbage, prop_garbage)]
-))
+  by_sex       [, .(demog = "sex",      group = sex,      n_deaths, garbage, prop_garbage)],
+  by_race      [, .(demog = "racer5",   group = racer5,   n_deaths, garbage, prop_garbage)],
+  by_age_grp   [, .(demog = "ager52",   group = ager52,   n_deaths, garbage, prop_garbage)],
+  by_educ      [, .(demog = "education",group = educ2003, n_deaths, garbage, prop_garbage)],
+  by_marstat   [, .(demog = "marstat",  group = marstat,  n_deaths, garbage, prop_garbage)],
+  by_weekday   [, .(demog = "weekday",  group = weekday,  n_deaths, garbage, prop_garbage)],
+  by_placdth   [, .(demog = "placdth",  group = placdth,  n_deaths, garbage, prop_garbage)],
+  by_has_secondary[, .(demog = "has_factor", group = has_factor,
+                       n_deaths, garbage, prop_garbage)]))
+
+numeric_cols <- names(Filter(is.numeric, demog_detail))
+demog_detail[, (numeric_cols) := lapply(.SD, round, 3), .SDcols = numeric_cols]
+
 
 # ────────────────────────────
 # 3 · save or inspect
@@ -176,8 +181,9 @@ age52_lbl <- c(
 # ─────────────────────────────────────────────────────────────────────────
 by_age_grp_labeled <- by_age_grp %>%
   mutate(
-    age_label = factor(age52_lbl[ager52],
-                       levels = age52_lbl)   # keep age order on x-axis
+    prop_garbage = round(prop_garbage, 3),         # ensure 3-dp
+    age_label    = factor(age52_lbl[ager52],
+                          levels = age52_lbl)
   )
 
 # ────────────────────────────────────────────────────────────────
@@ -202,7 +208,7 @@ ggsave("garbage_by_age52.png", plot = p, width = 10, height = 6, dpi = 300)
 Determine the number of different codes used. ***Note that this method might have a bug in it.
 ```{r}
 library(readr); library(dplyr); library(stringr);library(tidyverse)
-ihme <- read_csv("/Users/amymann/Documents/Data Quality Project/data_quality/ihme_cause_codes.csv")
+ihme <- read_csv("/Users/amymann/Documents/Data Quality Project/data_quality/cause-codes/ihme_cause_codes.csv")
 
 clean_icd <- function(x) {
   x %>%
@@ -349,13 +355,13 @@ make_table <- function(df, var){
       level    = as.character(.data[[var]])  
     ) %>% 
     ungroup() %>% 
-    select(variable, level, autopsy_flag, deaths, prop)
+    dplyr::select(variable, level, autopsy_flag, deaths, prop)
 }
 
 autopsy_breakdown <- bind_rows(lapply(dims, make_table, df = mort))
 
 library(readr)
-lookup113 <- read_csv("cause_code_135.csv", show_col_types = FALSE)
+lookup113 <- read_csv("cause-codes/cause_code_135.csv", show_col_types = FALSE)
 
 autopsy_breakdown <- autopsy_breakdown %>%
   left_join(lookup113, by = c("level" = "code"))
@@ -610,7 +616,7 @@ no_sec_summary <- bind_rows(
       group_by(.data[[v]], .drop = FALSE) %>% 
       summarise(
         n_deaths   = n(),
-        prop_zero  = mean(extra_factor_count == 0, na.rm = TRUE),
+        prop_zero  = round(mean(extra_factor_count == 0, na.rm = TRUE), 3),
         .groups    = "drop"
       ) %>% 
       transmute(
@@ -631,7 +637,7 @@ top10_ucr39_none <- mort %>%
   slice_head(n = 10) %>%
   left_join(
     mort %>% group_by(ucr39) %>%
-      summarise(prop_zero = mean(extra_factor_count == 0, na.rm = TRUE),
+      summarise(prop_zero = round(mean(extra_factor_count == 0, na.rm = TRUE), 3),
                 .groups   = "drop"),
     by = "ucr39"
   )
@@ -644,7 +650,7 @@ age_var <- if ("age52" %in% names(mort)) "age52" else "ager52"
 
 age_prop_zero <- mort %>%
   group_by(.data[[age_var]]) %>%
-  summarise(prop_zero = mean(extra_factor_count == 0, na.rm = TRUE),
+  summarise(prop_zero = round(mean(extra_factor_count == 0, na.rm = TRUE), 3),
             .groups   = "drop")
 
 ggplot(age_prop_zero, aes(factor(.data[[age_var]]), prop_zero)) +
@@ -666,27 +672,23 @@ mort <- mortality %>%
   mutate(
     has_extra_factor = 1- as.integer(                       # 1 = none, 0 = ≥1
       rowSums(across(starts_with("record_"),
-                     ~ .x != "" & !is.na(.x))) > 1)) %>%
-  mutate(
-    num_extra_factors =                    
-      rowSums(across(starts_with("record_"),
-                     ~ .x != "" & !is.na(.x))))-1
+                     ~ .x != "" & !is.na(.x))) > 1))
 mort <- mort %>%                    
   mutate(
     ucr39 = factor(ucr39, levels = 1:39) 
   )
 
-m1 <- lm(num_extra_factors ~ marstat + ager52, data = mort)
+m1 <- lm(ranum ~ marstat + ager52, data = mort)
 
 library(MASS)
 
-full_mod  <- lm(num_extra_factors ~ marstat + ager52 + ucr39, data = mort)
+full_mod  <- lm(ranum ~ marstat + ager52 + ucr39, data = mort)
 
 step_mod  <- stepAIC(full_mod,
                      scope = list(upper = ~ marstat + ager52 + ucr39,
                                   lower = ~ 1),   # start at intercept-only
                      direction = "both",
-                     trace = FALSE,  k = log(n))
+                     trace = FALSE,  k = n)
 
 summary(step_mod)
 
@@ -713,7 +715,7 @@ clean_icd <- function(x) {
 # ----------------------------------------------------------------
 calculate_dqi_correlations <- function(data,
                                        vars   = c("has_factor",
-                                                  "avg_secondary_factor",
+                                                  "ranum",
                                                   "prop_garbage_codes",
                                                   "autopsy_flag_num"),
                                        method = "spearman") {
@@ -738,7 +740,7 @@ calculate_dqi_correlations <- function(data,
   # 2) Tidy table of pairwise rho + p-value + n
   combs <- combn(vars, 2, simplify = FALSE)
   pair_stats <- lapply(combs, function(v) {
-    x <- d[[v[1]]]]; y <- d[[v[2]]]]
+    x <- d[[v[1]]]; y <- d[[v[2]]]
     idx <- complete.cases(x, y)
     test <- cor.test(x[idx], y[idx], method = method, exact = FALSE)
     data.frame(
@@ -771,14 +773,6 @@ mort <- mortality %>%
                      ~ !is.na(.x) & .x != "")) > 1
     )
   ) %>%
-
-  # 3b) average number of secondary factors
-  mutate(
-    avg_secondary_factor =
-      rowSums(across(starts_with("record_"),
-                     ~ !is.na(.x) & .x != "")) - 1L
-  ) %>%
-
   # 3c) autopsy flag → Yes/No → numeric 0/1
   mutate(
     autopsy_flag = recode(toupper(autopsy),
@@ -809,13 +803,13 @@ mort <- mort %>%
 results <- calculate_dqi_correlations(
   mort,
   vars = c("has_factor",
-           "avg_secondary_factor",
+           "ranum",
            "prop_garbage_codes",
            "autopsy_flag_num")
 )
 
 # View results
-results$correlation_matrix
+round(results$correlation_matrix, 3)
 results$pairwise_table
 
 ```
