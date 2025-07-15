@@ -130,7 +130,6 @@ summarise_year_file <- function(file) {
         col_select = intersect(cols_needed,
             names(arrow::read_parquet(file, as_data_frame = FALSE)$schema))
     )
-    print(colnames(ds))
 
     # from 2003 to 2005 the educ2003 variable is called educ so here I change the name accordingly
     # if (this_year %in% 2003:2005 &&
@@ -246,12 +245,6 @@ summarise_year_file <- function(file) {
     })
     
     cert_tbl$complete_all <- rowSums(valid_mat) == length(demo_vars)
-    message("Invalid value counts for demographic fields:")
-    for (v in demo_vars) {
-        inv <- invalid_by_var[[v]]
-        count <- sum(cert_tbl[[v]] %in% inv, na.rm = TRUE)
-        message(sprintf("%s: %d invalid", v, count))
-    }
     
     # make big table
     cert_tbl %>%
@@ -262,6 +255,12 @@ summarise_year_file <- function(file) {
             prop_garbage         = garb_k / n_cert,
             prop_garbage_low     = wilson_lower(garb_k, n_cert),
             prop_garbage_hi      = wilson_upper(garb_k, n_cert),
+            pct_gc_I64        = mean(icd10 == "I64"),
+            pct_gc_C_misc     = mean(icd10 %in% c("C80", "C55", "C97")),
+            pct_gc_I10        = mean(icd10 == "I10"),
+            pct_gc_R_misc     = mean(icd10 %in% c("R99", "R54")),
+            pct_gc_N19        = mean(icd10 == "N19"),
+            pct_gc_J80        = mean(icd10 == "J80"),
             contrib_n            = sum(total_contrib),
             light_k              = sum(light_contrib),
             prop_light           = ifelse(contrib_n > 0, light_k / contrib_n, NA_real_),
