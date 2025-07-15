@@ -16,7 +16,6 @@
 #
 # Output: county_year_quality_metrics.csv
 #
-# ***indicates that a line needs to be changed prior to running
 # ————————————————————————————————————————————————————————————————
 library(arrow)
 library(dplyr)
@@ -27,6 +26,7 @@ library(readr)
 library(tidyr)
 library(future)
 library(furrr)
+library(here)
 
 ## CONSTANTS ----
 PARALLELIZE <- TRUE
@@ -34,14 +34,14 @@ PARALLELIZE <- TRUE
 # ————————————————————————————————————————————————————————————————
 #  load things + dictionaries + helpers
 # ————————————————————————————————————————————————————————————————
-parquet_dir    <- here("data_private", "mcod")  #### ***Change this line
-# parquet_dir    <- here("data_private", "mcod_sample") 
-dictionary_dir <- here("data_raw", "cause-codes") #### ***Change this line
+#parquet_dir    <- here("data_private", "mcod") 
+ parquet_dir    <- here("data_private", "mcod_sample") 
+dictionary_dir <- here("data_raw", "cause-codes")
 out_csv        <- here("data", "county_year_quality_metrics.csv")
 
-county_var     <- "countyrs"  #### ***Put name of county variable
+county_var     <- "countyrs" 
 years_wanted   <- NULL
-key_demo_vars  <- c("marstat", "placdth", "educ", "mandeath", "age", "sex", "race")
+key_demo_vars  <- c("marstat", "placdth", "educ", "mandeath", "age", "sex", "race", "racer40")
 
 lookup_garbage <- read_csv(file.path(dictionary_dir,
     "gbd_garbage_codes_without_overdose.csv"),
@@ -104,7 +104,17 @@ wilson_upper <- function(k, n) {
 }
 
 sec_cols <- paste0("record_", 1:20)
-invalid  <- c("", "9", "U", "Unknown")
+invalid_by_var <- list(
+    marstat   = c("", "not_stated", "unknown", NA),
+    placdth   = c("", "9", "U", "Unknown", NA),
+    educ2003  = c("", "9", "99", "999", "9999", "0", NA),
+    educ  = c("", "9", "99", "999", "9999", "0", NA),
+    mandeath  = c("", "9", "7", "Unknown", NA),
+    age       = c("", "999", "9999", "0000", NA),
+    sex       = c("", "U", NA),
+    race      = c("", "9", "Unknown", NA),
+    racer40      = c("", "9", "Unknown", NA)
+)
 
 # ─────────────────────────────────────────────────────────────────────────────
 #  summarise everything for one year
@@ -120,6 +130,7 @@ summarise_year_file <- function(file) {
         col_select = intersect(cols_needed,
             names(arrow::read_parquet(file, as_data_frame = FALSE)$schema))
     )
+    print(colnames(ds))
 
     # from 2003 to 2005 the educ2003 variable is called educ so here I change the name accordingly
     # if (this_year %in% 2003:2005 &&
@@ -136,7 +147,12 @@ summarise_year_file <- function(file) {
     # }
     if (!"year" %in% names(ds)) ds$year <- this_year
     if (this_year < 2004) ds$educ2003 <- NA_character_
-    demo_vars <- if (this_year < 2004) setdiff(key_demo_vars, "educ2003") else key_demo_vars
+    demo_vars <- if (this_year < 2004) {
+        setdiff(key_demo_vars, "educ2003")
+    } else {key_demo_vars}
+    if (this_year %in% 2021:2022) {
+        demo_vars <- union(setdiff(demo_vars, "race"), "racer40")
+    }
 
     # flag accidents and overdoses
     ds <- ds %>% mutate(
@@ -223,10 +239,20 @@ summarise_year_file <- function(file) {
         dplyr::mutate(has_required_detail = tidyr::replace_na(has_required_detail, FALSE))
 
     # check completeness of demographic information
-    valid_mat <- !as.matrix(cert_tbl[demo_vars]) %in% invalid &
-        !is.na(as.matrix(cert_tbl[demo_vars]))
+    valid_mat <- sapply(demo_vars, function(v) {
+        vals <- cert_tbl[[v]]
+        inv  <- invalid_by_var[[v]]
+        !(vals %in% inv)
+    })
+    
     cert_tbl$complete_all <- rowSums(valid_mat) == length(demo_vars)
-
+    message("Invalid value counts for demographic fields:")
+    for (v in demo_vars) {
+        inv <- invalid_by_var[[v]]
+        count <- sum(cert_tbl[[v]] %in% inv, na.rm = TRUE)
+        message(sprintf("%s: %d invalid", v, count))
+    }
+    
     # make big table
     cert_tbl %>%
         dplyr::group_by(.data[[county_var]], year) %>%
@@ -284,3 +310,9 @@ if (PARALLELIZE) {
 
 write_csv(county_year_all, out_csv)
 message("County-year quality metrics written")
+
+
+# file <- "data_private/mcod_sample/mcod_2021.parquet"
+# df <- read_parquet(file)
+# table(df$marstat, useNA = "ifany")
+
