@@ -1441,21 +1441,25 @@ years_wanted <- 1999:2023              # change if needed
 ###############################################################################
 ##  Helper: decode the 4-digit NCHS age code → age in (fractional) years
 ###############################################################################
-decode_age_years <- function(age_code) {
-  age_chr <- as.character(age_code)
+decode_age_years <- function(age_code, year) {
+  if (year < 2003) {
+    suppressWarnings(as.numeric(age_code))  # Already age in years
+  } else {
+    age_chr <- as.character(age_code)
+    age_unit <- substr(age_chr, 1, 1)
+    age_val  <- as.numeric(substr(age_chr, 2, 4))
 
-  age_unit <- substr(age_chr, 1, 1)           # “1” = years, “2” = months, …
-  age_val  <- as.numeric(substr(age_chr, 2, 4))
-
-  dplyr::case_when(
-    age_unit == "1" ~  age_val,                       # years
-    age_unit == "2" ~  age_val / 12,                  # months → years
-    age_unit == "3" ~  age_val / 365,                 # days   → years
-    age_unit == "4" ~  age_val / (365 * 24),          # hours  → years
-    age_unit == "5" ~  age_val / (365 * 24 * 60),     # minutes→ years
-    TRUE              ~ NA_real_                      # “9” = unknown
-  )
+    dplyr::case_when(
+      age_unit == "1" ~  age_val,
+      age_unit == "2" ~  age_val / 12,
+      age_unit == "3" ~  age_val / 365,
+      age_unit == "4" ~  age_val / (365 * 24),
+      age_unit == "5" ~  age_val / (365 * 24 * 60),
+      TRUE            ~ NA_real_
+    )
+  }
 }
+
 
 ###############################################################################
 ##  Summary for one year – matches your tidyverse logic
@@ -1467,9 +1471,13 @@ summarise_year <- function(yr) {
     return(NULL)
   }
 
-  # Read the data
-  mortality <- arrow::read_parquet(file, col_select = c("age", "ager52")) %>%
-    collect()
+  parquet_dir <- "/Users/amymann/Documents/Data Quality Project/data/parquet"
+debug_year <- 1999
+file <- file.path(parquet_dir, sprintf("mort%04d.parquet", debug_year))
+
+# Read file and decode ages
+mortality <- arrow::read_parquet(file)
+
 
   # Extract age in years
   mortality <- mortality %>%
@@ -1492,10 +1500,10 @@ summarise_year <- function(yr) {
 
   # 2. % ages ending in 0 or 5, age 10–99
   age_10_99 <- mortality %>%
-    filter(age_years >= 10, age_years <= 99)
+    filter(age >= 10, age <= 99)
 
   age_ends_0_5 <- age_10_99 %>%
-    filter(age_years %% 5 == 0) %>%
+    filter(age %% 5 == 0) %>%
     count(name = "n_end_0_5")
 
   percent_ends_0_5 <- if (nrow(age_10_99) > 0) {
@@ -1585,9 +1593,9 @@ p1 <- ggplot(age_qc_ts, aes(year, implausibly_old)) +
 
 ggsave(file.path(plot_dir, "implausibly_old.png"), p1, width = 7, height = 4, dpi = 320)
 
-# 2. Percent ending in 0 or 5
 p2 <- ggplot(age_qc_ts, aes(year, pct_end_0_or_5)) +
-  geom_line(color = "#009E73", linewidth = 1) +
+  geom_line(color = "#009E73", linewidth = 1, linetype = "dashed") +
+  geom_point(color = "#009E73", size = 2) +
   labs(
     title = "Ages Ending in 0 or 5 (10–99 y)",
     x = NULL,
@@ -1595,6 +1603,7 @@ p2 <- ggplot(age_qc_ts, aes(year, pct_end_0_or_5)) +
   ) +
   white_theme +
   scale_y_continuous(labels = percent_format(scale = 1))
+
 
 ggsave(file.path(plot_dir, "percent_end_0_5.png"), p2, width = 7, height = 4, dpi = 320)
 

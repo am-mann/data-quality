@@ -445,6 +445,7 @@ walk(vars_to_map, function(var) {
   })
 })
 ```
+
 ```{r}
 dq <- dq |> 
   mutate(
@@ -719,82 +720,121 @@ walk(vars_to_map, function(var) {
 ```
 Relationship between rural and garbage
 ```{r}
-################################################################################
-## County size (n_cert) vs. every data-quality metric we mapped
-## – ready to copy-paste
-################################################################################
-## 0 · Setup  ------------------------------------------------------------------
-required <- c("tidyverse", "patchwork", "scales")
-missing   <- setdiff(required, rownames(installed.packages()))
-if (length(missing)) install.packages(missing)
-invisible(lapply(required, library, character.only = TRUE))
+# 0 · Load packages -------------------------------------------------------
+library(dplyr)
+library(stringr)
+library(ggplot2)
+library(scales)
+library(tigris)       # for fips_codes
+library(tidycensus)   # for county populations
+library(readr)
+library(here)
 
-# Suppose your county column is called "fips"
-dq <- dq %>% rename(cnty = countyrs_fips)   # or GEOID, county_fips, etc.
+# 1 · Load your data ------------------------------------------------------
+dq <- read_csv(here("data", "county_year_quality_metrics.csv"),
+               show_col_types = FALSE)
 
-## 1 · Convert all *_k completeness counts ➜ proportions  -----------------------
-dq_plot <- dq %>%
-  # turn every *_comp_k count into a proportion of certificates
+# 2 · Build FIPS lookup for post-2002 codes -------------------------------
+fips_lookup <- fips_codes %>%
   mutate(
-    across(ends_with("_comp_k"),
-           ~ .x / n_cert,
-           .names = "{sub('_k$', '', .col)}_prop")
+    county_code_3 = sprintf("%03d", as.integer(county_code)),  # e.g. "079"
+    custom_code   = paste0(state, county_code_3),              # e.g. "ID079"
+    GEOID         = paste0(state_code, county_code)            # e.g. "16079"
+  ) %>%
+  select(custom_code, GEOID)
+
+# 3 · Convert all county codes to standard GEOID --------------------------
+dq_all <- dq %>%
+  mutate(
+    GEOID = case_when(
+      str_detect(countyrs, "^[0-9]{5}$") ~ countyrs,  # already a GEOID
+      str_detect(countyrs, "^[A-Z]{2}[0-9]{3}$") ~ fips_lookup$GEOID[match(countyrs, fips_lookup$custom_code)],
+      TRUE ~ NA_character_
+    )
   )
 
-## 2 · Pick the metrics you want on the Y-axis  ---------------------------------
-# – garbage + lack-of-detail + every new *_prop column we just created
-metrics <- c(
-  "prop_garbage",      # underlying-cause garbage
-  "prop_light",        # lightly coded (few total causes)
-  "pct_acc_miss",      # accident missing detail (%)
-  grep("_prop$", names(dq_plot), value = TRUE)  # all completeness proportions
-) %>% unique()
+# Check how many counties failed to match
+cat("Counties without valid GEOID:", sum(is.na(dq_all$GEOID)), "\n")
 
-## 3 · Tidy to long format  -----------------------------------------------------
-county_id_cols <- intersect(c("cnty", "fips", "GEOID", "county_fips"), names(dq_plot))
+# 4 · Get 2022 population estimates ---------------------------------------
+census_api_key("671b64055fc192103cbc199d2dff91b46d9cc781", overwrite = FALSE) 
 
-dq_long <- dq_plot %>% 
-  select(any_of(county_id_cols), n_cert, all_of(metrics)) %>% 
-  pivot_longer(cols = all_of(metrics),
-               names_to  = "metric",
-               values_to = "value") %>% 
-  drop_na(value, n_cert)
+pop22 <- get_acs(
+  geography = "county",
+  variables = "B01003_001",
+  year = 2022,
+  survey = "acs5"
+) %>%
+  select(GEOID, pop_2022 = estimate)
 
-## 4 · Nice axis/plot labels  ---------------------------------------------------
-label_lookup <- tibble(
-  metric = metrics,
-  label  = c(
-    "Garbage-code proportion",
-    "Lightly-coded proportion",
-    "Accident detail missing (%)",
-    stringr::str_replace_all(metrics[4:length(metrics)],
-                             "_prop$", " completeness")
-  )
-)
+# 5 · Define size buckets -------------------------------------------------
+cuts   <- c(0, 50000, 100000, 250000, 1000000, Inf)
+labels <- c("<50k", "50–100k", "100–250k", "250k–1M", "≥1M")
 
-dq_long <- dq_long %>% left_join(label_lookup, by = "metric")
+county_sizes <- pop22 %>%
+  mutate(size_bucket = cut(pop_2022, breaks = cuts, labels = labels, right = FALSE)) %>%
+  select(GEOID, size_bucket)
 
-## 5 · Build one scatter-plot per metric  --------------------------------------
-plot_list <- dq_long %>%
-  group_split(metric) %>%
-  map(~ ggplot(.x, aes(n_cert, value)) +
-        geom_point(alpha = 0.35, size = 1) +
-        geom_smooth(method = "loess", se = FALSE, linewidth = 1) +
-        scale_x_log10(labels = comma,
-                      name   = "Death certificates in county-year") +
-        scale_y_continuous(labels = percent_format(accuracy = 1)) +
-        labs(y = NULL,
-             title = unique(.x$label)) +
-        theme_bw(base_size = 12))
+# 6 · Join size buckets into main data ------------------------------------
+# Join both population and bucket by using the original `pop22` data
+dq_all <- dq_all %>%
+  left_join(pop22, by = "GEOID") %>%
+  left_join(county_sizes, by = "GEOID")
 
-## 6 · Show them side-by-side (2 columns)  -------------------------------------
-wrap_plots(plotlist = plot_list, ncol = 2) +
-  plot_annotation(
-    title    = "County size vs. data-quality metrics",
-    subtitle = "U.S. counties, 1999–2022 (each point = county-year)",
-    theme    = theme(plot.title = element_text(face = "bold"))
-  )
+
+# 7 · Summarize time series by size bucket -------------------------------
+ts_bucket <- dq_all %>%
+  group_by(year, size_bucket) %>%
+  summarise(avg_prop_garbage = mean(prop_garbage, na.rm = TRUE), .groups = "drop")
+
+ts_bucket_clean <- ts_bucket %>%
+  filter(!is.na(size_bucket))
+
+# 8 · Plot time series ---------------------------------------------------
+ggplot(ts_bucket_clean, aes(year, avg_prop_garbage, colour = size_bucket)) +
+  geom_line(linewidth = 1) +
+  scale_y_continuous(labels = percent_format(accuracy = 0.1)) +
+  labs(
+    title = "Garbage-code trend by county size",
+    x = NULL,
+    y = "Mean proportion garbage",
+    colour = "2022 size bucket"
+  ) +
+  theme_bw()
+
+# 9 · Save plot (optional) -----------------------------------------------
+ggsave(here("figures", "garbage_trend_by_size_bucket.png"),
+       width = 7, height = 4, dpi = 300)
+
+# Filter for 2022 with valid population
+scatter_data <- dq_all %>%
+  filter(year == 2022, !is.na(pop_2022), !is.na(prop_garbage))
+
+ggplot(scatter_data, aes(x = pop_2022, y = prop_garbage)) +
+  geom_point(alpha = 0.6) +
+  scale_x_log10(labels = scales::comma) +
+  scale_y_continuous(labels = scales::percent_format(accuracy = 0.1)) +
+  labs(
+    title = "County population vs. proportion garbage code (2022)",
+    x = "County population (log10 scale)",
+    y = "Proportion of garbage code"
+  ) +
+  theme_bw()
+
+ggsave(here("figures", "scatter_population_vs_garbage_2022.png"),
+       width = 7, height = 4, dpi = 300)
+
 ```
+```{r}
+unmatched <- dq_all %>%
+  filter(is.na(GEOID)) %>%
+  distinct(countyrs) %>%
+  arrange(countyrs)
+
+print(unmatched, n = 200)
+
+```
+
 
 
 
