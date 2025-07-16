@@ -34,8 +34,8 @@ PARALLELIZE <- TRUE
 # ————————————————————————————————————————————————————————————————
 #  load things + dictionaries + helpers
 # ————————————————————————————————————————————————————————————————
-#parquet_dir    <- here("data_private", "mcod") 
- parquet_dir    <- here("data_private", "mcod_sample") 
+parquet_dir    <- here("data_private", "mcod")
+# parquet_dir    <- here("data_private", "mcod_sample") 
 dictionary_dir <- here("data_raw", "cause-codes")
 out_csv        <- here("data", "county_year_quality_metrics.csv")
 
@@ -302,7 +302,7 @@ if (PARALLELIZE) {
     county_year_all <- furrr::future_map_dfr(
         parquet_files,
         summarise_year_file,
-        .options = furrr_options(packages = c("forcats", "arrow")))
+        .options = furrr_options(packages = c("forcats", "arrow", "tidyr")))
 } else {
     county_year_all <- map_dfr(parquet_files, summarise_year_file)
 }
@@ -310,8 +310,6 @@ if (PARALLELIZE) {
 write_csv(county_year_all, out_csv)
 message("County-year quality metrics written")
 
-
 # file <- "data_private/mcod_sample/mcod_2021.parquet"
 # df <- read_parquet(file)
 # table(df$marstat, useNA = "ifany")
-
