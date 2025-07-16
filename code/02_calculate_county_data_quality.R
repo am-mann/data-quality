@@ -276,12 +276,12 @@ summarise_year_file <- function(file) {
             pct_overd_miss       = ifelse(overd_n > 0, overd_miss_k / overd_n, NA_real_),
             pct_overd_miss_low   = wilson_lower(overd_miss_k, overd_n),
             pct_overd_miss_hi    = wilson_upper(overd_miss_k, overd_n),      overdose_unspec_k    = sum(is_overdose & unspecific_drug),
-            across(all_of(key_demo_vars),
-                ~ {
-                    valid <- !(.x %in% invalid | is.na(.x))
-                    if (all(is.na(.x))) NA_integer_ else sum(valid)
-                },
-                .names = "{.col}_comp_k"),
+            across(all_of(demo_vars),
+                   ~ {bad_vals <- invalid_by_var[[cur_column()]]
+                    good     <- !(.x %in% bad_vals | is.na(.x))
+                    if (all(is.na(.x))) NA_integer_ else sum(good) },
+                .names = "{.col}_comp_k"
+            ),
             .groups = "drop"
         )
 }
