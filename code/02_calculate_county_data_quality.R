@@ -326,7 +326,9 @@ summarise_year_file <- function(file) {
             ),
             .groups = "drop"
         )
-    dplyr::left_join(county_metrics, entropy_tbl, by = county_var)
+    result <- dplyr::left_join(county_metrics, entropy_tbl, by = county_var) %>%
+        dplyr::mutate(
+            DQ_prop_garbage = (1-DQ_overall) * prop_garbage)
 }
 
 # ————————————————————————————————————————————————————————————————
@@ -352,8 +354,8 @@ if (PARALLELIZE) {
 write_csv(county_year_all, out_csv)
 message("County-year quality metrics written")
 
-# file <- "data_private/mcod_sample/mcod_2006.parquet"
-# df <- read_parquet(file)
+file <- "data_private/mcod_sample/mcod_2006.parquet"
+df <- read_parquet(file)
 # table(df$marstat, useNA = "ifany")
 
 

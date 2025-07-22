@@ -130,10 +130,14 @@ fit_multinom <- function(tr, te, dbg_prefix="") {
     result
 }
 
+# ──────────────────────────────────────────────────────────────
+#  Weighted-average DQ  +  zero-score for R54/R99
+# ──────────────────────────────────────────────────────────────
 compute_entropy_county <- function(df, county_var = "countyrs") {
     
     preds <- vector("list", nrow(garbage_tbl))
     
+    # predict entropy for each *modelled* garbage code
     for (g in seq_len(nrow(garbage_tbl))) {
         gc     <- garbage_tbl$garbage[g]
         cand   <- garbage_tbl$candidate_codes[[g]]
@@ -144,11 +148,11 @@ compute_entropy_county <- function(df, county_var = "countyrs") {
         if (nrow(te) == 0 || nrow(tr) < 50) next
         
         trf <- make_features25(tr) |>
-            dplyr::mutate(age_grp  = factor(age_grp,  levels = levels(df$age_grp)),
-                          sex_male = factor(sex_male))
+            mutate(age_grp  = factor(age_grp,  levels = levels(df$age_grp)),
+                   sex_male = factor(sex_male))
         tef <- make_features25(te) |>
-            dplyr::mutate(age_grp  = factor(age_grp,  levels = levels(df$age_grp)),
-                          sex_male = factor(sex_male))
+            mutate(age_grp  = factor(age_grp,  levels = levels(df$age_grp)),
+                   sex_male = factor(sex_male))
         
         missing_bins <- setdiff(names(trf), names(tef))
         tef[missing_bins[grepl("^bin_", missing_bins)]] <- 0L
@@ -164,25 +168,48 @@ compute_entropy_county <- function(df, county_var = "countyrs") {
     }
     
     pred_bind <- dplyr::bind_rows(preds) |>
-        dplyr::left_join(df[, c("ranum", county_var)], by = "ranum")
+        dplyr::left_join(df[, c("ranum", county_var)], by = "ranum") |>
+        mutate(DQ_row = 1 - H_B / log2(k))
     
-    # overall data-quality score
-    overall <- pred_bind |>
-        dplyr::mutate(DQ_row = 1 - H_B / log2(k)) |>
-        dplyr::group_by(.data[[county_var]]) |>
-        dplyr::summarise(DQ_B_overall = mean(DQ_row, na.rm = TRUE),
-                         .groups = "drop")
-    
-    # mean DQ for each garbage code
-    by_gc <- pred_bind |>
-        dplyr::mutate(DQ_row = 1 - H_B / log2(k)) |>
-        dplyr::group_by(.data[[county_var]], garbage) |>
-        dplyr::summarise(DQ_gc = mean(DQ_row, na.rm = TRUE), .groups = "drop") |>
-        tidyr::pivot_wider(
-            names_from  = garbage,
-            values_from = DQ_gc,
-            names_prefix = "DQ_"     # DQ_C55, DQ_C80C96, ...
+    # county-level means and counts for modelled GCs 
+    by_gc_long <- pred_bind |>
+        group_by(.data[[county_var]], garbage) |>
+        summarise(
+            DQ_gc = mean(DQ_row, na.rm = TRUE),
+            n_gc  = n(),
+            .groups = "drop"
         )
     
-    dplyr::left_join(overall, by_gc, by = county_var)
+    # add R54 / R99 with DQ = 0
+    r_tbl <- df |>
+        filter(uc3 %in% c("R54", "R99")) |>
+        group_by(.data[[county_var]]) |>
+        summarise(
+            garbage = "R54R99",
+            DQ_gc   = 0,
+            n_gc    = n(),
+            .groups = "drop"
+        )
+    by_gc_long <- bind_rows(by_gc_long, r_tbl)
+    
+    # weights & overall (sum w*DQ_gc)
+    by_gc_long <- by_gc_long |>
+        group_by(.data[[county_var]]) |>
+        mutate(weight = n_gc / sum(n_gc)) 
+
+    overall <- by_gc_long |>
+        summarise(
+            DQ_overall = sum(DQ_gc * weight, na.rm = TRUE),
+            .groups    = "drop"
+        )
+    
+    # wide table with per-GC DQs
+    by_gc_wide <- by_gc_long |>
+        select(-n_gc, -weight) |>
+        pivot_wider(names_from  = garbage,
+                    values_from = DQ_gc,
+                    names_prefix = "DQ_")     # includes DQ_R54R99
+    
+    # return
+    left_join(overall, by_gc_wide, by = county_var)
 }
