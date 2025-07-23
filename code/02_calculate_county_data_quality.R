@@ -127,7 +127,7 @@ summarise_year_file <- function(file) {
     this_year <- as.integer(stringr::str_extract(basename(file), "\\d{4}"))
     message("Processing ", this_year)
 
-    cols_needed <- c("ucod", county_var, key_demo_vars, sec_cols, "ager27", "sex")
+    cols_needed <- c("ucod", county_var, key_demo_vars, sec_cols, "ager27", "sex", "age_years")
     ds <- arrow::read_parquet(
         file,
         as_data_frame = TRUE,
@@ -147,14 +147,7 @@ summarise_year_file <- function(file) {
             uc4      = substr(clean_icd(ucod), 1, 4),
             uc3      = substr(clean_icd(ucod), 1, 3),
             across(starts_with("record_"), ~ canonical_icd(.x)),
-            sex_male = if_else(sex == "M", 1L, 0L),
-            age_grp  = case_when(
-                ager27 %in% as.character(1:13)  ~ "0–59",
-                ager27 %in% c("14","15")        ~ "60–69",
-                ager27 %in% c("16","17")        ~ "70–79",
-                ager27 %in% as.character(18:26) ~ "80+",
-                TRUE                            ~ NA_character_
-            ) |> factor(levels = c("0–59","60–69","70–79","80+")))
+            sex_male = if_else(sex == "M", 1L, 0L))
     
     entropy_tbl <- compute_entropy_county(ds, county_var)
     
@@ -285,10 +278,6 @@ summarise_year_file <- function(file) {
         dplyr::group_by(.data[[county_var]], year) %>%
         dplyr::summarise(
             n_cert               = n(),
-            demo_complete_k        = sum(complete_all),
-            prop_complete_demo     = demo_complete_k / n_cert,
-            prop_complete_demo_low = wilson_lower(demo_complete_k, n_cert),
-            prop_complete_demo_hi  = wilson_upper(demo_complete_k, n_cert),
             garb_k               = sum(is_garbage),
             prop_garbage         = garb_k / n_cert,
             prop_garbage_low     = wilson_lower(garb_k, n_cert),
@@ -354,8 +343,5 @@ if (PARALLELIZE) {
 write_csv(county_year_all, out_csv)
 message("County-year quality metrics written")
 
-file <- "data_private/mcod_sample/mcod_2006.parquet"
-df <- read_parquet(file)
-# table(df$marstat, useNA = "ifany")
-
-
+# file <- "data_private/mcod_sample/mcod_2006.parquet"
+# df <- read_parquet(file)

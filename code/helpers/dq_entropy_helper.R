@@ -137,7 +137,7 @@ compute_entropy_county <- function(df, county_var = "countyrs") {
     
     preds <- vector("list", nrow(garbage_tbl))
     
-    # predict entropy for each *modelled* garbage code
+    # predict entropy for each modelled garbage code
     for (g in seq_len(nrow(garbage_tbl))) {
         gc     <- garbage_tbl$garbage[g]
         cand   <- garbage_tbl$candidate_codes[[g]]
@@ -147,17 +147,58 @@ compute_entropy_county <- function(df, county_var = "countyrs") {
         te <- dplyr::filter(df, uc4 %in% gc_vec)
         if (nrow(te) == 0 || nrow(tr) < 50) next
         
+        age_to_num <- function(x) {
+            xi  <- as.character(x)
+            bad <- xi %in% invalid_by_var$age | is.na(xi)
+            out <- suppressWarnings(as.numeric(xi))
+            out[bad] <- NA_real_
+            out
+        }
+        
+        tr$age_num <- age_to_num(tr$age_years)
+        te$age_num <- age_to_num(te$age_years)
+        
+        if (sum(!is.na(tr$age_num)) < 5) {
+            tr$age_grp <- te$age_grp <- NA_character_
+        } else {
+            q <- quantile(tr$age_num, probs = c(0, .25, .50, .75, 1),
+                          na.rm = TRUE, type = 7) |> unique()
+            if (length(q) < 5) {
+                q <- c(min(tr$age_num, na.rm = TRUE) - 1,
+                       stats::quantile(tr$age_num, probs = c(.33, .66),
+                                       na.rm = TRUE, type = 7),
+                       max(tr$age_num, na.rm = TRUE) + 1)
+            }
+            
+            tr$age_grp <- cut(tr$age_num, breaks = q,
+                              labels = paste0("Q", seq_len(length(q) - 1)),
+                              include.lowest = TRUE, right = TRUE)
+            te$age_grp <- cut(te$age_num, breaks = q,
+                              labels = paste0("Q", seq_len(length(q) - 1)),
+                              include.lowest = TRUE, right = TRUE)
+        }
         trf <- make_features25(tr) |>
-            mutate(age_grp  = factor(age_grp,  levels = levels(df$age_grp)),
+            mutate(age_grp  = factor(age_grp, levels = paste0("Q", 1:4)),
                    sex_male = factor(sex_male))
         tef <- make_features25(te) |>
-            mutate(age_grp  = factor(age_grp,  levels = levels(df$age_grp)),
+            mutate(age_grp  = factor(age_grp, levels = paste0("Q", 1:4)),
                    sex_male = factor(sex_male))
         
         missing_bins <- setdiff(names(trf), names(tef))
         tef[missing_bins[grepl("^bin_", missing_bins)]] <- 0L
         
         H <- fit_multinom(trf, tef, dbg_prefix = paste0("▶ ", gc, " "))
+        if (sum(is.na(H)) > 0) {
+            cat("⚠ GC", gc, ":",
+                sum(is.na(H)), "NA predictions out of", length(H), "\n")
+            
+            na_ranum <- te$ranum[is.na(H)]
+            cat("  Affected ranum (sample):", head(na_ranum, 5), "\n")
+            
+            # Save to global (optional)
+            assign(paste0("NA_H_", gc), te[is.na(H), c("ranum", county_var)], envir = .GlobalEnv)
+        }
+        
         
         preds[[g]] <- tibble(
             ranum   = te$ranum,
@@ -211,5 +252,27 @@ compute_entropy_county <- function(df, county_var = "countyrs") {
                     names_prefix = "DQ_")     # includes DQ_R54R99
     
     # return
+    # ───────────────────────────────────────────────────────────────
+    # ▶▶ Diagnostics: entropy prediction coverage
+    # ───────────────────────────────────────────────────────────────
+    n_gc_total   <- nrow(garbage_tbl)
+    n_gc_pred    <- sum(lengths(preds) > 0)
+    n_gc_skipped <- n_gc_total - n_gc_pred
+    
+    if (n_gc_skipped > 0) {
+        cat("⚠ compute_entropy_county: Skipped", n_gc_skipped,
+            "of", n_gc_total, "garbage codes (no test/train rows or failed)\n")
+    }
+    
+    missing_entropy <- pred_bind |> filter(is.na(H_B))
+    if (nrow(missing_entropy) > 0) {
+        cat("⚠ compute_entropy_county: Found", nrow(missing_entropy),
+            "rows with missing entropy predictions\n")
+    }
+    
+    if (nrow(overall) == 0 || any(is.na(overall$DQ_overall))) {
+        cat("🚨 compute_entropy_county: DQ_overall missing or not computed\n")
+    }
+    
     left_join(overall, by_gc_wide, by = county_var)
 }
