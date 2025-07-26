@@ -35,25 +35,34 @@ PARALLELIZE <- TRUE
 # ————————————————————————————————————————————————————————————————
 #  load things + dictionaries + helpers
 # ————————————————————————————————————————————————————————————————
-source(here("code/helpers", "dq_entropy_helper.R"))   # loads entropy helper functions
-parquet_dir    <- here("data_private", "mcod_sample")
-# parquet_dir    <- here("data_private", "mcod_sample") 
+source(here("code/helpers", "dq_entropy_helper.R")) # loads entropy helper functions
+if (dir_exists(here("data_private", "mcod"))) {
+    parquet_dir <- here("data_private", "mcod")
+} else {
+    parquet_dir <- here("data_private", "mcod_sample")
+}
 dictionary_dir <- here("data_raw", "cause-codes")
-out_csv        <- here("data", "county_year_quality_metrics.csv")
+out_csv <- here("data", "county_year_quality_metrics.csv")
 
-county_var     <- "countyrs" 
-years_wanted   <- NULL
-key_demo_vars  <- c("marstat", "placdth", "educ", "mandeath", "age", "sex", "race", "racer40")
+county_var <- "countyrs"
+years_wanted <- NULL
+key_demo_vars <- c("marstat", "placdth", "educ", "mandeath", "age", "sex", "race", "racer40")
 
 canonical_icd <- function(x) {
     stringr::str_remove_all(stringr::str_to_upper(x), "[^A-Z0-9]")
 }
 
-lookup_garbage <- read_csv(file.path(dictionary_dir,
-    "gbd_garbage_codes_without_overdose.csv"),
-show_col_types = FALSE) %>%
-    transmute(icd10 = canonical_icd(icd10),
-        gbd_severity = as.integer(gbd_severity)) %>%
+lookup_garbage <- read_csv(
+    file.path(
+        dictionary_dir,
+        "gbd_garbage_codes_without_overdose.csv"
+    ),
+    show_col_types = FALSE
+) %>%
+    transmute(
+        icd10 = canonical_icd(icd10),
+        gbd_severity = as.integer(gbd_severity)
+    ) %>%
     distinct(icd10, .keep_all = TRUE)
 
 light_garbage <- read_csv(
@@ -82,7 +91,7 @@ accident_detail_lookup <- readr::read_csv(
     filter(detail != "") |>
     distinct()
 
-accident_ucod_set   <- unique(accident_detail_lookup$ucod)
+accident_ucod_set <- unique(accident_detail_lookup$ucod)
 accident_detail_set <- unique(accident_detail_lookup$detail)
 
 # Helpers
@@ -94,7 +103,7 @@ wilson_lower <- function(k, n) {
     k <- num(k)
     n <- num(n)
     out <- rep(NA_real_, length(k))
-    ok  <- n > 0 & !is.na(n)
+    ok <- n > 0 & !is.na(n)
     if (any(ok)) out[ok] <- binom.confint(k[ok], n[ok], methods = "wilson")$lower
     out
 }
@@ -102,22 +111,22 @@ wilson_upper <- function(k, n) {
     k <- num(k)
     n <- num(n)
     out <- rep(NA_real_, length(k))
-    ok  <- n > 0 & !is.na(n)
+    ok <- n > 0 & !is.na(n)
     if (any(ok)) out[ok] <- binom.confint(k[ok], n[ok], methods = "wilson")$upper
     out
 }
 
 sec_cols <- paste0("record_", 1:20)
 invalid_by_var <- list(
-    marstat   = c("", "not_stated", "unknown", NA),
-    placdth   = c("", "9", "U", "Unknown", NA),
-    educ2003  = c("", "9", "99", "999", "9999", "0", NA),
-    educ  = c("", "9", "99", "999", "9999", "0", NA),
-    mandeath  = c("", "9", "7", "Unknown", NA),
-    age       = c("", "999", "9999", "0000", NA),
-    sex       = c("", "U", NA),
-    race      = c("", "9", "Unknown", NA),
-    racer40      = c("", "9", "Unknown", NA)
+    marstat = c("", "not_stated", "unknown", NA),
+    placdth = c("", "9", "U", "Unknown", NA),
+    educ2003 = c("", "9", "99", "999", "9999", "0", NA),
+    educ = c("", "9", "99", "999", "9999", "0", NA),
+    mandeath = c("", "9", "7", "Unknown", NA),
+    age = c("", "999", "9999", "0000", NA),
+    sex = c("", "U", NA),
+    race = c("", "9", "Unknown", NA),
+    racer40 = c("", "9", "Unknown", NA)
 )
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -131,26 +140,33 @@ summarise_year_file <- function(file) {
     ds <- arrow::read_parquet(
         file,
         as_data_frame = TRUE,
-        col_select = intersect(cols_needed,
-            names(arrow::read_parquet(file, as_data_frame = FALSE)$schema)))
-    
+        col_select = intersect(
+            cols_needed,
+            names(arrow::read_parquet(file, as_data_frame = FALSE)$schema)
+        )
+    )
+
     ds <- ds %>%
-        {                        # rename record1→record_1 etc. if underscore cols are absent
+        { # rename record1→record_1 etc. if underscore cols are absent
             if (!any(grepl("^record_", names(.))) &&
-                any(grepl("^record[0-9]+$", names(.))))
+                any(grepl("^record[0-9]+$", names(.)))) {
                 rename_with(., ~ sub("^record([0-9]+)$", "record_\\1", .x),
-                            .cols = matches("^record[0-9]+$"))
-            else .
+                    .cols = matches("^record[0-9]+$")
+                )
+            } else {
+                .
+            }
         } %>%
         mutate(
             ranum    = row_number(),
             uc4      = substr(clean_icd(ucod), 1, 4),
             uc3      = substr(clean_icd(ucod), 1, 3),
             across(starts_with("record_"), ~ canonical_icd(.x)),
-            sex_male = if_else(sex == "M", 1L, 0L))
-    
+            sex_male = if_else(sex == "M", 1L, 0L)
+        )
+
     entropy_tbl <- compute_entropy_county(ds, county_var)
-    
+
     # from 2003 to 2005 the educ2003 variable is called educ so here I change the name accordingly
     # if (this_year %in% 2003:2005 &&
     #     "educ" %in% names(ds)      &&
@@ -163,16 +179,19 @@ summarise_year_file <- function(file) {
     if (this_year < 2004) ds$educ2003 <- NA_character_
     demo_vars <- if (this_year < 2004) {
         setdiff(key_demo_vars, "educ2003")
-    } else {key_demo_vars}
+    } else {
+        key_demo_vars
+    }
     if (this_year %in% 2021:2022) {
         demo_vars <- union(setdiff(demo_vars, "race"), "racer40")
     }
 
     # flag accidents and overdoses
-    ds <- ds %>% mutate(
-        icd10 = canonical_icd(ucod),
-        ranum = dplyr::row_number()
-    ) %>%
+    ds <- ds %>%
+        mutate(
+            icd10 = canonical_icd(ucod),
+            ranum = dplyr::row_number()
+        ) %>%
         left_join(lookup_garbage, by = "icd10") %>%
         mutate(
             needs_detail = icd10 %in% accident_ucod_set,
@@ -188,11 +207,12 @@ summarise_year_file <- function(file) {
         present_sec %>%
             purrr::map_dfr(~ ds %>% select(ranum, detail_raw = !!sym(.x))) %>%
             mutate(
-                detail_full = canonical_icd(detail_raw),        # full code
-                detail      = substr(detail_full, 1, 4)        # 4-char version
+                detail_full = canonical_icd(detail_raw), # full code
+                detail      = substr(detail_full, 1, 4) # 4-char version
             ) %>%
-            filter(!is.na(detail_full) & trimws(detail_full) != "")}
-    
+            filter(!is.na(detail_full) & trimws(detail_full) != "")
+    }
+
 
     # keep relevant details for accident deaths
     contrib_long <- contrib_all %>%
@@ -200,7 +220,7 @@ summarise_year_file <- function(file) {
 
     # sum light garbage
     contrib_counts <- contrib_all %>%
-        mutate(is_light = detail_full %in% light_garbage) %>%  
+        mutate(is_light = detail_full %in% light_garbage) %>%
         group_by(ranum) %>%
         summarise(
             total_contrib = n(),
@@ -210,30 +230,30 @@ summarise_year_file <- function(file) {
 
     ## flag unspecified drug for overdoses
     unspec_tbl <- contrib_all %>%
-        filter(str_starts(detail_full, "T")) %>%      
+        filter(str_starts(detail_full, "T")) %>%
         mutate(
             is_specific = !(str_starts(detail_full, "T509") |
-                                str_starts(detail_full, "T409"))
+                str_starts(detail_full, "T409"))
         ) %>%
         group_by(ranum) %>%
         summarise(has_specific = any(is_specific), .groups = "drop") %>%
         mutate(unspecific_drug = !has_specific) %>%
         select(ranum, unspecific_drug)
-    
+
 
     # merge all flags
     cert_tbl <- ds %>%
-        dplyr::left_join(contrib_counts,  by = "ranum") %>%
-        dplyr::left_join(unspec_tbl,      by = "ranum") %>%
+        dplyr::left_join(contrib_counts, by = "ranum") %>%
+        dplyr::left_join(unspec_tbl, by = "ranum") %>%
         dplyr::mutate(
-            total_contrib   = tidyr::replace_na(total_contrib, 0L),
-            light_contrib   = tidyr::replace_na(light_contrib, 0L),
+            total_contrib = tidyr::replace_na(total_contrib, 0L),
+            light_contrib = tidyr::replace_na(light_contrib, 0L),
             unspecific_drug = tidyr::replace_na(unspecific_drug, TRUE),
-            is_garbage      = dplyr::case_when(
-                is.na(gbd_severity)                          ~ FALSE,
-                !stringr::str_starts(icd10, "X")             ~ TRUE,
+            is_garbage = dplyr::case_when(
+                is.na(gbd_severity) ~ FALSE,
+                !stringr::str_starts(icd10, "X") ~ TRUE,
                 stringr::str_starts(icd10, "X") & light_contrib == 0 ~ TRUE,
-                TRUE                                         ~ FALSE
+                TRUE ~ FALSE
             )
         )
 
@@ -241,21 +261,22 @@ summarise_year_file <- function(file) {
     need_tbl <- cert_tbl %>%
         dplyr::filter(needs_detail) %>%
         dplyr::distinct(ranum, icd10)
-    
+
     demo_vars_exc_race <- setdiff(demo_vars, c("race", "racer40", "mandeath"))
     valid_exc_race <- sapply(demo_vars_exc_race, function(v) {
         vals <- cert_tbl[[v]]
-        inv  <- invalid_by_var[[v]]
+        inv <- invalid_by_var[[v]]
         !(vals %in% inv)
     })
     cert_tbl$complete_all_exc_race <- rowSums(valid_exc_race) == length(demo_vars_exc_race)
-    
+
     # find required detail
     required_hits <- contrib_long %>%
         dplyr::semi_join(accident_detail_lookup, by = "detail") %>%
         dplyr::left_join(ds %>% dplyr::select(ranum, icd10), by = "ranum") %>%
         dplyr::semi_join(accident_detail_lookup,
-            by = c("icd10" = "ucod", "detail")) %>%
+            by = c("icd10" = "ucod", "detail")
+        ) %>%
         dplyr::distinct(ranum) %>%
         dplyr::mutate(has_required_detail = TRUE)
 
@@ -266,58 +287,60 @@ summarise_year_file <- function(file) {
     # check completeness of demographic information
     valid_mat <- sapply(demo_vars, function(v) {
         vals <- cert_tbl[[v]]
-        inv  <- invalid_by_var[[v]]
+        inv <- invalid_by_var[[v]]
         !(vals %in% inv)
-        
     })
-    
+
     cert_tbl$complete_all <- rowSums(valid_mat) == length(demo_vars)
- 
+
     # make big table
     county_metrics <- cert_tbl %>%
         dplyr::group_by(.data[[county_var]], year) %>%
         dplyr::summarise(
-            n_cert               = n(),
-            garb_k               = sum(is_garbage),
-            prop_garbage         = garb_k / n_cert,
-            prop_garbage_low     = wilson_lower(garb_k, n_cert),
-            prop_garbage_hi      = wilson_upper(garb_k, n_cert),
-            pct_gc_I64        = mean(icd10 == "I64"),
-            pct_gc_C_misc     = mean(icd10 %in% c("C80", "C55", "C97")),
-            pct_gc_I10        = mean(icd10 == "I10"),
-            pct_gc_R_misc     = mean(icd10 %in% c("R99", "R54")),
-            pct_gc_N19        = mean(icd10 == "N19"),
-            pct_gc_J80        = mean(icd10 == "J80"),
-            all_comp_k           = sum(complete_all_exc_race),
-            prop_all_comp        = all_comp_k / n_cert,
-            prop_all_comp_low    = wilson_lower(all_comp_k, n_cert),
-            prop_all_comp_hi     = wilson_upper(all_comp_k, n_cert),
-            contrib_n            = sum(total_contrib),
-            light_k              = sum(light_contrib),
-            prop_light           = ifelse(contrib_n > 0, light_k / contrib_n, NA_real_),
-            prop_light_low       = wilson_lower(light_k, contrib_n),
-            prop_light_hi        = wilson_upper(light_k, contrib_n),
-            acc_n                = sum(needs_detail),
-            acc_miss_k           = sum(needs_detail & !has_required_detail),
-            pct_acc_miss         = ifelse(acc_n > 0, acc_miss_k / acc_n, NA_real_),
-            pct_acc_miss_low     = wilson_lower(acc_miss_k, acc_n),
-            pct_acc_miss_hi      = wilson_upper(acc_miss_k, acc_n),
-            overd_n              = sum(is_overdose),
-            overd_miss_k         = sum(is_overdose & !has_required_detail),
-            pct_overd_miss       = ifelse(overd_n > 0, overd_miss_k / overd_n, NA_real_),
-            pct_overd_miss_low   = wilson_lower(overd_miss_k, overd_n),
-            pct_overd_miss_hi    = wilson_upper(overd_miss_k, overd_n),      overdose_unspec_k    = sum(is_overdose & unspecific_drug),
+            n_cert = n(),
+            garb_k = sum(is_garbage),
+            prop_garbage = garb_k / n_cert,
+            prop_garbage_low = wilson_lower(garb_k, n_cert),
+            prop_garbage_hi = wilson_upper(garb_k, n_cert),
+            pct_gc_I64 = mean(icd10 == "I64"),
+            pct_gc_C_misc = mean(icd10 %in% c("C80", "C55", "C97")),
+            pct_gc_I10 = mean(icd10 == "I10"),
+            pct_gc_R_misc = mean(icd10 %in% c("R99", "R54")),
+            pct_gc_N19 = mean(icd10 == "N19"),
+            pct_gc_J80 = mean(icd10 == "J80"),
+            all_comp_k = sum(complete_all_exc_race),
+            prop_all_comp = all_comp_k / n_cert,
+            prop_all_comp_low = wilson_lower(all_comp_k, n_cert),
+            prop_all_comp_hi = wilson_upper(all_comp_k, n_cert),
+            contrib_n = sum(total_contrib),
+            light_k = sum(light_contrib),
+            prop_light = ifelse(contrib_n > 0, light_k / contrib_n, NA_real_),
+            prop_light_low = wilson_lower(light_k, contrib_n),
+            prop_light_hi = wilson_upper(light_k, contrib_n),
+            acc_n = sum(needs_detail),
+            acc_miss_k = sum(needs_detail & !has_required_detail),
+            pct_acc_miss = ifelse(acc_n > 0, acc_miss_k / acc_n, NA_real_),
+            pct_acc_miss_low = wilson_lower(acc_miss_k, acc_n),
+            pct_acc_miss_hi = wilson_upper(acc_miss_k, acc_n),
+            overd_n = sum(is_overdose),
+            overd_miss_k = sum(is_overdose & !has_required_detail),
+            pct_overd_miss = ifelse(overd_n > 0, overd_miss_k / overd_n, NA_real_),
+            pct_overd_miss_low = wilson_lower(overd_miss_k, overd_n),
+            pct_overd_miss_hi = wilson_upper(overd_miss_k, overd_n), overdose_unspec_k = sum(is_overdose & unspecific_drug),
             across(all_of(demo_vars),
-                   ~ {bad_vals <- invalid_by_var[[cur_column()]]
-                    good     <- !(.x %in% bad_vals | is.na(.x))
-                    if (all(is.na(.x))) NA_integer_ else sum(good) },
+                ~ {
+                    bad_vals <- invalid_by_var[[cur_column()]]
+                    good <- !(.x %in% bad_vals | is.na(.x))
+                    if (all(is.na(.x))) NA_integer_ else sum(good)
+                },
                 .names = "{.col}_comp_k"
             ),
             .groups = "drop"
         )
     result <- dplyr::left_join(county_metrics, entropy_tbl, by = county_var) %>%
         dplyr::mutate(
-            DQ_prop_garbage = (1-DQ_overall) * prop_garbage)
+            DQ_prop_garbage = (1 - DQ_overall) * prop_garbage
+        )
 }
 
 # ————————————————————————————————————————————————————————————————
@@ -335,7 +358,8 @@ if (PARALLELIZE) {
     county_year_all <- furrr::future_map_dfr(
         parquet_files,
         summarise_year_file,
-        .options = furrr_options(seed = TRUE, packages = c("arrow", "tidyr", "forcats", "Matrix", "nnet", "glmnet")))
+        .options = furrr_options(seed = TRUE, packages = c("arrow", "tidyr", "forcats", "Matrix", "nnet", "glmnet"))
+    )
 } else {
     county_year_all <- map_dfr(parquet_files, summarise_year_file)
 }
