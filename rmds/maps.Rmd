@@ -385,6 +385,14 @@ fill_scale <- if (var == "prop_garbage") {
     direction = -1,
     na.value = "grey90"
   )
+} else if (var == "DQ_overall") {
+  scale_fill_distiller(
+    palette = palette,
+    limits = c(0, 40),
+    oob = scales::squish,
+    direction = 1,
+    na.value = "grey90"
+  )
 } else if (var %in% c("pct_age_comp_k", "pct_sex_comp_k", "pct_race_comp_k")) {
   scale_fill_distiller(
     palette = palette,
@@ -454,7 +462,7 @@ if (length(missing)) install.packages(missing)
 invisible(lapply(required, library, character.only = TRUE))
 options(tigris_use_cache = TRUE, tigris_class = "sf")
 
-comp_vars_pct <- c("pct_marstat_comp_k", "pct_placdth_comp_k", "pct_educ_comp_k", "pct_mandeath_comp_k","pct_age_comp_k", "pct_sex_comp_k", "pct_race_comp_k", "DQ_B_overall")
+comp_vars_pct <- c("pct_marstat_comp_k", "pct_placdth_comp_k", "pct_educ_comp_k", "pct_mandeath_comp_k","pct_age_comp_k", "pct_sex_comp_k", "pct_race_comp_k", "DQ_overall")
 
 vars_to_map <- c(
   "prop_garbage", "prop_light",  "pct_acc_miss", "pct_overd_miss",  "pct_gc_I64", "pct_gc_C_misc", "pct_gc_I10", "pct_gc_R_misc", "pct_gc_N19", "pct_gc_J80", comp_vars_pct
@@ -653,7 +661,7 @@ make_map <- function(sf_data, var, title = NULL, palette = "RdBu") {
   fill_scale <- if (var == "prop_garbage") {
   scale_fill_distiller(
     palette = palette,
-    limits = c(0.05, 0.15),
+    limits = c(0.15, 0.4),
     oob = scales::squish,
     direction = -1,
     na.value = "grey90"
@@ -661,7 +669,7 @@ make_map <- function(sf_data, var, title = NULL, palette = "RdBu") {
 } else if (var == "prop_light") {
   scale_fill_distiller(
     palette = palette,
-    limits = c(0.03, 0.10),
+    limits = c(0.20, 0.40),
     oob = scales::squish,
     direction = -1,
     na.value = "grey90"
@@ -680,6 +688,14 @@ make_map <- function(sf_data, var, title = NULL, palette = "RdBu") {
     limits = c(-0.5,0.5),
     oob = scales::squish,
     direction = -1,
+    na.value = "grey90"
+  )
+} else if (var == "DQ_overall") {
+  scale_fill_distiller(
+    palette = palette,
+    limits = c(0,40),
+    oob = scales::squish,
+    direction = 1,
     na.value = "grey90"
   )
 } else if (var == "pct_acc_miss") {
@@ -1033,7 +1049,7 @@ df <- df %>%
                               age_comp_k + sex_comp_k + mandeath_comp_k) / (6*n_cert))
 
 quality_vars <- c(
-  "prop_garbage", "prop_light", "pct_overd_miss", "prop_all_comp", "DQ_B_overall"
+  "DQ_prop_garbage", "prop_light", "pct_overd_miss", "prop_all_comp"
 )
 
 county_avg <- df %>%
@@ -1121,8 +1137,8 @@ res <- res %>%
 res <- res %>%
   mutate(
     direction_score =
-      (z_prop_garbage + z_prop_light + z_pct_overd_miss -
-      z_prop_all_comp - z_DQ_B_overall)/6
+      (z_prop_light + z_pct_overd_miss -
+      z_prop_all_comp + z_DQ_prop_garbage)/6
   )
 
 ```
