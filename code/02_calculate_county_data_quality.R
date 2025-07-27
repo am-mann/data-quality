@@ -360,6 +360,7 @@ if (PARALLELIZE) {
         summarise_year_file,
         .options = furrr_options(seed = TRUE, packages = c("arrow", "tidyr", "forcats", "Matrix", "nnet", "glmnet"))
     )
+    future::plan(future::sequential())
 } else {
     county_year_all <- map_dfr(parquet_files, summarise_year_file)
 }
