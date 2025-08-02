@@ -3,453 +3,6 @@ title: "Mapping Notebook"
 output: html_notebook
 ---
 
-Make preliminary maps
-```{r}
-# ────────────────────────────────────────────────────────────────
-# 0 · Setup – packages and helper options
-# ────────────────────────────────────────────────────────────────
-required <- c("sf", "tigris", "readr", "dplyr",
-              "stringr", "tidyr", "purrr", "ggplot2",
-              "viridis", "patchwork")
-
-missing <- setdiff(required, rownames(installed.packages()))
-if (length(missing)) install.packages(missing)
-invisible(lapply(required, library, character.only = TRUE))
-
-options(tigris_use_cache = TRUE, tigris_class = "sf")
-
-# ────────────────────────────────────────────────────────────────
-# 1 · Load county-year data
-# ────────────────────────────────────────────────────────────────
-dq <- read_csv("/Users/amymann/Documents/Data Quality Project/data_quality/county_year_quality_metrics.csv",
-               show_col_types = FALSE)
-
-# Extended state abbreviation to FIPS lookup
-state_fips_lookup <- tibble::tribble(
-  ~state_abbr, ~state_fips,
-  "AL", "01", "AK", "02", "AZ", "04", "AR", "05", "CA", "06",
-  "CO", "08", "CT", "09", "DE", "10", "DC", "11", "FL", "12",
-  "GA", "13", "HI", "15", "ID", "16", "IL", "17", "IN", "18",
-  "IA", "19", "KS", "20", "KY", "21", "LA", "22", "ME", "23",
-  "MD", "24", "MA", "25", "MI", "26", "MN", "27", "MS", "28",
-  "MO", "29", "MT", "30", "NE", "31", "NV", "32", "NH", "33",
-  "NJ", "34", "NM", "35", "NY", "36", "NC", "37", "ND", "38",
-  "OH", "39", "OK", "40", "OR", "41", "PA", "42", "RI", "44",
-  "SC", "45", "SD", "46", "TN", "47", "TX", "48", "UT", "49",
-  "VT", "50", "VA", "51", "WA", "53", "WV", "54", "WI", "55",
-  "WY", "56", "PR", "72"
-)
-
-# Build 5-digit FIPS code
-dq <- dq |>
-  mutate(
-    year = as.integer(year),
-    state_abbr = if_else(year == 1999, NA_character_, substr(countyrs, 1, 2)),
-    county_part = if_else(year == 1999, NA_character_, substr(countyrs, 3, 5))
-  ) |>
-  left_join(state_fips_lookup, by = "state_abbr") |>
-  mutate(
-    countyrs_fips = case_when(
-      year == 1999 ~ str_pad(countyrs, 5, pad = "0"),
-      TRUE ~ paste0(state_fips, county_part)
-    )
-  )
-
-# ────────────────────────────────────────────────────────────────
-# 2 · Load and transform counties (shrink/move AK & HI)
-# ────────────────────────────────────────────────────────────────
-
-# Helper: shift geometries
-st_shift <- function(sf_obj, shift = c(0, 0)) {
-  st_geometry(sf_obj) <- st_geometry(sf_obj) + shift
-  sf_obj
-}
-
-# Helper: scale geometries around centroid
-st_scale <- function(sf_obj, scale = 1) {
-  centroid <- st_centroid(st_union(sf_obj))
-  st_geometry(sf_obj) <- (st_geometry(sf_obj) - centroid) * scale + centroid
-  sf_obj
-}
-
-# Load all counties, apply CRS upfront
-us_counties <- counties(year = 2023, cb = TRUE, class = "sf") |>
-  st_transform(2163) |>
-  select(countyrs = GEOID, statefp = STATEFP)
-
-# Split regions
-mainland <- us_counties |> filter(!statefp %in% c("02", "15", "72"))  # 48 + DC
-alaska   <- us_counties |> filter(statefp == "02") |>
-  st_scale(0.35) |>
-  st_shift(c(2500000, -2200000)) |>
-  st_set_crs(2163)  # reattach CRS after transformation
-
-hawaii <- us_counties |> filter(statefp == "15") |>
-  st_scale(1.5) |>
-  st_shift(c(5200000, -1400000)) |>
-  st_set_crs(2163)  # reattach CRS after transformation
-
-# Combine all regions safely
-counties_sf <- bind_rows(mainland, alaska, hawaii)
-
-# ────────────────────────────────────────────────────────────────
-# 3 · Variables and years to map
-# ────────────────────────────────────────────────────────────────
-years_to_map <- c(1999, 2010, 2020, 2022)
-
-vars_to_map <- c(
-  "prop_garbage", "prop_light", "pct_acc_miss", "pct_overd_miss",
-  "pct_overdose_unspec_k",
-  "pct_marstat_comp_k", "pct_placdth_comp_k", "pct_educ_comp_k", "pct_mandeath_comp_k"
-)
-
-# ────────────────────────────────────────────────────────────────
-# 4 · Mapping function
-# ────────────────────────────────────────────────────────────────
-make_map <- function(sf_data, var, title = NULL, palette = "RdBu") {
-  fill_scale <- if (var == "prop_garbage") {
-    scale_fill_viridis_c(
-      option = palette,
-      na.value = "grey90",
-      limits = c(0, 0.4),
-      oob = scales::squish
-    )
-  } else {
-    scale_fill_viridis_c(
-      option = palette,
-      na.value = "grey90"
-    )
-  }
-
-  ggplot(sf_data) +
-    geom_sf(aes(fill = .data[[var]]), color = NA) +
-    fill_scale +
-    coord_sf(
-      xlim = c(-2500000, 2500000),   # crop longitude
-      ylim = c(-2200000, 730000),    # crop latitude
-      expand = FALSE
-    ) +
-    labs(
-      title = title %||% var,
-      fill = NULL
-    ) +
-    theme_void() +
-    theme(
-      plot.title = element_text(size = 14, face = "bold", hjust = 0.5),
-      legend.text = element_text(size = 9)
-    )
-}
-
-# ────────────────────────────────────────────────────────────────
-# 5 · Join each year’s data to shapefile
-# ────────────────────────────────────────────────────────────────
-joined_by_year <- map(set_names(as.character(years_to_map)), function(yr) {
-  dq_sub <- dq |> filter(year == as.integer(yr)) |>
-    select(countyrs_fips, all_of(vars_to_map))
-
-  left_join(counties_sf, dq_sub, by = c("countyrs" = "countyrs_fips"))
-})
-
-# ────────────────────────────────────────────────────────────────
-# 6 · Generate and save maps (1 per variable × year)
-# ────────────────────────────────────────────────────────────────
-output_dir <- "/Users/amymann/Documents/Data Quality Project/data_quality/figures"
-dir.create(output_dir, showWarnings = FALSE)
-
-walk(vars_to_map, function(var) {
-  walk(names(joined_by_year), function(yr) {
-    joined_sf <- joined_by_year[[yr]]
-        # Identify counties with missing values (NA or NaN) for this variable
-    missing <- joined_sf |>
-      filter(is.na(.data[[var]]) | is.nan(.data[[var]])) |>
-      pull(countyrs)
-    
-    if (length(missing) > 0) {
-      cat("\nMissing values for", var, "in", win, ":\n")
-      print(missing)
-    }
-
-
-    map_plot <- make_map(joined_sf, var = var, title = paste(var, yr))
-
-    ggsave(
-      filename = file.path(output_dir, paste0(var, "_", yr, ".png")),
-      plot = map_plot,
-      width = 8,
-      height = 6,
-      dpi = 320
-    )
-  })
-})
-```
-5 year averages
-```{r}
-# ─────────────── Setup ───────────────
-required <- c("sf", "tigris", "readr", "dplyr", "stringr", "tidyr",
-              "purrr", "ggplot2", "viridis", "patchwork")
-missing <- setdiff(required, rownames(installed.packages()))
-if (length(missing)) install.packages(missing)
-invisible(lapply(required, library, character.only = TRUE))
-options(tigris_use_cache = TRUE, tigris_class = "sf")
-
-# ─────────────── Load and preprocess data ───────────────
-dq <- read_csv(here("data", "county_year_quality_metrics.csv"),
-               show_col_types = FALSE)
-
-# Define time window
-dq <- dq |>
-  mutate(
-    year = as.integer(year),
-    time_window = case_when(
-      year >= 1999 & year <= 2004 ~ "1999_2004",
-      year >= 2005 & year <= 2010 ~ "2005_2010",
-      year >= 2011 & year <= 2017 ~ "2011_2017",
-      year >= 2018 & year <= 2022 ~ "2018_2022",
-      TRUE ~ NA_character_
-    )
-  )
-
-# Convert VT015-style codes to FIPS
-state_fips_lookup <- tibble::tribble(
-  ~state_abbr, ~state_fips,
-  "AL", "01", "AK", "02", "AZ", "04", "AR", "05", "CA", "06",
-  "CO", "08", "CT", "09", "DE", "10", "DC", "11", "FL", "12",
-  "GA", "13", "HI", "15", "ID", "16", "IL", "17", "IN", "18",
-  "IA", "19", "KS", "20", "KY", "21", "LA", "22", "ME", "23",
-  "MD", "24", "MA", "25", "MI", "26", "MN", "27", "MS", "28",
-  "MO", "29", "MT", "30", "NE", "31", "NV", "32", "NH", "33",
-  "NJ", "34", "NM", "35", "NY", "36", "NC", "37", "ND", "38",
-  "OH", "39", "OK", "40", "OR", "41", "PA", "42", "RI", "44",
-  "SC", "45", "SD", "46", "TN", "47", "TX", "48", "UT", "49",
-  "VT", "50", "VA", "51", "WA", "53", "WV", "54", "WI", "55",
-  "WY", "56", "PR", "72"
-)
-
-dq <- dq |>
-  mutate(
-    year = as.integer(year),
-    countyrs_chr = as.character(countyrs),
-
-    # Handle both 1999 and other years in one go
-    countyrs_fips = case_when(
-      year == 1999 ~ paste0(
-        str_pad(substr(countyrs_chr, 1, nchar(countyrs_chr) - 3), 2, pad = "0"),
-        str_pad(substr(countyrs_chr, nchar(countyrs_chr) - 2, nchar(countyrs_chr)), 3, pad = "0")
-      ),
-      TRUE ~ NA_character_
-    ),
-
-    state_abbr = if_else(year != 1999, substr(countyrs_chr, 1, 2), NA_character_),
-    county_part = if_else(year != 1999, substr(countyrs_chr, 3, 5), NA_character_)
-  ) |>
-  left_join(state_fips_lookup, by = "state_abbr") |>
-  mutate(
-    # Fill in missing FIPS for non-1999 rows
-    countyrs_fips = if_else(
-      is.na(countyrs_fips),
-      paste0(state_fips, county_part),
-      countyrs_fips
-    )
-  )
-
-
-# ─────────────── Shift and Scale helpers ───────────────
-st_shift <- function(sf_obj, shift = c(0, 0)) {
-  st_geometry(sf_obj) <- st_geometry(sf_obj) + shift
-  sf_obj
-}
-st_scale <- function(sf_obj, scale = 1) {
-  centroid <- st_centroid(st_union(sf_obj))
-  st_geometry(sf_obj) <- (st_geometry(sf_obj) - centroid) * scale + centroid
-  sf_obj
-}
-
-# ─────────────── Time-window-specific shapefiles ───────────────
-shapefile_years <- c("1999_2004" = 2000, "2005_2010" = 2010,
-                     "2011_2017" = 2014, "2018_2022" = 2021)
-
-county_shapes_by_window <- map(shapefile_years, function(year) {
-  us_counties <- counties(year = year, cb = TRUE, class = "sf") |>
-    st_zm(drop = TRUE, what = "ZM") |>
-    st_transform(2163)
-
-  # Explicit GEOID fallback
-  if ("GEOID" %in% names(us_counties)) {
-    us_counties <- us_counties |> mutate(countyrs = GEOID)
-  } else {
-    us_counties <- us_counties |> mutate(
-      countyrs = paste0(
-        str_pad(as.character(STATE), 2, pad = "0"),
-        str_pad(as.character(COUNTY), 3, pad = "0")
-      )
-    )
-  }
-
-  if ("STATEFP" %in% names(us_counties)) {
-    us_counties <- us_counties |> mutate(statefp = STATEFP)
-  } else if ("STATE" %in% names(us_counties)) {
-    us_counties <- us_counties |> mutate(statefp = str_pad(as.character(STATE), 2, pad = "0"))
-  } else {
-    stop("No STATEFP or STATE in shapefile")
-  }
-
-  us_counties <- us_counties |> select(countyrs, statefp, geometry)
-
-  mainland <- us_counties |> filter(!statefp %in% c("02", "15", "72"))
-  alaska <- us_counties |> filter(statefp == "02") |> st_scale(0.4) |> st_shift(c(1300000, -4900000)) |> st_set_crs(2163)
-  hawaii <- us_counties |> filter(statefp == "15") |> st_scale(1.5) |> st_shift(c(5200000, -1400000)) |> st_set_crs(2163)
-
-  bind_rows(mainland, alaska, hawaii)
-})
-
-# ─────────────── Define variables ───────────────
-raw_comp_vars <- c("marstat_comp_k", "placdth_comp_k", "educ_comp_k",
-                   "mandeath_comp_k", "age_comp_k", "sex_comp_k", "race_comp_k")
-
-derived_pct_vars <- c("pct_overdose_unspec", paste0("pct_", raw_comp_vars), "overall_completeness_pct")
-
-vars_to_map <- c(
-  "prop_garbage", "prop_light", "pct_acc_miss",
-  "pct_overdose_unspec", paste0("pct_", raw_comp_vars),
-  "overall_completeness_pct"
-)
-
-# ─────────────── Calculate derived variables and 5-year averages ───────────────
-dq_clean <- dq |>
-  filter(!is.na(time_window)) |>
-  mutate(
-    pct_overdose_unspec = if_else(overd_n > 0, overdose_unspec_k / overd_n * 100, NA_real_),
-    pct_acc_miss = if_else(acc_n > 0, acc_miss_k / acc_n * 100, NA_real_),
-    across(all_of(raw_comp_vars), ~ .x / n_cert * 100, .names = "pct_{.col}"),
-    overall_completeness_pct = 100 * (
-      (is.na(marstat_comp_k) | marstat_comp_k == 0) &
-      (is.na(placdth_comp_k) | placdth_comp_k == 0) &
-      (is.na(educ_comp_k) | educ_comp_k == 0 | year < 2006) &
-      (is.na(mandeath_comp_k) | mandeath_comp_k == 0) &
-      (is.na(age_comp_k) | age_comp_k == 0) &
-      (is.na(sex_comp_k) | sex_comp_k == 0) &
-      (is.na(race_comp_k) | race_comp_k == 0)
-    )
-  ) |>
-  filter(year >= 2006 | is.na(educ_comp_k))
-
-dq_avg_list <- map(vars_to_map, function(var) {
-  dq_clean |>
-    group_by(countyrs_fips, time_window) |>
-    summarise(
-      !!sym(var) := if (all(is.na(.data[[var]]))) NA_real_ else mean(.data[[var]], na.rm = TRUE),
-      .groups = "drop"
-    )
-})
-
-dq_avg <- reduce(dq_avg_list, full_join, by = c("countyrs_fips", "time_window"))
-
-# ─────────────── Join to shapefiles ───────────────
-joined_by_period <- map2(county_shapes_by_window, names(county_shapes_by_window), function(shapes, win) {
-  dq_sub <- dq_avg |> filter(time_window == win)
-  left_join(shapes, dq_sub, by = c("countyrs" = "countyrs_fips"))
-}) |> set_names(names(county_shapes_by_window))
-
-# ─────────────── Map function ───────────────
-make_map <- function(sf_data, var, title = NULL, palette = "RdYlBu") {
-  states <- tigris::states(cb = TRUE, class = "sf") |> st_transform(2163)
-fill_scale <- if (var == "prop_garbage") {
-  scale_fill_distiller(
-    palette = palette,
-    limits = c(0.05, 0.15),
-    oob = scales::squish,
-    direction = -1,
-    na.value = "grey90"
-  )
-} else if (var == "prop_light") {
-  scale_fill_distiller(
-    palette = palette,
-    limits = c(0.05, 0.20),
-    oob = scales::squish,
-    direction = -1,
-    na.value = "grey90"
-  )
-} else if (var == "pct_overdose_unspec") {
-  scale_fill_distiller(
-    palette = palette,
-    limits = c(0, 75),
-    oob = scales::squish,
-    direction = -1,
-    na.value = "grey90"
-  )
-} else if (var == "pct_placdth_comp_k") {
-  scale_fill_distiller(
-    palette = palette,
-    limits = c(99, 100),
-    oob = scales::squish,
-    direction = -1,
-    na.value = "grey90"
-  )
-} else if (var == "DQ_overall") {
-  scale_fill_distiller(
-    palette = palette,
-    limits = c(0, 40),
-    oob = scales::squish,
-    direction = 1,
-    na.value = "grey90"
-  )
-} else if (var %in% c("pct_age_comp_k", "pct_sex_comp_k", "pct_race_comp_k")) {
-  scale_fill_distiller(
-    palette = palette,
-    limits = c(99, 100),
-    oob = scales::squish,
-    direction = -1,
-    na.value = "grey90"
-  )
-} else if (startsWith(var, "pct_") || var == "overall_completeness_pct") {
-  scale_fill_distiller(
-    palette = palette,
-    limits = c(0, 100),
-    oob = scales::squish,
-    direction = -1,
-    na.value = "grey90"
-  )
-} else {
-  scale_fill_distiller(
-    palette = palette,
-    oob = scales::squish,
-    na.value = "grey90",
-    direction = -1
-  )
-}
-
-  ggplot() +
-    geom_sf(data = sf_data, aes(fill = .data[[var]]), color = NA) +
-    geom_sf(data = states, fill = NA, color = "white", linewidth = 0.3) +
-    fill_scale +
-    coord_sf(xlim = c(-2500000, 2500000), ylim = c(-2200000, 730000), expand = FALSE) +
-    labs(title = title %||% var, fill = NULL) +
-    theme_void() +
-    theme(
-      plot.title = element_text(size = 16, face = "bold", hjust = 0.5),
-      legend.text = element_text(size = 9)
-    )
-}
-
-# ─────────────── Save maps ───────────────
-output_dir <- "/Users/amymann/Documents/Data Quality Project/data_quality/figures/5yr_avg"
-dir.create(output_dir, showWarnings = FALSE, recursive = TRUE)
-
-walk(vars_to_map, function(var) {
-  walk(names(joined_by_period), function(win) {
-    joined_sf <- joined_by_period[[win]]
-
-    map_plot <- make_map(joined_sf, var = var, title = paste(var, win))
-    ggsave(
-      filename = file.path(output_dir, paste0(var, "_", win, ".png")),
-      plot = map_plot,
-      width = 8,
-      height = 6,
-      dpi = 320
-    )
-  })
-})
-```
 Temporality stable groupings
 ```{r}
 # ──────────────────────────────────────────────────────────────
@@ -593,7 +146,7 @@ dq_avg <- dq %>%
 # 6 · Time-window-specific shapefiles + merge with dq_avg
 # ──────────────────────────────────────────────────────────────
 crs_proj <- 2163
-shapefile_years <- c("1999_2004" = 2000, "2005_2010" = 2010, "2011_2017" = 2015, "20_2022" = 2020)
+shapefile_years <- c("1999_2004" = 2000, "2005_2010" = 2010, "2011_2017" = 2015, "2020_2022" = 2020)
 
 # Helper: shift and scale
 st_shift <- function(x, offset) {
@@ -661,7 +214,7 @@ make_map <- function(sf_data, var, title = NULL, palette = "RdBu") {
   fill_scale <- if (var == "prop_garbage") {
   scale_fill_distiller(
     palette = palette,
-    limits = c(0.15, 0.4),
+    limits = c(0.2, 0.4),
     oob = scales::squish,
     direction = -1,
     na.value = "grey90"
@@ -685,7 +238,7 @@ make_map <- function(sf_data, var, title = NULL, palette = "RdBu") {
 } else if (var == "direction_score") {
   scale_fill_distiller(
     palette = palette,
-    limits = c(-0.5,0.5),
+    limits = c(-1,1),
     oob = scales::squish,
     direction = -1,
     na.value = "grey90"
@@ -693,7 +246,7 @@ make_map <- function(sf_data, var, title = NULL, palette = "RdBu") {
 } else if (var == "DQ_overall") {
   scale_fill_distiller(
     palette = palette,
-    limits = c(0,40),
+    limits = c(0,0.40),
     oob = scales::squish,
     direction = 1,
     na.value = "grey90"
@@ -1142,8 +695,9 @@ res <- res %>%
   )
 
 ```
-calculate direction scores and make maps
+map direction scores
 ```{r}
+# map direction scores
 # ──────────────────────────────────────────────────────────────
 # 0 · Packages (load after your existing libs)
 # ──────────────────────────────────────────────────────────────
@@ -1177,6 +731,7 @@ county_sf <- counties(cb = TRUE, year = 2015, class = "sf") %>%
   group_by(stable_fips) %>%
   summarise(geometry = st_union(geometry), .groups = "drop")  # dissolve splits
 
+
 # ──────────────────────────────────────────────────────────────
 # 3 · Join scores ➜ geometry
 # ──────────────────────────────────────────────────────────────
@@ -1186,9 +741,7 @@ map_sf <- left_join(county_sf, dir_scores, by = "stable_fips")
 # 4 · Build colour scale limits (symmetric diverging)
 # ──────────────────────────────────────────────────────────────
 max_abs <- max(abs(map_sf$direction_score), na.rm = TRUE)
-```
-map direction scores
-```{r}
+
 # ─────────────────────────────────────────────────────────
 # 0 · Prepare geometry for every stable_fips
 # ─────────────────────────────────────────────────────────
@@ -1232,8 +785,536 @@ print(map_plot)
 ggsave(here("figures", "direction_score_map.png"), map_plot,
        width = 9, height = 6, dpi = 320)
 ```
+Direction scores by 5 year period with global mean and standard deviation
+```{r}
+# ──────────────────────────────────────────────────────────────
+# 0 · Globals  (μ and σ from the overall 1999–2022 county means)
+# ──────────────────────────────────────────────────────────────
+quality_vars <- c("DQ_prop_garbage", "prop_light", "pct_overd_miss", "prop_all_comp")
+
+# If `mat` from the earlier chunk is in memory, use that; otherwise rebuild quickly
+if (!exists("mat")) {
+  mat <- df %>%                            # `df` was read in the anomaly-detection chunk
+    filter(year >= 1999, year <= 2022) %>%
+    mutate(prop_all_comp = (marstat_comp_k + placdth_comp_k +
+                             age_comp_k + sex_comp_k ) /
+                           (4 * n_cert)) %>%
+    group_by(stable_fips) %>%
+    summarise(across(all_of(quality_vars), ~ mean(.x, na.rm = TRUE)),
+              .groups = "drop")
+}
+
+global_means <- sapply(mat[quality_vars], mean, na.rm = TRUE)
+global_sds   <- sapply(mat[quality_vars], sd,   na.rm = TRUE)
+
+# ──────────────────────────────────────────────────────────────
+# 1 · Period definitions
+# ──────────────────────────────────────────────────────────────
+periods <- list(
+  `1999_2004` = 1999:2004,
+  `2005_2010` = 2005:2010,
+  `2011_2017` = 2011:2017,
+  `2018_2022` = 2018:2022,
+  `2020_2022` = 2020:2022
+)
+
+# ──────────────────────────────────────────────────────────────
+# 2 · Geometry (one polygon per IHME stable_fips)
+# ──────────────────────────────────────────────────────────────
+if (!exists("county_sf")) {
+  county_sf <- counties(cb = TRUE, year = 2015, class = "sf") %>%
+    st_transform(2163) %>%
+    mutate(fips = GEOID) %>%
+    left_join(ihme_xwalk, by = "fips") %>%
+    mutate(stable_fips = coalesce(stable_fips, fips)) %>%
+    select(stable_fips, geometry) %>%
+    group_by(stable_fips) %>%
+    summarise(geometry = st_union(geometry), .groups = "drop")
+}
+
+# ──────────────────────────────────────────────────────────────
+# 3 · Loop over periods: compute & map direction_score
+# ──────────────────────────────────────────────────────────────
+out_dir <- here::here("figures", "direction_score_periods")
+dir.create(out_dir, showWarnings = FALSE, recursive = TRUE)
+
+for (pname in names(periods)) {
+  yrs <- periods[[pname]]
+
+  # county means within the period
+  peri_df <- df %>%
+    filter(year %in% yrs) %>%
+    mutate(prop_all_comp = (marstat_comp_k + placdth_comp_k + educ_comp_k +
+                             age_comp_k + sex_comp_k + mandeath_comp_k) /
+                           (6 * n_cert)) %>%
+    group_by(stable_fips) %>%
+    summarise(across(all_of(quality_vars), ~ mean(.x, na.rm = TRUE)),
+              .groups = "drop")
+
+  # fixed-reference Z-scores
+  peri_df <- peri_df %>%
+    mutate(across(all_of(quality_vars),
+                  \(x, nm=cur_column()) (x - global_means[nm]) / global_sds[nm],
+                  .names = "z_{.col}")) %>%
+    mutate(
+      direction_score = (z_prop_light + z_pct_overd_miss -
+                         z_prop_all_comp + z_DQ_prop_garbage) / 6
+    )
+  
+    # county means within the period  ──────────────────────────────
+  peri_df <- df %>%
+    filter(year %in% yrs) %>%
+    mutate(prop_all_comp = (marstat_comp_k + placdth_comp_k + educ_comp_k +
+                            age_comp_k + sex_comp_k + mandeath_comp_k) /
+                           (6 * n_cert)) %>%
+    group_by(stable_fips) %>%
+    summarise(across(all_of(quality_vars), ~ mean(.x, na.rm = TRUE)),
+              .groups = "drop")
+
+  ## NEW 1: guarantee every stable_fips appears (even if all NA)
+  peri_df <- county_sf %>%                        # drop geometry, keep IDs
+    st_drop_geometry() %>%
+    select(stable_fips) %>%
+    left_join(peri_df, by = "stable_fips")
+
+  ## NEW 2: impute missing period means with the *same* values
+  ##        we used for the overall map (global_means)
+  peri_df <- peri_df %>%
+    mutate(across(all_of(quality_vars),
+                  \(x, nm = cur_column()) replace_na(x, global_means[nm])))
+
+  # fixed-reference Z-scores  ───────────────────────────────────
+  peri_df <- peri_df %>%
+    mutate(across(all_of(quality_vars),
+                  \(x, nm = cur_column()) (x - global_means[nm]) / global_sds[nm],
+                  .names = "z_{.col}")) %>%
+    ## NEW 3: compute score with all four components now present
+    mutate(direction_score = (z_prop_light + z_pct_overd_miss -
+                              z_prop_all_comp  + z_DQ_prop_garbage) / 4)
 
 
+  # join geometry ➜ map
+  map_sf <- county_sf %>% left_join(peri_df, by = "stable_fips")
+
+  p <- make_map(map_sf,
+                var   = "direction_score",
+                title = glue::glue("Direction score {pname} (scaled to 1999–2022 μ/σ)"))
+
+  ggsave(file.path(out_dir, glue::glue("direction_score_{pname}.png")),
+         plot = p, width = 9, height = 6, dpi = 320)
+}
+```
+
+
+```{r}
+# ──────────────────────────────────────────────────────────────
+# 10 · Variance in direction_score explained by median income
+# ──────────────────────────────────────────────────────────────
+library(dplyr)
+
+var_df <- res %>%                       # 1999–2022 average direction scores
+  left_join(income22, by = "stable_fips") %>%    # median income 2022
+  filter(!is.na(direction_score), !is.na(medhhinc_2022))
+
+fit <- lm(direction_score ~ medhhinc_2022, data = var_df)
+
+r2  <- summary(fit)$r.squared
+r2p <- round(r2 * 100, 1)
+
+cat("R² (variance explained):", sprintf("%.3f", r2), "\n")
+cat("=>", r2p, "% of the variance in average direction_scores is explained by 2022 median household income.\n")
+```
+```{r}
+# ──────────────────────────────────────────────────────────────
+# 11 · Education: time-series + variance explained
+# ──────────────────────────────────────────────────────────────
+library(tidycensus)
+library(dplyr)
+library(ggplot2)
+library(glue)
+library(scales)
+
+# 11-a · 2022 % bachelor’s+ from ACS table B15003
+edu22_raw <- get_acs(
+  geography = "county",
+  table     = "B15003",
+  year      = 2022,
+  survey    = "acs5",
+  cache_table = TRUE
+)
+
+# Keep total (001) and bachelor+ (022-025) → compute share
+edu22 <- edu22_raw %>%
+  select(GEOID, variable, estimate) %>%
+  pivot_wider(names_from = variable, values_from = estimate) %>%
+  transmute(
+    stable_fips        = GEOID,
+    total_25_plus      = B15003_001,
+    bach_plus          = B15003_022 + B15003_023 + B15003_024 + B15003_025,
+    pct_bachplus_2022  = bach_plus / total_25_plus
+  )
+
+# 11-b · Build education buckets (share bachelor’s+)
+edu_breaks  <- c(-Inf, .20, .30, .40, .50, Inf)
+edu_labels  <- c("<20%", "20–30%", "30–40%", "40–50%", "≥50%")
+
+direction_year <- direction_year %>%   # from step 9
+  left_join(edu22, by = "stable_fips") %>%
+  mutate(edu_bucket = cut(pct_bachplus_2022,
+                          breaks = edu_breaks,
+                          labels = edu_labels,
+                          right  = FALSE))
+
+# 11-c · TIME-SERIES by education bucket
+ts_edu <- direction_year %>%
+  filter(!is.na(edu_bucket)) %>%
+  group_by(year, edu_bucket) %>%
+  summarise(avg_direction = mean(direction_score, na.rm = TRUE),
+            .groups = "drop")
+
+g_edu <- ggplot(ts_edu,
+                aes(year, avg_direction, colour = edu_bucket)) +
+  geom_line(linewidth = 1) +
+  labs(title = "Direction-score trend by 2022 education bucket",
+       x = NULL, y = "Mean direction score",
+       colour = "% bachelor’s or higher") +
+  theme_bw()
+
+ggsave(here("figures", "timeseries_direction_by_edu_bucket.png"),
+       g_edu, width = 7, height = 4, dpi = 300)
+print(g_edu)
+
+# 11-d · R²: variance explained by education
+var_edu <- res %>%                       # 1999-2022 averages
+  left_join(edu22, by = "stable_fips") %>%
+  filter(!is.na(direction_score), !is.na(pct_bachplus_2022))
+
+fit_edu <- lm(direction_score ~ pct_bachplus_2022, data = var_edu)
+r2e  <- summary(fit_edu)$r.squared
+r2ep <- round(r2e * 100, 1)
+
+cat("Education R²:", sprintf("%.3f", r2e),
+    "→", r2ep, "% of variance in average direction_scores explained by pct bachelor’s+.\n")
+
+message("✓ Time-series plot saved: timeseries_direction_by_edu_bucket.png")
+```
+```{r}
+# ──────────────────────────────────────────────────────────────
+# 12 · Racial composition: time-series + variance explained
+#     Metric: % non-Hispanic White alone (ACS table B03002)
+# ──────────────────────────────────────────────────────────────
+library(tidycensus)
+library(dplyr)
+library(tidyr)
+library(ggplot2)
+library(glue)
+library(scales)
+
+# 12-a · Pull 2022 race data (ACS 5-year, table B03002)
+race22_raw <- get_acs(
+  geography = "county",
+  table     = "B03002",
+  year      = 2022,
+  survey    = "acs5",
+  cache_table = TRUE
+)
+
+race22 <- race22_raw %>%
+  select(GEOID, variable, estimate) %>%
+  pivot_wider(names_from = variable, values_from = estimate) %>%
+  transmute(
+    stable_fips      = GEOID,
+    total_pop        = B03002_001,
+    nh_white_alone   = B03002_003,
+    pct_nh_white_2022 = nh_white_alone / total_pop
+  )
+
+# 12-b · Define race buckets (share non-Hispanic White)
+race_breaks <- c(-Inf, .20, .40, .60, .80, Inf)
+race_labels <- c("<20%", "20–40%", "40–60%", "60–80%", "≥80%")
+
+direction_year <- direction_year %>%   # from earlier steps
+  left_join(race22, by = "stable_fips") %>%
+  mutate(race_bucket = cut(pct_nh_white_2022,
+                           breaks = race_breaks,
+                           labels = race_labels,
+                           right  = FALSE))
+
+# 12-c · TIME-SERIES by race bucket
+ts_race <- direction_year %>%
+  filter(!is.na(race_bucket)) %>%
+  group_by(year, race_bucket) %>%
+  summarise(avg_direction = mean(direction_score, na.rm = TRUE),
+            .groups = "drop")
+
+g_race <- ggplot(ts_race,
+                 aes(year, avg_direction, colour = race_bucket)) +
+  geom_line(linewidth = 1) +
+  labs(title = "Direction-score trend by 2022 racial composition",
+       x = NULL, y = "Mean direction score",
+       colour = "% non-Hispanic White") +
+  theme_bw()
+
+ggsave(here("figures", "timeseries_direction_by_race_bucket.png"),
+       g_race, width = 7, height = 4, dpi = 300)
+print(g_race)
+
+# 12-d · R²: variance explained by racial composition
+var_race <- res %>%                       # 1999-2022 averages
+  left_join(race22, by = "stable_fips") %>%
+  filter(!is.na(direction_score), !is.na(pct_nh_white_2022))
+
+fit_race <- lm(direction_score ~ pct_nh_white_2022, data = var_race)
+r2r  <- summary(fit_race)$r.squared
+r2rp <- round(r2r * 100, 1)
+
+cat("Race R²:", sprintf("%.3f", r2r),
+    "→", r2rp, "% of variance in average direction_scores explained by % non-Hispanic White.\n")
+
+message("✓ Time-series plot saved: timeseries_direction_by_race_bucket.png")
+```
+```{r}
+# ──────────────────────────────────────────────────────────────
+# 13 · % Black & % Hispanic: time-series + variance explained
+# ──────────────────────────────────────────────────────────────
+library(dplyr)
+library(tidyr)
+library(ggplot2)
+library(glue)
+library(scales)
+
+# 13-a · Build race22 with additional % Black & % Hispanic
+race22 <- race22_raw %>%                # pulled in step 12-a
+  select(GEOID, variable, estimate) %>%
+  pivot_wider(names_from = variable, values_from = estimate) %>%
+  transmute(
+    stable_fips        = GEOID,
+    total_pop          = B03002_001,
+    pct_nh_white_2022  = B03002_003 / total_pop,
+    pct_nh_black_2022  = B03002_004 / total_pop,
+    pct_hisp_2022      = B03002_012 / total_pop        # Hispanic of any race
+  )
+
+# -------------------------------------------------------------
+# helper to build plots & R² for an arbitrary race metric
+build_race_outputs <- function(var_col,
+                               breaks, labels,
+                               plot_fname, title_lab, legend_lab) {
+
+  # join & bucket
+  tmp_year <- direction_year %>%        # from step 9
+    left_join(race22, by = "stable_fips") %>%
+    mutate(bucket = cut(.data[[var_col]],
+                        breaks = breaks,
+                        labels = labels,
+                        right  = FALSE))
+
+  # time-series
+  ts_df <- tmp_year %>%
+    filter(!is.na(bucket)) %>%
+    group_by(year, bucket) %>%
+    summarise(avg_direction = mean(direction_score, na.rm = TRUE),
+              .groups = "drop")
+
+  g <- ggplot(ts_df,
+              aes(year, avg_direction, colour = bucket)) +
+    geom_line(linewidth = 1) +
+    labs(title = title_lab,
+         x = NULL, y = "Mean direction score",
+         colour = legend_lab) +
+    theme_bw()
+
+  ggsave(here("figures", plot_fname),
+         g, width = 7, height = 4, dpi = 300)
+  print(g)
+
+  # R²
+  var_df <- res %>%                       # 1999-2022 averages
+    left_join(race22, by = "stable_fips") %>%
+    filter(!is.na(direction_score), !is.na(.data[[var_col]]))
+
+  # build formula like "direction_score ~ pct_hisp_2022"
+  fit <- lm(reformulate(var_col, response = "direction_score"), data = var_df)
+
+  r2  <- summary(fit)$r.squared
+  r2p <- round(r2 * 100, 1)
+
+  cat(title_lab, "– R²:", sprintf("%.3f", r2),
+      "→", r2p, "% variance explained.\n")
+
+}
+
+# 13-b · % non-Hispanic Black alone ------------------------------------------
+build_race_outputs(
+  var_col   = "pct_nh_black_2022",
+  breaks    = c(-Inf, .10, .20, .40, .6, Inf),
+  labels    = c("<10%", "10–20%", "20–40%", "40–60%", "≥60%"),
+  plot_fname = "timeseries_direction_by_black_bucket.png",
+  title_lab  = "Direction-score trend by 2022 % non-Hispanic Black",
+  legend_lab = "% non-Hispanic Black"
+)
+
+# 13-c · % Hispanic/Latino (any race) ----------------------------------------
+build_race_outputs(
+  var_col   = "pct_hisp_2022",
+  breaks    = c(-Inf, .10, .25, .50, .75, Inf),
+  labels    = c("<10%", "10–25%", "25–50%", "50–75%", "≥75%"),
+  plot_fname = "timeseries_direction_by_hisp_bucket.png",
+  title_lab  = "Direction-score trend by 2022 % Hispanic",
+  legend_lab = "% Hispanic"
+)
+
+message("✓ Time-series plots saved:",
+        "\n  • timeseries_direction_by_black_bucket.png",
+        "\n  • timeseries_direction_by_hisp_bucket.png")
+```
+```{r}
+# ──────────────────────────────────────────────────────────────
+# 0 · Load packages
+# ──────────────────────────────────────────────────────────────
+library(dplyr)
+library(stringr)
+library(ggplot2)
+library(glue)
+library(purrr)
+library(scales)
+library(here)
+library(sf)
+library(tigris)
+library(tidyr)
+library(tidycensus)
+
+options(tigris_use_cache = TRUE, tigris_class = "sf")
+
+# ──────────────────────────────────────────────────────────────
+# 1 · Load data & construct stable_fips
+# ──────────────────────────────────────────────────────────────
+df <- read_csv(here("data", "county_year_quality_metrics.csv"),
+               show_col_types = FALSE) %>%
+  mutate(stable_fips = str_sub(countyrs, 1, 5))
+
+# List of columns used in direction_score calculation
+quality_vars <- c("prop_light", "pct_overd_miss", "prop_all_comp", "DQ_prop_garbage")
+
+# ──────────────────────────────────────────────────────────────
+# 2 · Compute GLOBAL mean and SD for each quality indicator
+# ──────────────────────────────────────────────────────────────
+stats_tbl <- df %>%
+  summarise(across(all_of(quality_vars),
+                   list(mu = ~ mean(.x, na.rm = TRUE),
+                        sd = ~  sd(.x, na.rm = TRUE))))
+
+mu_vec <- stats_tbl %>%
+  select(ends_with("_mu")) %>%
+  setNames(str_remove(names(.), "_mu")) %>%
+  unlist()
+
+sd_vec <- stats_tbl %>%
+  select(ends_with("_sd")) %>%
+  setNames(str_remove(names(.), "_sd")) %>%
+  unlist()
+
+# ──────────────────────────────────────────────────────────────
+# 3 · Load county shapefile
+# ──────────────────────────────────────────────────────────────
+crs_proj <- 2163
+county_sf <- counties(year = 2015, cb = TRUE, class = "sf") %>%
+  st_transform(crs_proj) %>%
+  mutate(stable_fips = GEOID) %>%
+  select(stable_fips, geometry)
+
+# ──────────────────────────────────────────────────────────────
+# 4 · Create county-level averages across all years (res)
+# ──────────────────────────────────────────────────────────────
+res <- df %>%
+  group_by(stable_fips) %>%
+  summarise(across(all_of(quality_vars), ~ mean(.x, na.rm = TRUE)), .groups = "drop") %>%
+  mutate(across(all_of(quality_vars),
+                ~ (.x - mu_vec[cur_column()]) / sd_vec[cur_column()],
+                .names = "z_{.col}")) %>%
+  mutate(direction_score =
+           (z_prop_light + z_pct_overd_miss - z_prop_all_comp + z_DQ_prop_garbage) / 6)
+
+# ──────────────────────────────────────────────────────────────
+# 5 · Define periods and mapping function using global z-scores
+# ──────────────────────────────────────────────────────────────
+periods <- list(
+  `1999_2004` = 1999:2004,
+  `2005_2010` = 2005:2010,
+  `2011_2017` = 2011:2017,
+  `2018_2022` = 2018:2022,
+  `2020_2022` = 2020:2022
+)
+
+calc_period_scores <- function(year_vec) {
+  df %>%
+    filter(year %in% year_vec) %>%
+    group_by(stable_fips) %>%
+    summarise(across(all_of(quality_vars), ~ mean(.x, na.rm = TRUE)), .groups = "drop") %>%
+    mutate(across(all_of(quality_vars),
+                  ~ (.x - mu_vec[cur_column()]) / sd_vec[cur_column()],
+                  .names = "z_{.col}")) %>%
+    mutate(direction_score =
+             (z_prop_light + z_pct_overd_miss - z_prop_all_comp + z_DQ_prop_garbage) / 6)
+}
+
+maps <- imap(periods, function(yrs, nm) {
+  per_res <- calc_period_scores(yrs)
+
+  per_map_sf <- county_sf %>%
+    left_join(per_res %>% select(stable_fips, direction_score),
+              by = "stable_fips")
+
+  p_map <- make_map(
+    sf_data = per_map_sf,
+    var     = "direction_score",
+    title   = glue("Direction score ({nm})")
+  )
+
+  ggsave(here("figures", glue("direction_score_map_{nm}.png")),
+         p_map, width = 9, height = 6, dpi = 320)
+
+  p_map
+})
+
+# ──────────────────────────────────────────────────────────────
+# 6 · Time-series data frame (county-year global z-scores)
+# ──────────────────────────────────────────────────────────────
+direction_year <- df %>%
+  mutate(across(all_of(quality_vars),
+                ~ (.x - mu_vec[cur_column()]) / sd_vec[cur_column()],
+                .names = "z_{.col}")) %>%
+  mutate(direction_score =
+           (z_prop_light + z_pct_overd_miss - z_prop_all_comp + z_DQ_prop_garbage) / 6) %>%
+  select(stable_fips, year, direction_score)
+
+# ──────────────────────────────────────────────────────────────
+# 7 · Get 2022 ACS race shares (used later in race bucket plots)
+# ──────────────────────────────────────────────────────────────
+census_api_key("671b64055fc192103cbc199d2dff91b46d9cc781", overwrite = FALSE)
+
+
+race22 <- get_acs(geography = "county",
+                  table = "B03002",
+                  year = 2022,
+                  survey = "acs5",
+                  cache_table = TRUE) %>%
+  select(GEOID, variable, estimate) %>%
+  pivot_wider(names_from = variable, values_from = estimate) %>%
+  transmute(
+    stable_fips       = GEOID,
+    total_pop         = B03002_001,
+    pct_nh_white_2022 = B03002_003 / total_pop,
+    pct_nh_black_2022 = B03002_004 / total_pop,
+    pct_hisp_2022     = B03002_012 / total_pop
+  )
+
+# ──────────────────────────────────────────────────────────────
+# 8 · Optional: Load 2020 election results for vote-share plot
+# ──────────────────────────────────────────────────────────────
+e20_raw <- read_csv(here("data", "county_election_2020.csv"),
+                    show_col_types = FALSE)
+```
 
 
 
