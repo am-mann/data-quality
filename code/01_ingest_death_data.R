@@ -14,6 +14,7 @@ library(tidyverse)
 library(here)
 library(fs)
 library(arrow)
+source(here("code", "helpers", "return_st_info.R"))
 
 ## Constants ----
 RAW_DIR <- here("data_raw", "mcod")
@@ -22,18 +23,20 @@ SAVE_DIR <- here("data_private", "mcod")
 
 ## Data ----
 load(here("data_raw", "mcod_fwf_dicts.rda"))
+load(here("data_raw", "ihme_fips.rda"))
 
 for (y in YEARS) {
     save_path <- here(SAVE_DIR, sprintf("mcod_%i.parquet", y))
-    
+
     if (file_exists(save_path)) {
         next
     }
-    
+
     ## Get file path and column positions
     f_path <- dir_ls(RAW_DIR,
         type = "file",
-        regexp = sprintf("\\<MULT%i.*\\.zip\\>", y))
+        regexp = sprintf("\\<MULT%i.*\\.zip\\>", y)
+    )
     fwf_col_pos <- mcod_fwf_dicts |>
         dplyr::filter(year == y) |>
         dplyr::select("start", "end", col_names = "name")
@@ -53,22 +56,45 @@ for (y in YEARS) {
         col_types = c_types,
         na = c("", "NA", " ")
     )
-    
+
     ## Clean up the columns that are inconsistently coded across years
     ## From 1999 to 2002, countyrs used NCHS coding instead of FIPS, so
-    ## switch it back
+    ## switch it back. From 2003 to 2022, they use state abbreviation so
+    ## replace that with state fips.
     if (y %in% 1999:2002) {
         temp_df <- temp_df %>%
-            rename(countyrs_old = countyrs) %>%
-            rename(countyrs = fipsctyr)
+            rename(county_orig = countyrs) %>%
+            rename(county_fips = fipsctyr)
+    } else {
+        temp_df <- temp_df %>%
+            rename(county_orig = countyrs)
+
+        temp_df <- temp_df |>
+            mutate(abbrev = substr(county_orig, 1, 2)) |>
+            left_join(return_st_info() |>
+                select(abbrev, st_fips)) |>
+            mutate(county_fips = paste0(st_fips, substr(county_orig, 3, 5))) |>
+            select(-st_fips)
     }
-    
+
+    ## Temporally stable FIPS
+    temp_df <- temp_df |>
+        left_join(ihme_fips |>
+            select(
+                county_fips = orig_fips,
+                county_ihme = ihme_fips
+            )) |>
+        mutate(county_ihme = case_when(
+            is.na(county_ihme) ~ county_fips,
+            TRUE ~ county_ihme
+        ))
+
     ## Fix education
     ## In 2003, education switched to the 2003 system but retained a column
-    ## called edu89. In 2014, educ89 was dropped. 
+    ## called edu89. In 2014, educ89 was dropped.
     if (y %in% 2003:2013) {
-        temp_df <- temp_df |> 
-            rename(educ_old = educ) |> 
+        temp_df <- temp_df |>
+            rename(educ_old = educ) |>
             rename(educ = educ89)
     }
 
@@ -83,7 +109,6 @@ for (y in YEARS) {
                 marstat == 8 ~ "not_on_certificate",
                 marstat == 9 ~ "not_stated",
                 is.na(marstat) ~ "unknown",
-
                 marstat == "S" ~ "single_never_married",
                 marstat == "M" ~ "married",
                 marstat == "W" ~ "widowed",
@@ -91,7 +116,6 @@ for (y in YEARS) {
                 marstat == "N" ~ "not_on_certificate",
                 marstat == "U" ~ "not_stated",
                 is.na(marstat) ~ "unknown",
-
                 TRUE ~ as.character(marstat)
             )
         )
@@ -129,11 +153,11 @@ for (y in YEARS) {
                 TRUE ~ as.character(sex)
             )
         )
-    
+
     ## Subset to columns that match Amy's columns
-    ## NOTES: 
-    ##  - Race_Recode_40 is racer40 and doesn't exist for all years 
-    ##  - occupational codes are new so not included. 
+    ## NOTES:
+    ##  - Race_Recode_40 is racer40 and doesn't exist for all years
+    ##  - occupational codes are new so not included.
     ##  - educ changes over time but is renamed above.
     ##  - methdisp is new so not included
     ##  - autopsy is new so not included
@@ -141,12 +165,14 @@ for (y in YEARS) {
     ##  - similarly, hispanic was not recoded after 2020 so hispanicr is gone
     ##  - raceimp is not consistent across all years
     ##  - ageflag, ager22 are not across all years
-    ##  - ucr130 not consistent across all years 
+    ##  - ucr130 not consistent across all years
     ##  - we don't use the econd columns so I drop them
     temp_df <- temp_df |>
         select(
             restatus,
-            countyrs, 
+            county_orig,
+            county_fips,
+            county_ihme,
             educ,
             monthdth,
             sex,
@@ -173,29 +199,32 @@ for (y in YEARS) {
             starts_with("record_"),
             race,
             racer3,
-            any_of(c("racer40")), 
-            hispanic, 
+            any_of(c("racer40")),
+            hispanic,
             hspanicr
         )
-    
+
     ## Save
     dir_create(dirname(save_path))
     write_parquet(temp_df,
-                  save_path, 
-                  compression = "snappy",
-                  use_dictionary = TRUE, 
-                  write_statistics = TRUE)
+        save_path,
+        compression = "snappy",
+        use_dictionary = TRUE,
+        write_statistics = TRUE
+    )
 }
 
 ## Make some fake debugging files ----
 for (f in dir_ls(SAVE_DIR, type = "file", glob = "*.parquet")) {
     temp_df <- read_parquet(f)
-    
-    sub_df <- temp_df |> 
+
+    sub_df <- temp_df |>
         sample_frac(.2)
-    
-    sub_df$countyrs <- sample(temp_df$countyrs, NROW(sub_df), replace = TRUE)
-    
+
+    sub_df$county_orig <- sample(temp_df$county_orig, NROW(sub_df), replace = TRUE)
+    sub_df$county_fips <- sample(temp_df$county_fips, NROW(sub_df), replace = TRUE)
+    sub_df$county_ihme <- sample(temp_df$county_ihme, NROW(sub_df), replace = TRUE)
+
     dir_create(here("data_private", "mcod_sample"))
     write_parquet(sub_df, here("data_private", "mcod_sample", basename(f)))
 }
