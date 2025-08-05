@@ -46,7 +46,7 @@ if (dir_exists(here("data_private", "mcod"))) {
 dictionary_dir <- here("data_raw", "cause-codes")
 out_csv <- here("data", "county_year_quality_metrics.csv")
 
-county_var <- "countyrs"
+county_var <- "county_ihme"
 years_wanted <- NULL
 key_demo_vars <- c("marstat", "placdth", "educ", "mandeath", "age", "sex", "race", "racer40")
 
@@ -54,31 +54,34 @@ canonical_icd <- function(x) {
     stringr::str_remove_all(stringr::str_to_upper(x), "[^A-Z0-9]")
 }
 
-REF_SIZE        <- 358             # length of the standard UCR list
-TARGET_COVERAGE <- 0.95            # completeness level to compare at
+REF_SIZE <- 358 # length of the standard UCR list
+TARGET_COVERAGE <- 0.95 # completeness level to compare at
 
 get_detail_metric <- function(vec, ref_size = REF_SIZE, coverage = TARGET_COVERAGE) {
     vec <- vec[!is.na(vec)]
-    if (!length(vec)) return(
-        list(raw = NA_real_, d95 = NA_real_, cov = 0, n = 0)
-    )
-    freqs <- as.numeric(table(vec))     # strip *all* attributes & classes
-    attr(freqs, "names") <- NULL        # (belt-and-suspenders)
+    if (!length(vec)) {
+        return(
+            list(raw = NA_real_, d95 = NA_real_, cov = 0, n = 0)
+        )
+    }
+    freqs <- as.numeric(table(vec)) # strip *all* attributes & classes
+    attr(freqs, "names") <- NULL # (belt-and-suspenders)
     N <- sum(freqs)
 
-    # S = 1 – f1 / N 
+    # S = 1 – f1 / N
     f1 <- sum(freqs == 1)
     C_hat <- 1 - f1 / N
-    
+
     # rarefy / extrapolate richness to fixed coverage
     est <- tryCatch(
         iNEXT::estimateD(freqs,
-                         datatype = "abundance",
-                         base     = "coverage",
-                         level    = coverage),
+            datatype = "abundance",
+            base     = "coverage",
+            level    = coverage
+        ),
         error = function(e) NULL
     )
-    
+
     if (is.null(est) || !"Estimator" %in% names(est)) {
         D95 <- NA_real_
     } else {
@@ -87,10 +90,10 @@ get_detail_metric <- function(vec, ref_size = REF_SIZE, coverage = TARGET_COVERA
             dplyr::pull(Estimator) |>
             as.numeric()
     }
-    
+
     list(
         raw = length(freqs) / ref_size,
-        d95 = D95          / ref_size,
+        d95 = D95 / ref_size,
         cov = C_hat,
         n   = N
     )
@@ -189,7 +192,7 @@ summarise_year_file <- function(file) {
             names(arrow::read_parquet(file, as_data_frame = FALSE)$schema)
         )
     )
-    
+
 
     ds <- ds %>%
         { # rename record1→record_1 etc. if underscore cols are absent
@@ -209,13 +212,13 @@ summarise_year_file <- function(file) {
             across(starts_with("record_"), ~ canonical_icd(.x)),
             sex_male = if_else(sex == "M", 1L, 0L)
         )
-    
+
     entropy_tbl <- compute_entropy_county(ds, county_var)
-    
+
     # detail metric - uses ucr358
     detail_tbl <- ds %>%
         filter(!is.na(ucr358)) %>%
-        group_by(.data[[county_var]]) %>%        # one row per county
+        group_by(.data[[county_var]]) %>% # one row per county
         summarise(
             tmp = list(get_detail_metric(ucr358)), # call helper
             .groups = "drop"
@@ -228,7 +231,7 @@ summarise_year_file <- function(file) {
             year       = this_year
         ) %>%
         select(-tmp)
-    
+
 
     # from 2003 to 2005 the educ2003 variable is called educ so here I change the name accordingly
     # if (this_year %in% 2003:2005 &&
@@ -260,7 +263,7 @@ summarise_year_file <- function(file) {
             needs_detail = icd10 %in% accident_ucod_set,
             is_overdose  = icd10 %in% overdose_ucod
         )
-    
+
     # gets all contributing causes
     present_sec <- intersect(sec_cols, names(ds))
 
@@ -389,7 +392,7 @@ summarise_year_file <- function(file) {
             overd_miss_k = sum(is_overdose & !has_required_detail),
             pct_overd_miss = ifelse(overd_n > 0, overd_miss_k / overd_n, NA_real_),
             pct_overd_miss_low = wilson_lower(overd_miss_k, overd_n),
-            pct_overd_miss_hi = wilson_upper(overd_miss_k, overd_n), 
+            pct_overd_miss_hi = wilson_upper(overd_miss_k, overd_n),
             overdose_unspec_k = sum(is_overdose & unspecific_drug),
             across(all_of(demo_vars),
                 ~ {
@@ -401,10 +404,10 @@ summarise_year_file <- function(file) {
             ),
             .groups = "drop"
         )
-    
+
     county_metrics <- county_metrics %>%
         left_join(detail_tbl, by = c(county_var, "year"))
-    
+
     result <- dplyr::left_join(county_metrics, entropy_tbl, by = county_var) %>%
         dplyr::mutate(
             DQ_prop_garbage = (1 - DQ_overall) * prop_garbage
