@@ -52,7 +52,7 @@ deaths_county <- future_map_dfr(
     .x = dir_ls(here("data_private", "mcod"), glob = "*.parquet"),
     .f = ~ {
         read_parquet(.x) |>
-            group_by(county_fips) |>
+            group_by(county_fips, year) |>
             summarize(n_deaths = n()) |>
             ungroup()
     }
@@ -60,6 +60,7 @@ deaths_county <- future_map_dfr(
 future::plan(future::sequential())
 
 deaths_county <- deaths_county |>
+    filter(year <= 2020) |>
     group_by(county_fips) |>
     summarize(n_deaths = sum(n_deaths)) |>
     left_join(wonder_df |>
@@ -74,9 +75,10 @@ ggplot(
         size = rel_diff
     )
 ) +
-    geom_point(alpha = .1) +
-    geom_abline(yintercept = 0, slope = 1) +
+    geom_point(alpha = .5) +
+    geom_abline(yintercept = 0, slope = 1, alpha = .2) +
     coord_equal() +
     scale_y_continuous(trans = "log10") +
     scale_x_continuous(trans = "log10") +
-    scale_size_area()
+    scale_size_area() +
+    theme_bw()
