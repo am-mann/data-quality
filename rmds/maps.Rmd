@@ -602,7 +602,7 @@ df <- df %>%
                               age_comp_k + sex_comp_k + mandeath_comp_k) / (6*n_cert))
 
 quality_vars <- c(
-  "DQ_prop_garbage", "prop_light", "pct_overd_miss", "prop_all_comp"
+  "DQ_prop_garbage", "prop_light", "pct_overd_miss", "pct_acc_miss"
 )
 
 county_avg <- df %>%
@@ -690,8 +690,8 @@ res <- res %>%
 res <- res %>%
   mutate(
     direction_score =
-      (z_prop_light + z_pct_overd_miss -
-      z_prop_all_comp + z_DQ_prop_garbage)/6
+      (z_prop_light + z_pct_overd_miss +
+      z_pct_acc_miss + z_DQ_prop_garbage)/4
   )
 
 ```
@@ -790,7 +790,7 @@ Direction scores by 5 year period with global mean and standard deviation
 # ──────────────────────────────────────────────────────────────
 # 0 · Globals  (μ and σ from the overall 1999–2022 county means)
 # ──────────────────────────────────────────────────────────────
-quality_vars <- c("DQ_prop_garbage", "prop_light", "pct_overd_miss", "prop_all_comp")
+quality_vars <- c("DQ_prop_garbage", "prop_light", "pct_overd_miss", "pct_acc_miss")
 
 # If `mat` from the earlier chunk is in memory, use that; otherwise rebuild quickly
 if (!exists("mat")) {
@@ -806,6 +806,8 @@ if (!exists("mat")) {
 
 global_means <- sapply(mat[quality_vars], mean, na.rm = TRUE)
 global_sds   <- sapply(mat[quality_vars], sd,   na.rm = TRUE)
+library(R.utiles)
+R.utils::gunzip("county_year_quality_metrics.csv.gz", remove = FALSE)
 
 # ──────────────────────────────────────────────────────────────
 # 1 · Period definitions
@@ -857,8 +859,8 @@ for (pname in names(periods)) {
                   \(x, nm=cur_column()) (x - global_means[nm]) / global_sds[nm],
                   .names = "z_{.col}")) %>%
     mutate(
-      direction_score = (z_prop_light + z_pct_overd_miss -
-                         z_prop_all_comp + z_DQ_prop_garbage) / 6
+      direction_score = (z_prop_light + z_pct_overd_miss +
+                         z_pct_acc_miss + z_DQ_prop_garbage) / 4
     )
   
     # county means within the period  ──────────────────────────────
@@ -889,8 +891,8 @@ for (pname in names(periods)) {
                   \(x, nm = cur_column()) (x - global_means[nm]) / global_sds[nm],
                   .names = "z_{.col}")) %>%
     ## NEW 3: compute score with all four components now present
-    mutate(direction_score = (z_prop_light + z_pct_overd_miss -
-                              z_prop_all_comp  + z_DQ_prop_garbage) / 4)
+    mutate(direction_score = (z_prop_light + z_pct_overd_miss +
+                              z_pct_acc_miss  + z_DQ_prop_garbage) / 4)
 
 
   # join geometry ➜ map
@@ -1194,7 +1196,7 @@ df <- read_csv(here("data", "county_year_quality_metrics.csv"),
   mutate(stable_fips = str_sub(countyrs, 1, 5))
 
 # List of columns used in direction_score calculation
-quality_vars <- c("prop_light", "pct_overd_miss", "prop_all_comp", "DQ_prop_garbage")
+quality_vars <- c("prop_light", "pct_overd_miss", "pct_acc_miss", "DQ_prop_garbage")
 
 # ──────────────────────────────────────────────────────────────
 # 2 · Compute GLOBAL mean and SD for each quality indicator
@@ -1233,7 +1235,7 @@ res <- df %>%
                 ~ (.x - mu_vec[cur_column()]) / sd_vec[cur_column()],
                 .names = "z_{.col}")) %>%
   mutate(direction_score =
-           (z_prop_light + z_pct_overd_miss - z_prop_all_comp + z_DQ_prop_garbage) / 6)
+           (z_prop_light + z_pct_overd_miss + z_pct_acc_miss + z_DQ_prop_garbage) /4)
 
 # ──────────────────────────────────────────────────────────────
 # 5 · Define periods and mapping function using global z-scores
@@ -1255,7 +1257,7 @@ calc_period_scores <- function(year_vec) {
                   ~ (.x - mu_vec[cur_column()]) / sd_vec[cur_column()],
                   .names = "z_{.col}")) %>%
     mutate(direction_score =
-             (z_prop_light + z_pct_overd_miss - z_prop_all_comp + z_DQ_prop_garbage) / 6)
+             (z_prop_light + z_pct_overd_miss + z_pct_acc_miss + z_DQ_prop_garbage) / 4)
 }
 
 maps <- imap(periods, function(yrs, nm) {
@@ -1285,7 +1287,7 @@ direction_year <- df %>%
                 ~ (.x - mu_vec[cur_column()]) / sd_vec[cur_column()],
                 .names = "z_{.col}")) %>%
   mutate(direction_score =
-           (z_prop_light + z_pct_overd_miss - z_prop_all_comp + z_DQ_prop_garbage) / 6) %>%
+           (z_prop_light + z_pct_overd_miss + z_pct_acc_miss + z_DQ_prop_garbage) / 4) %>%
   select(stable_fips, year, direction_score)
 
 # ──────────────────────────────────────────────────────────────
