@@ -44,7 +44,7 @@ if (dir_exists(here("data_private", "mcod"))) {
     parquet_dir <- here("data_private", "mcod_sample")
 }
 dictionary_dir <- here("data_raw", "cause-codes")
-out_csv <- here("data", "county_year_quality_metrics.csv")
+out_csv <- here("data", "county_year_quality_metrics.csv.gz")
 
 county_var <- "county_ihme"
 years_wanted <- NULL
