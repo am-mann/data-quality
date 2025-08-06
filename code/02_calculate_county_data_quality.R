@@ -44,7 +44,7 @@ if (dir_exists(here("data_private", "mcod"))) {
     parquet_dir <- here("data_private", "mcod_sample")
 }
 dictionary_dir <- here("data_raw", "cause-codes")
-out_csv <- here("data", "county_year_quality_metrics.csv")
+out_csv <- here("data", "county_year_quality_metrics.csv.gz")
 
 county_var <- "county_ihme"
 years_wanted <- NULL
@@ -192,7 +192,6 @@ summarise_year_file <- function(file) {
             names(arrow::read_parquet(file, as_data_frame = FALSE)$schema)
         )
     )
-
 
     ds <- ds %>%
         { # rename record1→record_1 etc. if underscore cols are absent
@@ -425,7 +424,7 @@ if (!is.null(years_wanted)) {
 }
 
 if (PARALLELIZE) {
-    future::plan(future::multisession(workers = future::availableCores() - 2))
+    future::plan(future::multisession(workers = future::availableCores() - 6))
     county_year_all <- furrr::future_map_dfr(
         parquet_files,
         summarise_year_file,
