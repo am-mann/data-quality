@@ -193,7 +193,6 @@ summarise_year_file <- function(file) {
         )
     )
 
-
     ds <- ds %>%
         { # rename record1→record_1 etc. if underscore cols are absent
             if (!any(grepl("^record_", names(.))) &&
@@ -425,7 +424,7 @@ if (!is.null(years_wanted)) {
 }
 
 if (PARALLELIZE) {
-    future::plan(future::multisession(workers = future::availableCores() - 2))
+    future::plan(future::multisession(workers = future::availableCores() - 6))
     county_year_all <- furrr::future_map_dfr(
         parquet_files,
         summarise_year_file,
