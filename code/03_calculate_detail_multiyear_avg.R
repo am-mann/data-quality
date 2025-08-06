@@ -19,7 +19,7 @@ parquet_dir <- if (fs::dir_exists(here("data_private","mcod"))) {
 
 out_csv       <- here("data","period_cluster_detail_d95.csv")
 out_timingcsv <- here("data","period_cluster_timings.csv")
-county_var    <- "countyrs"        # column holding YYCCC county code
+county_var    <- "county_ihme"        # column holding YYCCC county code
 
 ## 1 · IHME cross-walk  ----------------------------------------
 obj  <- load(cw_path)          # loads and returns the object name
