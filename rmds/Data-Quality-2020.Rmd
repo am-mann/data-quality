@@ -20,7 +20,7 @@ library(patchwork)
 library(broom)
 
 year <- "2020"
-garbage <- read_csv("/Users/amymann/Documents/Data Quality Project/data_quality/cause-codes/gbd_garbage_codes_with_descr_no_overdose.csv")
+#garbage <- read_csv("/Users/amymann/Documents/Data Quality #Project/DataQuality/raw_data/gbd_garbage_codes_with_descr_no_overdose.csv")
 path = "/Users/amymann/Documents/Data Quality Project/data/parquet/"
 setwd(path)
 mortality <- read_parquet("mort2003.parquet")

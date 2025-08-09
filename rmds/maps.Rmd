@@ -6,30 +6,30 @@ output: html_notebook
 Temporality stable groupings
 ```{r}
 # ──────────────────────────────────────────────────────────────
-# 0 · Setup – packages, paths, helpers
+# 5-year average maps by temporally-stable IHME groups — NO EXTRA PROCESSING
 # ──────────────────────────────────────────────────────────────
-required <- c("sf", "tigris", "readr", "dplyr", "stringr", "tidyr",
-              "purrr", "ggplot2", "viridis", "patchwork")
+
+# 0) Packages & options
+required <- c("sf","tigris","readr","dplyr","stringr","purrr","ggplot2","here","scales")
 missing <- setdiff(required, rownames(installed.packages()))
 if (length(missing)) install.packages(missing)
 invisible(lapply(required, library, character.only = TRUE))
 options(tigris_use_cache = TRUE, tigris_class = "sf")
 
-comp_vars_pct <- c("pct_marstat_comp_k", "pct_placdth_comp_k", "pct_educ_comp_k", "pct_mandeath_comp_k","pct_age_comp_k", "pct_sex_comp_k", "pct_race_comp_k", "DQ_overall")
+`%||%` <- function(a, b) if (!is.null(a)) a else b
 
+# 1) Variables to map (no transformations will be applied)
 vars_to_map <- c(
-  "prop_garbage", "prop_light",  "pct_acc_miss", "pct_overd_miss",  "pct_gc_I64", "pct_gc_C_misc", "pct_gc_I10", "pct_gc_R_misc", "pct_gc_N19", "pct_gc_J80", comp_vars_pct
+  "prop_garbage","prop_light","pct_acc_miss","pct_overd_miss","DQ_overall",
+  "bd_underreport_noacc_nofent","bd_underreport_withacc_nofent"
 )
 
-# ──────────────────────────────────────────────────────────────
-# 2 · Load & preprocess county-year data
-# ──────────────────────────────────────────────────────────────
-dq <- read_csv(here::here("data", "county_year_quality_metrics.csv.gz"), show_col_types = FALSE)
-
-dq <- dq |>
-  mutate(
+# 2) Load your county-year data (as-is); add time windows only
+dq <- readr::read_csv(here::here("data","county_year_quality_metrics.csv.gz"), show_col_types = FALSE) %>%
+  dplyr::mutate(
     year        = as.integer(year),
-    time_window = case_when(
+    county_ihme = stringr::str_pad(as.character(county_ihme), 5, pad = "0"),
+    time_window = dplyr::case_when(
       year >= 1999 & year <= 2004 ~ "1999_2004",
       year >= 2005 & year <= 2010 ~ "2005_2010",
       year >= 2011 & year <= 2017 ~ "2011_2017",
@@ -38,116 +38,113 @@ dq <- dq |>
     )
   )
 
-dq <- dq |>
-  mutate(across(
-    ends_with("_comp_k"),
-    ~ 100 * (.x / n_cert),
-    .names = "pct_{.col}"
-  ))
+# Keep only variables that actually exist; no conversions
+vars_present <- intersect(vars_to_map, names(dq))
+if (!length(vars_present)) stop("None of vars_to_map exist in dq. Check column names.")
+vars_missing <- setdiff(vars_to_map, vars_present)
+if (length(vars_missing)) message("Skipping missing vars: ", paste(vars_missing, collapse = ", "))
 
-# ──────────────────────────────────────────────────────────────
-# 1 · Load IHME grouping dictionary  (orig_fips → ihme_fips)  ──
-# ──────────────────────────────────────────────────────────────
-load(here::here("data_raw", "ihme_fips.rda"))     # gives object 'ihme_fips'
-
-ihme_map <- ihme_fips %>%
-  dplyr::transmute(
-    fips_raw    = stringr::str_pad(orig_fips, 5, pad = "0"),
-    county_ihme = stringr::str_pad(ihme_fips, 5, pad = "0")
-  ) %>%
-  dplyr::distinct()                                # one row per county
-
-# add Broomfield (created 2001) if missing ------------
-if (!"08014" %in% ihme_map$fips_raw) {
-  ihme_map <- dplyr::add_row(
-    ihme_map,
-    fips_raw    = "08014",
-    county_ihme = "08014"
-  )
-  message("• Added Broomfield (08014) to IHME map")
-}
-
-# ──────────────────────────────────────────────────────────────
-# 2 · Attach IHME group IDs to your dq table
-#    (rename raw-FIPS column here if it differs)
-# ──────────────────────────────────────────────────────────────
-raw_fips_col <- "fips"            # ← change if your column name differs
-stopifnot(raw_fips_col %in% names(dq))
-
-dq <- dq %>%
-  dplyr::left_join(
-    ihme_map,
-    by = setNames("fips_raw", raw_fips_col)
-  )
-
-stopifnot(!anyNA(dq$county_ihme))   # every row now has a group ID
-
-# ──────────────────────────────────────────────────────────────
-# 3 · 5-year averages *by IHME group* (not individual counties)
-# ──────────────────────────────────────────────────────────────
+# 3) 5-year averages by temporally-stable group (means of existing cols only)
 dq_avg <- dq %>%
   dplyr::group_by(county_ihme, time_window) %>%
   dplyr::summarise(
-    across(all_of(vars_to_map), ~ mean(.x, na.rm = TRUE)),
+    dplyr::across(dplyr::all_of(vars_present), ~ mean(.x, na.rm = TRUE)),
     n_years = dplyr::n(),
     .groups = "drop"
   )
 
-# ──────────────────────────────────────────────────────────────
-# 4 · Build one polygon per IHME group for each shapefile year
-# ──────────────────────────────────────────────────────────────
-crs_proj <- 2163
-shapefile_years <- c("1999_2004" = 2000,
-                     "2005_2010" = 2010,
-                     "2011_2017" = 2015,
-                     "2018_2022" = 2020)
+# 4) Crosswalk for temporality-stable shapes (dissolve multi-GEOID groups)
+load(here::here("data_raw","ihme_fips.rda"))  # provides ihme_fips
+ihme_map <- ihme_fips %>%
+  dplyr::transmute(
+    GEOID       = stringr::str_pad(orig_fips, 5, pad = "0"),
+    county_ihme = stringr::str_pad(ihme_fips, 5, pad = "0")
+  ) %>%
+  dplyr::distinct()
 
-st_shift <- function(x, offset) { st_geometry(x) <- st_geometry(x) + offset; x }
-st_scale <- function(x, factor) {
-  ctr <- sf::st_centroid(sf::st_union(x))
-  sf::st_geometry(x) <- (sf::st_geometry(x) - ctr) * factor + ctr
-  x
+# 5) Build shapes per period & join averages
+crs_proj <- 2163
+shapefile_years <- c("1999_2004"=2000, "2005_2010"=2010, "2011_2017"=2015, "2018_2022"=2020)
+
+st_shift <- function(x, offset) { sf::st_geometry(x) <- sf::st_geometry(x) + offset; x }
+st_scale <- function(x, factor) { ctr <- sf::st_centroid(sf::st_union(x)); sf::st_geometry(x) <- (sf::st_geometry(x) - ctr) * factor + ctr; x }
+
+# ——— Normalizer: ensure a 5‑digit GEOID exists, with robust fallbacks ———
+normalize_geoid <- function(sf, year) {
+  nms <- names(sf)
+
+  # A) If any column starts with GEOID (GEOID, GEOID10, GEOID20…), use it.
+  geoid_col <- grep("^GEOID", nms, value = TRUE)[1]
+  if (!is.na(geoid_col)) {
+    message("[", year, "] Using GEOID column: ", geoid_col)
+    sf <- dplyr::rename(sf, GEOID = !!rlang::sym(geoid_col))
+    sf$GEOID <- stringr::str_pad(as.character(sf$GEOID), 5, pad = "0")
+    return(sf)
+  }
+
+  # B) Else build from STATEFP + COUNTYFP (present in 2000 & 2010)
+  state_col  <- grep("^STATE.*FP$", nms, value = TRUE)[1]
+  county_col <- grep("^COUNTY.*FP$", nms, value = TRUE)[1]
+  if (!is.na(state_col) && !is.na(county_col)) {
+    message("[", year, "] Constructing GEOID from ", state_col, " + ", county_col)
+    sf$GEOID <- paste0(
+      stringr::str_pad(as.character(sf[[state_col]]),  2, pad = "0"),
+      stringr::str_pad(as.character(sf[[county_col]]), 3, pad = "0")
+    )
+    return(sf)
+  }
+
+  # C) Last resort: legacy combined id
+  combo_col <- grep("^CNTYIDFP$", nms, value = TRUE)[1]
+  if (!is.na(combo_col)) {
+    message("[", year, "] Using combined ID column: ", combo_col, " as GEOID")
+    sf <- dplyr::rename(sf, GEOID = !!rlang::sym(combo_col))
+    sf$GEOID <- stringr::str_pad(as.character(sf$GEOID), 5, pad = "0")
+    return(sf)
+  }
+
+  stop("No GEOID-compatible columns found in shapefile for year ", year,
+       ". Columns were: ", paste(nms, collapse = ", "))
 }
 
-library(purrr)   # for imap()
+# ——— Build groups: normalize → transform → dissolve by county_ihme ———
+build_groups_sf <- function(year) {
+  counties_raw <- tigris::counties(year = year, cb = TRUE, class = "sf") %>%
+    sf::st_zm(drop = TRUE, what = "ZM")
+
+  counties_norm <- normalize_geoid(counties_raw, year) %>%  # ← normalize FIRST
+    sf::st_transform(crs_proj)
+
+  groups_sf <- counties_norm %>%
+    dplyr::left_join(ihme_map, by = "GEOID") %>%
+    dplyr::mutate(county_ihme = dplyr::coalesce(county_ihme, GEOID)) %>%
+    dplyr::group_by(county_ihme) %>%
+    dplyr::summarise(.groups = "drop")  # st_union here
+
+  # AK / HI layout (unchanged)
+  alaska   <- groups_sf %>% dplyr::filter(substr(county_ihme,1,2)=="02") %>%
+    { ctr <- sf::st_centroid(sf::st_union(.)); sf::st_geometry(.) <- (sf::st_geometry(.) - ctr)*0.40 + ctr; . } %>%
+    { sf::st_geometry(.) <- sf::st_geometry(.) + c(1300000, -4900000); . } %>%
+    sf::st_set_crs(crs_proj)
+  hawaii   <- groups_sf %>% dplyr::filter(substr(county_ihme,1,2)=="15") %>%
+    { ctr <- sf::st_centroid(sf::st_union(.)); sf::st_geometry(.) <- (sf::st_geometry(.) - ctr)*1.50 + ctr; . } %>%
+    { sf::st_geometry(.) <- sf::st_geometry(.) + c(5200000, -1400000); . } %>%
+    sf::st_set_crs(crs_proj)
+  mainland <- groups_sf %>% dplyr::filter(!substr(county_ihme,1,2) %in% c("02","15"))
+
+  dplyr::bind_rows(mainland, alaska, hawaii)
+}
+
 
 joined_by_period <- purrr::imap(
   shapefile_years,
   function(year, window) {
-
-    counties_sf <- tigris::counties(year = year, cb = TRUE, class = "sf") %>%
-      sf::st_zm(drop = TRUE, what = "ZM") %>%
-      sf::st_transform(crs_proj) %>%
-      dplyr::mutate(fips_raw = GEOID) %>%               # raw 5-digit FIPS
-      dplyr::left_join(ihme_map, by = "fips_raw")
-
-    # dissolve to one polygon per IHME group ------------
-    groups_sf <- counties_sf %>%
-      dplyr::group_by(county_ihme) %>%
-      dplyr::summarise(.groups = "drop")     # st_union() inside summarise
-
-    # shift & scale AK / HI ------------------------------
-    alaska  <- groups_sf %>% dplyr::filter(substr(county_ihme, 1, 2) == "02") %>%
-      st_scale(0.40) %>% st_shift(c(1300000, -4900000)) %>% sf::st_set_crs(crs_proj)
-    hawaii  <- groups_sf %>% dplyr::filter(substr(county_ihme, 1, 2) == "15") %>%
-      st_scale(1.50) %>% st_shift(c(5200000, -1400000)) %>% sf::st_set_crs(crs_proj)
-    mainland <- groups_sf %>% dplyr::filter(!substr(county_ihme, 1, 2) %in% c("02", "15"))
-
-    shape_all <- dplyr::bind_rows(mainland, alaska, hawaii)
-
-    # attach the 5-year averages -------------------------
-    dplyr::left_join(shape_all,
-                     dplyr::filter(dq_avg, time_window == window),
-                     by = "county_ihme")
+    shape_all <- build_groups_sf(year)
+    dplyr::left_join(shape_all, dplyr::filter(dq_avg, time_window == window), by = "county_ihme")
   }
 )
 
-# make the name that your walk() expects
-joined_by_period <- county_shapes_by_window
-
-# ──────────────────────────────────────────────────────────────
-# 7 · Mapping helper (identical to your original)
-# ──────────────────────────────────────────────────────────────
+# 6) Your original make_map (unchanged)
 make_map <- function(sf_data, var, title = NULL, palette = "RdBu") {
   states <- tigris::states(cb = TRUE, class = "sf") |> st_transform(2163)
 
@@ -319,23 +316,21 @@ make_map <- function(sf_data, var, title = NULL, palette = "RdBu") {
     )
 }
 
-# ──────────────────────────────────────────────────────────────
-# 8 · Save maps
-# ──────────────────────────────────────────────────────────────
-output_dir <- "/Users/amymann/Documents/Data Quality Project/data_quality/figures/5yr_avg_stable"
+# 7) Save maps
+output_dir <- here::here("figures","5yr_avg_stable")
 dir.create(output_dir, showWarnings = FALSE, recursive = TRUE)
 
-walk(vars_to_map, function(var) {
-  walk(names(joined_by_period), function(win) {
-    map_plot <- make_map(joined_by_period[[win]], var, paste(var, win))
-    ggsave(
-      filename = file.path(output_dir, paste0(var, "_", win, ".png")),
-      plot     = map_plot,
-      width    = 8, height = 6, dpi = 320
-    )
+purrr::walk(vars_present, function(var) {
+  purrr::walk(names(shapefile_years), function(win) {
+    sf_dat  <- joined_by_period[[win]]
+    if (!var %in% names(sf_dat)) return(invisible(NULL))
+    map_plot <- make_map(sf_dat, var, paste(var, win))
+    ggsave(filename = file.path(output_dir, paste0(var, "_", win, ".png")),
+           plot = map_plot, width = 8, height = 6, dpi = 320)
   })
 })
 
+message("✓ Done. Maps saved to: ", output_dir)
 ```
 Relationship between rural and garbage
 ```{r}
