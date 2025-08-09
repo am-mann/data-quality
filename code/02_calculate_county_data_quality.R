@@ -54,51 +54,6 @@ canonical_icd <- function(x) {
     stringr::str_remove_all(stringr::str_to_upper(x), "[^A-Z0-9]")
 }
 
-REF_SIZE <- 358 # length of the standard UCR list
-TARGET_COVERAGE <- 0.95 # completeness level to compare at
-
-get_detail_metric <- function(vec, ref_size = REF_SIZE, coverage = TARGET_COVERAGE) {
-    vec <- vec[!is.na(vec)]
-    if (!length(vec)) {
-        return(
-            list(raw = NA_real_, d95 = NA_real_, cov = 0, n = 0)
-        )
-    }
-    freqs <- as.numeric(table(vec)) # strip *all* attributes & classes
-    attr(freqs, "names") <- NULL # (belt-and-suspenders)
-    N <- sum(freqs)
-
-    # S = 1 – f1 / N
-    f1 <- sum(freqs == 1)
-    C_hat <- 1 - f1 / N
-
-    # rarefy / extrapolate richness to fixed coverage
-    est <- tryCatch(
-        iNEXT::estimateD(freqs,
-            datatype = "abundance",
-            base     = "coverage",
-            level    = coverage
-        ),
-        error = function(e) NULL
-    )
-
-    if (is.null(est) || !"Estimator" %in% names(est)) {
-        D95 <- NA_real_
-    } else {
-        D95 <- est |>
-            dplyr::filter(Order.q == 0) |>
-            dplyr::pull(Estimator) |>
-            as.numeric()
-    }
-
-    list(
-        raw = length(freqs) / ref_size,
-        d95 = D95 / ref_size,
-        cov = C_hat,
-        n   = N
-    )
-}
-
 lookup_garbage <- read_csv(
     file.path(
         dictionary_dir,
@@ -181,8 +136,10 @@ invalid_by_var <- list(
 # ─────────────────────────────────────────────────────────────────────────────
 summarise_year_file <- function(file) {
     this_year <- as.integer(stringr::str_extract(basename(file), "\\d{4}"))
-    message("Processing ", this_year)
 
+    cat(sprintf("Processing %d ...\n", this_year))
+    flush.console()
+    
     cols_needed <- c("ucod", county_var, key_demo_vars, sec_cols, "ager27", "sex", "age_years", "ucr358")
     ds <- arrow::read_parquet(
         file,
@@ -213,23 +170,6 @@ summarise_year_file <- function(file) {
         )
 
     entropy_tbl <- compute_entropy_county(ds, county_var)
-
-    # detail metric - uses ucr358
-    detail_tbl <- ds %>%
-        filter(!is.na(ucr358)) %>%
-        group_by(.data[[county_var]]) %>% # one row per county
-        summarise(
-            tmp = list(get_detail_metric(ucr358)), # call helper
-            .groups = "drop"
-        ) %>%
-        mutate(
-            detail_raw = purrr::map_dbl(tmp, "raw"),
-            detail_d95 = purrr::map_dbl(tmp, "d95"),
-            detail_cov = purrr::map_dbl(tmp, "cov"),
-            detail_n   = purrr::map_dbl(tmp, "n"),
-            year       = this_year
-        ) %>%
-        select(-tmp)
 
 
     # from 2003 to 2005 the educ2003 variable is called educ so here I change the name accordingly
@@ -277,6 +217,80 @@ summarise_year_file <- function(file) {
             ) %>%
             filter(!is.na(detail_full) & trimws(detail_full) != "")
     }
+    
+    
+    # --- General broadened-definition suicide underreporting (no fentanyl) ---
+    # Helper functions for underlying cause classification
+    is_suicide_ucod <- function(uc4) {
+        r3 <- toupper(substr(uc4, 1, 3))
+        is_x <- substr(r3, 1, 1) == "X"
+        xnum <- suppressWarnings(as.integer(substr(r3, 2, 3)))
+        in_x60_84 <- is_x & !is.na(xnum) & xnum >= 60 & xnum <= 84
+        y4 <- toupper(substr(uc4, 1, 4))
+        in_y870 <- y4 == "Y870"
+        in_x60_84 | in_y870
+    }
+    
+    is_undetermined_ucod <- function(uc4) {
+        r3 <- toupper(substr(uc4, 1, 3))
+        y4 <- toupper(substr(uc4, 1, 4))
+        y10_34 <- substr(r3, 1, 1) == "Y" &
+            suppressWarnings(as.integer(substr(r3, 2, 3))) %in% 10:34
+        y872 <- y4 == "Y872"
+        y899 <- y4 == "Y899"
+        y10_34 | y872 | y899
+    }
+    
+    is_accidental_poison_ucod <- function(uc4) {
+        r3 <- toupper(substr(uc4, 1, 3))
+        is_x <- substr(r3, 1, 1) == "X"
+        xnum <- suppressWarnings(as.integer(substr(r3, 2, 3)))
+        is_x & !is.na(xnum) & xnum >= 40 & xnum <= 49
+    }
+    
+    # Detect fentanyl in MCOD (T40.4)
+    fentanyl_ranum <- contrib_all %>%
+        filter(toupper(substr(detail_full, 1, 4)) == "T404") %>%
+        distinct(ranum) %>%
+        pull(ranum)
+    
+    # Classify broadened definition flags, excluding fentanyl cases
+    bd_flags <- ds %>%
+        transmute(
+            !!county_var := .data[[county_var]],
+            year,
+            ranum,
+            uc4 = toupper(substr(ucod, 1, 4)),
+            suic = is_suicide_ucod(uc4),
+            undet = is_undetermined_ucod(uc4),
+            acc_pois = is_accidental_poison_ucod(uc4)
+        ) %>%
+        filter(!(ranum %in% fentanyl_ranum))  # drop any fentanyl-involved death
+    
+    # Summarise at county-year level
+    broadened_county <- bd_flags %>%
+        reframe(
+            bd_suic_k_nofent = sum(suic, na.rm = TRUE),
+            bd_undet_k_nofent = sum(undet, na.rm = TRUE),
+            bd_accpois_k_nofent = sum(acc_pois, na.rm = TRUE),
+            bd_total_noacc_nofent = bd_suic_k_nofent + bd_undet_k_nofent,
+            bd_total_withacc_nofent = bd_suic_k_nofent +
+                bd_undet_k_nofent +
+                bd_accpois_k_nofent,
+            bd_underreport_noacc_nofent = ifelse(
+                bd_total_noacc_nofent > 0,
+                bd_undet_k_nofent / bd_total_noacc_nofent,
+                NA_real_
+            ),
+            bd_underreport_withacc_nofent = ifelse(
+                bd_total_withacc_nofent > 0,
+                (bd_undet_k_nofent + bd_accpois_k_nofent) /
+                    bd_total_withacc_nofent,
+                NA_real_
+            ),
+            .by = c(!!sym(county_var), year)
+        )
+
 
 
     # keep relevant details for accident deaths
@@ -305,8 +319,79 @@ summarise_year_file <- function(file) {
         mutate(unspecific_drug = !has_specific) %>%
         select(ranum, unspecific_drug)
 
-
-    # merge all flags
+    # --- General broadened-definition suicide underreporting (no fentanyl) ---
+    # Helper functions for underlying cause classification
+    is_suicide_ucod <- function(uc4) {
+        r3 <- toupper(substr(uc4, 1, 3))
+        is_x <- substr(r3, 1, 1) == "X"
+        xnum <- suppressWarnings(as.integer(substr(r3, 2, 3)))
+        in_x60_84 <- is_x & !is.na(xnum) & xnum >= 60 & xnum <= 84
+        y4 <- toupper(substr(uc4, 1, 4))
+        in_y870 <- y4 == "Y870"
+        in_x60_84 | in_y870
+    }
+    
+    is_undetermined_ucod <- function(uc4) {
+        r3 <- toupper(substr(uc4, 1, 3))
+        y4 <- toupper(substr(uc4, 1, 4))
+        y10_34 <- substr(r3, 1, 1) == "Y" &
+            suppressWarnings(as.integer(substr(r3, 2, 3))) %in% 10:34
+        y872 <- y4 == "Y872"
+        y899 <- y4 == "Y899"
+        y10_34 | y872 | y899
+    }
+    
+    is_accidental_poison_ucod <- function(uc4) {
+        r3 <- toupper(substr(uc4, 1, 3))
+        is_x <- substr(r3, 1, 1) == "X"
+        xnum <- suppressWarnings(as.integer(substr(r3, 2, 3)))
+        is_x & !is.na(xnum) & xnum >= 40 & xnum <= 49
+    }
+    
+    # Detect fentanyl in MCOD (T40.4)
+    fentanyl_ranum <- contrib_all %>%
+        filter(toupper(substr(detail_full, 1, 4)) == "T404") %>%
+        distinct(ranum) %>%
+        pull(ranum)
+    
+    # Classify broadened definition flags, excluding fentanyl cases
+    bd_flags <- ds %>%
+        transmute(
+            !!county_var := .data[[county_var]],
+            year,
+            ranum,
+            uc4 = toupper(substr(ucod, 1, 4)),
+            suic = is_suicide_ucod(uc4),
+            undet = is_undetermined_ucod(uc4),
+            acc_pois = is_accidental_poison_ucod(uc4)
+        ) %>%
+        filter(!(ranum %in% fentanyl_ranum))  # drop any fentanyl-involved death
+    
+    # Summarise at county-year level
+    broadened_county <- bd_flags %>%
+        reframe(
+            bd_suic_k_nofent = sum(suic, na.rm = TRUE),
+            bd_undet_k_nofent = sum(undet, na.rm = TRUE),
+            bd_accpois_k_nofent = sum(acc_pois, na.rm = TRUE),
+            bd_total_noacc_nofent = bd_suic_k_nofent + bd_undet_k_nofent,
+            bd_total_withacc_nofent = bd_suic_k_nofent +
+                bd_undet_k_nofent +
+                bd_accpois_k_nofent,
+            bd_underreport_noacc_nofent = ifelse(
+                bd_total_noacc_nofent > 0,
+                bd_undet_k_nofent / bd_total_noacc_nofent,
+                NA_real_
+            ),
+            bd_underreport_withacc_nofent = ifelse(
+                bd_total_withacc_nofent > 0,
+                (bd_undet_k_nofent + bd_accpois_k_nofent) /
+                    bd_total_withacc_nofent,
+                NA_real_
+            ),
+            .by = c(!!sym(county_var), year)
+        )
+    
+        # merge all flags
     cert_tbl <- ds %>%
         dplyr::left_join(contrib_counts, by = "ranum") %>%
         dplyr::left_join(unspec_tbl, by = "ranum") %>%
@@ -403,9 +488,10 @@ summarise_year_file <- function(file) {
             ),
             .groups = "drop"
         )
-
+    
     county_metrics <- county_metrics %>%
-        left_join(detail_tbl, by = c(county_var, "year"))
+        left_join(broadened_county, by = c(county_var, "year"))
+    
 
     result <- dplyr::left_join(county_metrics, entropy_tbl, by = county_var) %>%
         dplyr::mutate(
@@ -437,3 +523,5 @@ if (PARALLELIZE) {
 
 write_csv(county_year_all, out_csv)
 message("County-year quality metrics written")
+
+
