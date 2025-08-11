@@ -17,12 +17,6 @@
 # Phillips et al note in their paper that size based rarefaction is appropriate for small places. 
 # --------------------------------------------------------------
 
-# --------------------------------------------------------------
-# ANACONDA detail metric
-# Date: August 8, 2025
-# (minimal changes: ICD10 4-char mapping + fixed K/max_H + robust extract_q1)
-# --------------------------------------------------------------
-
 suppressPackageStartupMessages({
     library(arrow);    library(dplyr);  library(stringr); library(purrr)
     library(readr);    library(tidyr);   library(tibble)
