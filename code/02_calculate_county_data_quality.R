@@ -136,7 +136,7 @@ invalid_by_var <- list(
 # ─────────────────────────────────────────────────────────────────────────────
 summarise_year_file <- function(file) {
     this_year <- as.integer(stringr::str_extract(basename(file), "\\d{4}"))
-
+    
     cat(sprintf("Processing %d ...\n", this_year))
     flush.console()
     
@@ -149,13 +149,13 @@ summarise_year_file <- function(file) {
             names(arrow::read_parquet(file, as_data_frame = FALSE)$schema)
         )
     )
-
+    
     ds <- ds %>%
         { # rename record1→record_1 etc. if underscore cols are absent
             if (!any(grepl("^record_", names(.))) &&
                 any(grepl("^record[0-9]+$", names(.)))) {
                 rename_with(., ~ sub("^record([0-9]+)$", "record_\\1", .x),
-                    .cols = matches("^record[0-9]+$")
+                            .cols = matches("^record[0-9]+$")
                 )
             } else {
                 .
@@ -168,30 +168,16 @@ summarise_year_file <- function(file) {
             across(starts_with("record_"), ~ canonical_icd(.x)),
             sex_male = if_else(sex == "M", 1L, 0L)
         )
-
+    
     entropy_tbl <- compute_entropy_county(ds, county_var)
-
-
-    # from 2003 to 2005 the educ2003 variable is called educ so here I change the name accordingly
-    # if (this_year %in% 2003:2005 &&
-    #     "educ" %in% names(ds)      &&
-    #     !"educ2003" %in% names(ds)) {
-    #     ds <- dplyr::rename(ds, educ2003 = educ)
-    # }
-
+    
     for (v in setdiff(key_demo_vars, names(ds))) ds[[v]] <- NA_character_
     if (!"year" %in% names(ds)) ds$year <- this_year
     if (this_year < 2004) ds$educ2003 <- NA_character_
-    demo_vars <- if (this_year < 2004) {
-        setdiff(key_demo_vars, "educ2003")
-    } else {
-        key_demo_vars
-    }
-    if (this_year %in% 2021:2022) {
-        demo_vars <- union(setdiff(demo_vars, "race"), "racer40")
-    }
-
-    # flag accidents and overdoses
+    demo_vars <- if (this_year < 2004) setdiff(key_demo_vars, "educ2003") else key_demo_vars
+    if (this_year %in% 2021:2022) demo_vars <- union(setdiff(demo_vars, "race"), "racer40")
+    
+    # ---- Garbage/overdose/accident prep (unchanged) ----
     ds <- ds %>%
         mutate(
             icd10 = canonical_icd(ucod),
@@ -202,102 +188,24 @@ summarise_year_file <- function(file) {
             needs_detail = icd10 %in% accident_ucod_set,
             is_overdose  = icd10 %in% overdose_ucod
         )
-
-    # gets all contributing causes
+    
     present_sec <- intersect(sec_cols, names(ds))
-
     contrib_all <- if (length(present_sec) == 0) {
         tibble(ranum = integer(), detail_full = character(), detail = character())
     } else {
         present_sec %>%
             purrr::map_dfr(~ ds %>% select(ranum, detail_raw = !!sym(.x))) %>%
             mutate(
-                detail_full = canonical_icd(detail_raw), # full code
-                detail      = substr(detail_full, 1, 4) # 4-char version
+                detail_full = canonical_icd(detail_raw),
+                detail      = substr(detail_full, 1, 4)
             ) %>%
             filter(!is.na(detail_full) & trimws(detail_full) != "")
     }
     
+    # keep only required accident details for diagnostics later
+    contrib_long <- contrib_all %>% filter(detail %in% accident_detail_set)
     
-    # --- General broadened-definition suicide underreporting (no fentanyl) ---
-    # Helper functions for underlying cause classification
-    is_suicide_ucod <- function(uc4) {
-        r3 <- toupper(substr(uc4, 1, 3))
-        is_x <- substr(r3, 1, 1) == "X"
-        xnum <- suppressWarnings(as.integer(substr(r3, 2, 3)))
-        in_x60_84 <- is_x & !is.na(xnum) & xnum >= 60 & xnum <= 84
-        y4 <- toupper(substr(uc4, 1, 4))
-        in_y870 <- y4 == "Y870"
-        in_x60_84 | in_y870
-    }
-    
-    is_undetermined_ucod <- function(uc4) {
-        r3 <- toupper(substr(uc4, 1, 3))
-        y4 <- toupper(substr(uc4, 1, 4))
-        y10_34 <- substr(r3, 1, 1) == "Y" &
-            suppressWarnings(as.integer(substr(r3, 2, 3))) %in% 10:34
-        y872 <- y4 == "Y872"
-        y899 <- y4 == "Y899"
-        y10_34 | y872 | y899
-    }
-    
-    is_accidental_poison_ucod <- function(uc4) {
-        r3 <- toupper(substr(uc4, 1, 3))
-        is_x <- substr(r3, 1, 1) == "X"
-        xnum <- suppressWarnings(as.integer(substr(r3, 2, 3)))
-        is_x & !is.na(xnum) & xnum >= 40 & xnum <= 49
-    }
-    
-    # Detect fentanyl in MCOD (T40.4)
-    fentanyl_ranum <- contrib_all %>%
-        filter(toupper(substr(detail_full, 1, 4)) == "T404") %>%
-        distinct(ranum) %>%
-        pull(ranum)
-    
-    # Classify broadened definition flags, excluding fentanyl cases
-    bd_flags <- ds %>%
-        transmute(
-            !!county_var := .data[[county_var]],
-            year,
-            ranum,
-            uc4 = toupper(substr(ucod, 1, 4)),
-            suic = is_suicide_ucod(uc4),
-            undet = is_undetermined_ucod(uc4),
-            acc_pois = is_accidental_poison_ucod(uc4)
-        ) %>%
-        filter(!(ranum %in% fentanyl_ranum))  # drop any fentanyl-involved death
-    
-    # Summarise at county-year level
-    broadened_county <- bd_flags %>%
-        reframe(
-            bd_suic_k_nofent = sum(suic, na.rm = TRUE),
-            bd_undet_k_nofent = sum(undet, na.rm = TRUE),
-            bd_accpois_k_nofent = sum(acc_pois, na.rm = TRUE),
-            bd_total_noacc_nofent = bd_suic_k_nofent + bd_undet_k_nofent,
-            bd_total_withacc_nofent = bd_suic_k_nofent +
-                bd_undet_k_nofent +
-                bd_accpois_k_nofent,
-            bd_underreport_noacc_nofent = ifelse(
-                bd_total_noacc_nofent > 0,
-                bd_undet_k_nofent / bd_total_noacc_nofent,
-                NA_real_
-            ),
-            bd_underreport_withacc_nofent = ifelse(
-                bd_total_withacc_nofent > 0,
-                (bd_undet_k_nofent + bd_accpois_k_nofent) /
-                    bd_total_withacc_nofent,
-                NA_real_
-            ),
-            .by = c(!!sym(county_var), year)
-        )
-
-
-
-    # keep relevant details for accident deaths
-    contrib_long <- contrib_all %>%
-        dplyr::filter(detail %in% accident_detail_set)
-
-    # sum light garbage
+    # light garbage counts in MCOD
     contrib_counts <- contrib_all %>%
         mutate(is_light = detail_full %in% light_garbage) %>%
         group_by(ranum) %>%
@@ -306,197 +214,189 @@ summarise_year_file <- function(file) {
             light_contrib = sum(is_light),
             .groups = "drop"
         )
-
-    ## flag unspecified drug for overdoses
+    
+    # unspecific drug flags (optional diagnostic)
     unspec_tbl <- contrib_all %>%
         filter(str_starts(detail_full, "T")) %>%
         mutate(
-            is_specific = !(str_starts(detail_full, "T509") |
-                str_starts(detail_full, "T409"))
+            is_specific = !(str_starts(detail_full, "T509") | str_starts(detail_full, "T409"))
         ) %>%
         group_by(ranum) %>%
         summarise(has_specific = any(is_specific), .groups = "drop") %>%
         mutate(unspecific_drug = !has_specific) %>%
         select(ranum, unspecific_drug)
-
-    # --- General broadened-definition suicide underreporting (no fentanyl) ---
-    # Helper functions for underlying cause classification
+    
+    # ======================================================================
+    # SIM (Self-Injury Mortality) — Rockett et al.
+    # SIM = suicides (all mechanisms) + 0.8 * unintentional drug poisonings (X40–X44)
+    #                      + 0.9 * undetermined drug poisonings (Y10–Y14)
+    # Restricted to ages ≥ 15.
+    # ======================================================================
+    
+    # Age ≥ 15 flag using age_years if available, otherwise ager27 (>= 12 ~ 15–19+)
+    adult_15p <- if ("age_years" %in% names(ds)) {
+        !is.na(ds$age_years) & as.numeric(ds$age_years) >= 15
+    } else if ("ager27" %in% names(ds)) {
+        # NCHS ager27: 12 = 15–19, ..., 26 = 85+; treat >=12 as 15+
+        !is.na(ds$ager27) & as.integer(ds$ager27) >= 12
+    } else {
+        # Fallback: assume all ages (conservative—consider adding a warning/log)
+        rep(TRUE, nrow(ds))
+    }
+    
+    # ICD-10 helpers
     is_suicide_ucod <- function(uc4) {
         r3 <- toupper(substr(uc4, 1, 3))
-        is_x <- substr(r3, 1, 1) == "X"
-        xnum <- suppressWarnings(as.integer(substr(r3, 2, 3)))
-        in_x60_84 <- is_x & !is.na(xnum) & xnum >= 60 & xnum <= 84
-        y4 <- toupper(substr(uc4, 1, 4))
-        in_y870 <- y4 == "Y870"
-        in_x60_84 | in_y870
+        xnum <- suppressWarnings(as.integer(sub("^X", "", r3)))
+        in_x60_84 <- substr(r3, 1, 1) == "X" & !is.na(xnum) & xnum >= 60 & xnum <= 84
+        y870 <- toupper(substr(uc4, 1, 4)) == "Y870"
+        in_x60_84 | y870
     }
-    
-    is_undetermined_ucod <- function(uc4) {
+    is_unintent_drug_ucod <- function(uc4) {
         r3 <- toupper(substr(uc4, 1, 3))
-        y4 <- toupper(substr(uc4, 1, 4))
-        y10_34 <- substr(r3, 1, 1) == "Y" &
-            suppressWarnings(as.integer(substr(r3, 2, 3))) %in% 10:34
-        y872 <- y4 == "Y872"
-        y899 <- y4 == "Y899"
-        y10_34 | y872 | y899
+        xnum <- suppressWarnings(as.integer(sub("^X", "", r3)))
+        substr(r3, 1, 1) == "X" & !is.na(xnum) & xnum >= 40 & xnum <= 44
     }
-    
-    is_accidental_poison_ucod <- function(uc4) {
+    is_undet_drug_ucod <- function(uc4) {
         r3 <- toupper(substr(uc4, 1, 3))
-        is_x <- substr(r3, 1, 1) == "X"
-        xnum <- suppressWarnings(as.integer(substr(r3, 2, 3)))
-        is_x & !is.na(xnum) & xnum >= 40 & xnum <= 49
+        ynum <- suppressWarnings(as.integer(sub("^Y", "", r3)))
+        substr(r3, 1, 1) == "Y" & !is.na(ynum) & ynum >= 10 & ynum <= 14
     }
     
-    # Detect fentanyl in MCOD (T40.4)
+    # ---- Detect fentanyl in MCOD (T40.4) ----
     fentanyl_ranum <- contrib_all %>%
         filter(toupper(substr(detail_full, 1, 4)) == "T404") %>%
         distinct(ranum) %>%
         pull(ranum)
     
-    # Classify broadened definition flags, excluding fentanyl cases
-    bd_flags <- ds %>%
+    # ======================================================================
+    # SIM (Self-Injury Mortality) — Rockett et al. with fentanyl excluded
+    # ======================================================================
+    
+    sim_flags <- ds %>%
         transmute(
             !!county_var := .data[[county_var]],
             year,
+            is_adult15p = adult_15p,
             ranum,
             uc4 = toupper(substr(ucod, 1, 4)),
-            suic = is_suicide_ucod(uc4),
-            undet = is_undetermined_ucod(uc4),
-            acc_pois = is_accidental_poison_ucod(uc4)
+            suic  = is_suicide_ucod(uc4),
+            uninj = is_unintent_drug_ucod(uc4),
+            undet = is_undet_drug_ucod(uc4)
         ) %>%
-        filter(!(ranum %in% fentanyl_ranum))  # drop any fentanyl-involved death
+        filter(is_adult15p & !(ranum %in% fentanyl_ranum))
     
-    # Summarise at county-year level
-    broadened_county <- bd_flags %>%
+    sim_county <- sim_flags %>%
         reframe(
-            bd_suic_k_nofent = sum(suic, na.rm = TRUE),
-            bd_undet_k_nofent = sum(undet, na.rm = TRUE),
-            bd_accpois_k_nofent = sum(acc_pois, na.rm = TRUE),
-            bd_total_noacc_nofent = bd_suic_k_nofent + bd_undet_k_nofent,
-            bd_total_withacc_nofent = bd_suic_k_nofent +
-                bd_undet_k_nofent +
-                bd_accpois_k_nofent,
-            bd_underreport_noacc_nofent = ifelse(
-                bd_total_noacc_nofent > 0,
-                bd_undet_k_nofent / bd_total_noacc_nofent,
-                NA_real_
-            ),
-            bd_underreport_withacc_nofent = ifelse(
-                bd_total_withacc_nofent > 0,
-                (bd_undet_k_nofent + bd_accpois_k_nofent) /
-                    bd_total_withacc_nofent,
-                NA_real_
-            ),
+            sim_suic_k_15p_nofent   = sum(suic,  na.rm = TRUE),
+            sim_uninj_k_15p_nofent  = sum(uninj, na.rm = TRUE),   # X40–X44
+            sim_undet_k_15p_nofent  = sum(undet, na.rm = TRUE),   # Y10–Y14
+            sim_added_k_15p_nofent  = 0.8 * sim_uninj_k_15p_nofent +
+                0.9 * sim_undet_k_15p_nofent,
+            sim_k_15p_nofent        = sim_suic_k_15p_nofent + sim_added_k_15p_nofent,
+            sim_added_share_nofent  = ifelse(sim_k_15p_nofent > 0,
+                                             sim_added_k_15p_nofent / sim_k_15p_nofent,
+                                             NA_real_),
             .by = c(!!sym(county_var), year)
         )
     
-        # merge all flags
+    
+    # ---- Merge diagnostic flags and completeness (unchanged) ----
     cert_tbl <- ds %>%
-        dplyr::left_join(contrib_counts, by = "ranum") %>%
-        dplyr::left_join(unspec_tbl, by = "ranum") %>%
-        dplyr::mutate(
-            total_contrib = tidyr::replace_na(total_contrib, 0L),
-            light_contrib = tidyr::replace_na(light_contrib, 0L),
+        left_join(contrib_counts, by = "ranum") %>%
+        left_join(unspec_tbl,    by = "ranum") %>%
+        mutate(
+            total_contrib   = tidyr::replace_na(total_contrib, 0L),
+            light_contrib   = tidyr::replace_na(light_contrib, 0L),
             unspecific_drug = tidyr::replace_na(unspecific_drug, TRUE),
-            is_garbage = dplyr::case_when(
+            is_garbage = case_when(
                 is.na(gbd_severity) ~ FALSE,
                 !stringr::str_starts(icd10, "X") ~ TRUE,
                 stringr::str_starts(icd10, "X") & unspecific_drug == TRUE ~ TRUE,
                 TRUE ~ FALSE
             )
         )
-
-    # certificates that need detail
-    need_tbl <- cert_tbl %>%
-        dplyr::filter(needs_detail) %>%
-        dplyr::distinct(ranum, icd10)
-
+    
+    need_tbl <- cert_tbl %>% filter(needs_detail) %>% distinct(ranum, icd10)
+    
     demo_vars_exc_race <- setdiff(demo_vars, c("race", "racer40", "mandeath"))
     valid_exc_race <- sapply(demo_vars_exc_race, function(v) {
         vals <- cert_tbl[[v]]
-        inv <- invalid_by_var[[v]]
+        inv  <- invalid_by_var[[v]]
         !(vals %in% inv)
     })
     cert_tbl$complete_all_exc_race <- rowSums(valid_exc_race) == length(demo_vars_exc_race)
-
-    # find required detail
+    
     required_hits <- contrib_long %>%
-        dplyr::semi_join(accident_detail_lookup, by = "detail") %>%
-        dplyr::left_join(ds %>% dplyr::select(ranum, icd10), by = "ranum") %>%
-        dplyr::semi_join(accident_detail_lookup,
-            by = c("icd10" = "ucod", "detail")
-        ) %>%
-        dplyr::distinct(ranum) %>%
-        dplyr::mutate(has_required_detail = TRUE)
-
+        semi_join(accident_detail_lookup, by = "detail") %>%
+        left_join(ds %>% select(ranum, icd10), by = "ranum") %>%
+        semi_join(accident_detail_lookup, by = c("icd10" = "ucod", "detail")) %>%
+        distinct(ranum) %>%
+        mutate(has_required_detail = TRUE)
+    
     cert_tbl <- cert_tbl %>%
-        dplyr::left_join(required_hits, by = "ranum") %>%
-        dplyr::mutate(has_required_detail = tidyr::replace_na(has_required_detail, FALSE))
-
-    # check completeness of demographic information
+        left_join(required_hits, by = "ranum") %>%
+        mutate(has_required_detail = tidyr::replace_na(has_required_detail, FALSE))
+    
     valid_mat <- sapply(demo_vars, function(v) {
         vals <- cert_tbl[[v]]
-        inv <- invalid_by_var[[v]]
+        inv  <- invalid_by_var[[v]]
         !(vals %in% inv)
     })
-
     cert_tbl$complete_all <- rowSums(valid_mat) == length(demo_vars)
-
-    # make big table
+    
     county_metrics <- cert_tbl %>%
-        dplyr::group_by(.data[[county_var]], year) %>%
-        dplyr::summarise(
+        group_by(.data[[county_var]], year) %>%
+        summarise(
             n_cert = n(),
             garb_k = sum(is_garbage),
             prop_garbage = garb_k / n_cert,
             prop_garbage_low = wilson_lower(garb_k, n_cert),
-            prop_garbage_hi = wilson_upper(garb_k, n_cert),
-            pct_gc_I64 = mean(icd10 == "I64"),
-            pct_gc_C_misc = mean(icd10 %in% c("C80", "C55", "C97")),
-            pct_gc_I10 = mean(icd10 == "I10"),
-            pct_gc_R_misc = mean(icd10 %in% c("R99", "R54")),
-            pct_gc_N19 = mean(icd10 == "N19"),
-            pct_gc_J80 = mean(icd10 == "J80"),
-            all_comp_k = sum(complete_all_exc_race),
-            prop_all_comp = all_comp_k / n_cert,
+            prop_garbage_hi  = wilson_upper(garb_k, n_cert),
+            pct_gc_I64   = mean(icd10 == "I64"),
+            pct_gc_C_misc= mean(icd10 %in% c("C80", "C55", "C97")),
+            pct_gc_I10   = mean(icd10 == "I10"),
+            pct_gc_R_misc= mean(icd10 %in% c("R99", "R54")),
+            pct_gc_N19   = mean(icd10 == "N19"),
+            pct_gc_J80   = mean(icd10 == "J80"),
+            all_comp_k   = sum(complete_all_exc_race),
+            prop_all_comp     = all_comp_k / n_cert,
             prop_all_comp_low = wilson_lower(all_comp_k, n_cert),
-            prop_all_comp_hi = wilson_upper(all_comp_k, n_cert),
-            contrib_n = sum(total_contrib),
-            light_k = sum(light_contrib),
-            prop_light = ifelse(contrib_n > 0, light_k / contrib_n, NA_real_),
-            prop_light_low = wilson_lower(light_k, contrib_n),
-            prop_light_hi = wilson_upper(light_k, contrib_n),
-            acc_n = sum(needs_detail),
-            acc_miss_k = sum(needs_detail & !has_required_detail),
-            pct_acc_miss = ifelse(acc_n > 0, acc_miss_k / acc_n, NA_real_),
+            prop_all_comp_hi  = wilson_upper(all_comp_k, n_cert),
+            contrib_n   = sum(total_contrib),
+            light_k     = sum(light_contrib),
+            prop_light      = ifelse(contrib_n > 0, light_k / contrib_n, NA_real_),
+            prop_light_low  = wilson_lower(light_k, contrib_n),
+            prop_light_hi   = wilson_upper(light_k, contrib_n),
+            acc_n       = sum(needs_detail),
+            acc_miss_k  = sum(needs_detail & !has_required_detail),
+            pct_acc_miss     = ifelse(acc_n > 0, acc_miss_k / acc_n, NA_real_),
             pct_acc_miss_low = wilson_lower(acc_miss_k, acc_n),
-            pct_acc_miss_hi = wilson_upper(acc_miss_k, acc_n),
-            overd_n = sum(is_overdose),
-            overd_miss_k = sum(is_overdose & !has_required_detail),
-            pct_overd_miss = ifelse(overd_n > 0, overd_miss_k / overd_n, NA_real_),
+            pct_acc_miss_hi  = wilson_upper(acc_miss_k, acc_n),
+            overd_n     = sum(is_overdose),
+            overd_miss_k= sum(is_overdose & !has_required_detail),
+            pct_overd_miss     = ifelse(overd_n > 0, overd_miss_k / overd_n, NA_real_),
             pct_overd_miss_low = wilson_lower(overd_miss_k, overd_n),
-            pct_overd_miss_hi = wilson_upper(overd_miss_k, overd_n),
-            overdose_unspec_k = sum(is_overdose & unspecific_drug),
+            pct_overd_miss_hi  = wilson_upper(overd_miss_k, overd_n),
+            overdose_unspec_k  = sum(is_overdose & unspecific_drug),
             across(all_of(demo_vars),
-                ~ {
-                    bad_vals <- invalid_by_var[[cur_column()]]
-                    good <- !(.x %in% bad_vals | is.na(.x))
-                    if (all(is.na(.x))) NA_integer_ else sum(good)
-                },
-                .names = "{.col}_comp_k"
+                   ~ {
+                       bad_vals <- invalid_by_var[[cur_column()]]
+                       good <- !(.x %in% bad_vals | is.na(.x))
+                       if (all(is.na(.x))) NA_integer_ else sum(good)
+                   },
+                   .names = "{.col}_comp_k"
             ),
             .groups = "drop"
         )
     
     county_metrics <- county_metrics %>%
-        left_join(broadened_county, by = c(county_var, "year"))
+        left_join(sim_county, by = c(county_var, "year"))
     
-
-    result <- dplyr::left_join(county_metrics, entropy_tbl, by = county_var) %>%
-        dplyr::mutate(
-            DQ_prop_garbage = (1 - DQ_overall) * prop_garbage
-        )
+    result <- left_join(county_metrics, entropy_tbl, by = county_var) %>%
+        mutate(DQ_prop_garbage = (1 - DQ_overall) * prop_garbage)
+    
+    return(result)
 }
 
 # ————————————————————————————————————————————————————————————————
