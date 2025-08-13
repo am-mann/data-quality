@@ -1,4 +1,0 @@
-1999_2004: N_ref=633 (clusters=2343)
-2005_2010: N_ref=648 (clusters=2339)
-2011_2017: N_ref=691 (clusters=2469)
-2018_2022: N_ref=622 (clusters=2339)
