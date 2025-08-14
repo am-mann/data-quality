@@ -268,9 +268,7 @@ paths_to_check <- c(
     gbd_root3_csv_candidates[1],
     gbd_root3_csv_candidates[2],
     gbd_icd_map_xlsx = gbd_icd_map_xlsx,
-    gbd_hier_xlsx = gbd_hier_xlsx,
-    phillips120_map_csv = phillips120_map_csv
-)
+    gbd_hier_xlsx = gbd_hier_xlsx)
 
 
 stopifnot(file.exists(garbage_csv))
