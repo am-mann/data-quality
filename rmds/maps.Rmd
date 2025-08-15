@@ -2008,10 +2008,398 @@ print(round(cor_pearson, 3))
 cat("\nSpearman correlations:\n")
 print(round(cor_spearman, 3))
 ```
+New diversity metrics
+```{r}
+# ──────────────────────────────────────────────────────────────
+# Map age-bucket detail (UCOD & MCOD) — CLUSTERS ONLY
+#   • Handles *_wide.csv (e.g., ucod_age_0-44) and long (age_bucket + value)
+#   • Adds optional weighted "ALL" using age_weights_skew4_global.csv
+#   • Builds cluster polygons from county_cluster_membership.csv
+#   • Saves per-period × age-bucket PNGs for UCOD and MCOD
+# ──────────────────────────────────────────────────────────────
+
+suppressPackageStartupMessages({
+  library(dplyr); library(readr); library(stringr); library(purrr)
+  library(sf); library(tigris); library(ggplot2); library(glue); library(here)
+  library(tidyr)
+})
+
+options(tigris_use_cache = TRUE, tigris_class = "sf")
+crs_proj <- 2163
+
+# ── CONFIG ─────────────────────────────────────────────────────
+# Period → shapefile year
+shapefile_years <- c(
+  "1999_2006" = 2000,
+  "2007_2014" = 2010,
+  "2015_2022" = 2020
+)
+
+# Color scale limits for age-bucket detail maps
+lims_age <- c(50, 70)
+
+# Output base directory
+out_dir_age <- here("figures","phillips_maps","cluster_age_detail")
+
+# If you want to limit to a subset while testing, set e.g.:
+# ONLY_BUCKETS <- c("0-44", "ALL-weighted")
+ONLY_BUCKETS <- NULL  # NULL = map all available buckets
+
+# ── Helpers: IO & parsing ─────────────────────────────────────
+.read_csv_flex <- function(fname_options) {
+  # Try output/, then project root, then /mnt/data
+  opts  <- as.character(fname_options)
+  paths <- c(file.path(here("output"), opts),
+             here(opts),
+             file.path("/mnt/data", basename(opts)))
+  hit <- paths[file.exists(paths)][1]
+  if (is.na(hit)) stop("File not found among: ", paste(paths, collapse=" | "))
+  readr::read_csv(hit, show_col_types = FALSE)
+}
+
+# Recognize age buckets anywhere in a name, e.g. "ucod_age_0-44", "80+"
+# (ASCII only; no lookarounds; robust to "_", space, or "-" as separator)
+.is_age_col <- function(nm) {
+  grepl("\\d{1,2}([-_ ]\\d{1,2}|\\+)", nm)
+}
+
+# Normalize UCOD/MCOD age detail to LONG: cluster, period, age_bucket, detail
+.normalize_age_detail <- function(df) {
+  nm <- names(df)
+
+  # Harmonize id columns
+  if (!"cluster" %in% nm && "clu" %in% nm) df <- dplyr::rename(df, cluster = clu)
+  if (!"period"  %in% names(df)) stop("Expected a 'period' column.")
+  if (!"cluster" %in% names(df)) stop("Expected a 'cluster' column.")
+
+  if ("age_bucket" %in% names(df)) {
+    # LONG input: guess value column if not named 'detail'
+    val_cols <- setdiff(names(df), c("cluster","period","age_bucket"))
+    if (!"detail" %in% names(df)) {
+      numeric_candidates <- val_cols[vapply(df[val_cols], is.numeric, logical(1))]
+      chosen <- if (length(numeric_candidates) >= 1) numeric_candidates[1] else val_cols[1]
+      df <- dplyr::rename(df, detail = dplyr::all_of(chosen))
+    }
+    out <- df %>% dplyr::select(cluster, period, age_bucket, detail)
+  } else {
+    # WIDE input: gather any columns that contain an age bucket
+    age_cols <- names(df)[vapply(names(df), .is_age_col, logical(1))]
+    if (length(age_cols) == 0) stop("Wide input has no recognizable age-bucket columns.")
+
+    out <- df %>%
+      tidyr::pivot_longer(dplyr::all_of(age_cols),
+                          names_to = "age_bucket", values_to = "detail") %>%
+      dplyr::mutate(
+        # Extract just the bucket piece (e.g., "0-44" from "ucod_age_0-44")
+        age_bucket = stringr::str_extract(age_bucket, "\\d{1,2}([-_ ]\\d{1,2}|\\+)"),
+        age_bucket = gsub("[-_ ]", "-", age_bucket)
+      ) %>%
+      dplyr::select(cluster, period, age_bucket, detail)
+  }
+
+  out %>%
+    dplyr::mutate(
+      cluster = as.character(cluster),
+      period  = as.character(period),
+      age_bucket = as.character(age_bucket),
+      detail  = as.numeric(detail)
+    )
+}
+
+# Load optional age weights (expects columns: age_bucket + weight/prop/w)
+.load_age_weights <- function() {
+  w <- tryCatch(
+    .read_csv_flex(c("age_weights_skew4_global.csv", "age_weights.csv")),
+    error = function(e) NULL
+  )
+  if (is.null(w)) return(NULL)
+
+  # Harmonize names
+  if (!"age_bucket" %in% names(w)) {
+    cand <- names(w)[vapply(names(w), .is_age_col, logical(1))]
+    if (length(cand)) {
+      w <- w %>% tidyr::pivot_longer(dplyr::all_of(cand), names_to="age_bucket", values_to="weight")
+      w <- w %>% dplyr::mutate(age_bucket = gsub("[-_ ]", "-", age_bucket))
+    } else {
+      stop("Weights file lacks 'age_bucket' column and no age-like columns found.")
+    }
+  }
+  if (!"weight" %in% names(w)) {
+    guess <- intersect(names(w), c("w","prop","weight","share","Weight","W"))
+    if (length(guess)==0) stop("Weights file found but no weight column (w/prop/weight/share).")
+    w <- dplyr::rename(w, weight = dplyr::all_of(guess[1]))
+  }
+
+  w %>%
+    dplyr::select(age_bucket, weight) %>%
+    dplyr::mutate(weight = as.numeric(weight)) %>%
+    dplyr::filter(!is.na(weight)) %>%
+    dplyr::mutate(weight = weight / sum(weight))
+}
+
+# Add weighted "ALL" bucket (if weights supplied)
+.prepare_for_mapping <- function(df_age_long, weights = NULL, include_weighted_all = TRUE) {
+  out <- df_age_long
+  if (include_weighted_all && !is.null(weights)) {
+    w_all <- out %>%
+      dplyr::inner_join(weights, by = "age_bucket") %>%
+      dplyr::group_by(cluster, period) %>%
+      dplyr::summarise(detail = stats::weighted.mean(detail, weight, na.rm = TRUE), .groups = "drop") %>%
+      dplyr::mutate(age_bucket = "ALL-weighted")
+    out <- dplyr::bind_rows(out, w_all)
+  }
+  out
+}
+
+# Filename-safe conversion of labels like "80+"
+.sanitize <- function(x) {
+  x %>% gsub("\\+", "plus", ., perl = TRUE) %>% gsub("[^0-9A-Za-z]+", "_", ., perl = TRUE)
+}
+
+# ── Geospatial helpers ────────────────────────────────────────
+.pick_fips <- function(df) {
+  hits <- grep("^GEOID", names(df), value = TRUE)
+  if (length(hits) >= 1) return(df[[hits[1]]])
+  if (all(c("STATEFP","COUNTYFP") %in% names(df))) return(paste0(df$STATEFP, df$COUNTYFP))
+  stop("No GEOID or STATEFP/COUNTYFP columns found in tigris::counties() output.")
+}
+
+build_cluster_sf <- function(period_name, shp_year, ccm_df) {
+  counties_raw <- tigris::counties(year = shp_year, cb = TRUE, class = "sf") %>%
+    sf::st_zm(drop = TRUE, what = "ZM") %>%
+    sf::st_transform(crs_proj)
+
+  counties_sf <- counties_raw %>%
+    mutate(fips = stringr::str_pad(.pick_fips(counties_raw), 5, pad = "0")) %>%
+    select(fips, geometry)
+
+  m <- ccm_df %>% filter(period == period_name)
+  if (nrow(m) == 0) stop("No county→cluster rows for period ", period_name)
+
+  j <- counties_sf %>% left_join(m, by = "fips") %>% filter(!is.na(cluster))
+
+  clusters_sf <- j %>%
+    group_by(cluster) %>%
+    summarise(geometry = sf::st_union(geometry), .groups = "drop")
+  suppressWarnings(clusters_sf)
+}
+
+make_map_age <- function(sf_data, var, title = NULL) {
+  states <- tigris::states(cb = TRUE, class = "sf") %>% sf::st_transform(crs_proj)
+  plot_title <- if (is.null(title)) var else title
+
+  ggplot() +
+    geom_sf(data = sf_data, aes(fill = .data[[var]]), colour = NA) +
+    geom_sf(data = states, fill = NA, colour = "white", linewidth = 0.3) +
+    scale_fill_distiller(palette = "RdBu", direction = 1,
+                         limits = lims_age, oob = scales::squish, na.value = "grey90") +
+    coord_sf(xlim = c(-2500000, 2500000),
+             ylim = c(-2200000, 730000),
+             expand = FALSE) +
+    labs(title = plot_title, fill = NULL) +
+    theme_void() +
+    theme(
+      plot.title = element_text(size = 16, face = "bold", hjust = 0.5),
+      legend.text = element_text(size = 9)
+    )
+}
+
+# ── Read inputs ───────────────────────────────────────────────
+# County→cluster membership
+ccm <- {
+  df <- .read_csv_flex(c("county_cluster_membership.csv"))
+  if (!all(c("fips","period","cluster") %in% names(df))) {
+    stop("county_cluster_membership.csv must have columns: fips, period, cluster")
+  }
+  df %>%
+    mutate(fips = stringr::str_pad(as.character(fips), 5, pad = "0")) %>%
+    select(fips, period, cluster)
+}
+
+# UCOD / MCOD age detail (wide or long)
+ucod_df <- .read_csv_flex(c("ucod_detail_by_age_bucket_wide.csv",
+                            "ucod_detail_by_age_bucket.csv"))
+mcod_df <- .read_csv_flex(c("mcod_detail_by_age_bucket_wide.csv",
+                            "mcod_detail_by_age_bucket.csv"))
+
+ucod_long <- .normalize_age_detail(ucod_df)
+mcod_long <- .normalize_age_detail(mcod_df)
+
+# Optional weights
+age_w <- .load_age_weights()
+
+ucod_map <- .prepare_for_mapping(ucod_long, age_w, include_weighted_all = TRUE)
+mcod_map <- .prepare_for_mapping(mcod_long, age_w, include_weighted_all = TRUE)
+
+stopifnot(all(c("cluster","period","age_bucket","detail") %in% names(ucod_map)))
+stopifnot(all(c("cluster","period","age_bucket","detail") %in% names(mcod_map)))
+
+message("UCOD buckets: ", paste(sort(unique(ucod_map$age_bucket)), collapse=", "))
+message("MCOD buckets: ", paste(sort(unique(mcod_map$age_bucket)), collapse=", "))
+
+# ── Mapping engine ────────────────────────────────────────────
+dir.create(out_dir_age, recursive = TRUE, showWarnings = FALSE)
+
+.do_maps <- function(dat_long, flavor = c("UCOD","MCOD")) {
+  flavor <- match.arg(flavor)
+  base_dir <- file.path(out_dir_age, tolower(flavor))
+  dir.create(base_dir, recursive = TRUE, showWarnings = FALSE)
+
+  # Periods present in data that we have shapefiles for
+  periods <- intersect(names(shapefile_years), unique(dat_long$period))
+
+  # Age buckets to draw
+  buckets <- sort(unique(dat_long$age_bucket))
+  if (!is.null(ONLY_BUCKETS)) {
+    buckets <- intersect(buckets, ONLY_BUCKETS)
+  }
+
+  walk(buckets, function(ab) {
+    for (win in periods) {
+      message("Mapping ", flavor, " — ", ab, " — ", win, "…")
+      yr <- shapefile_years[[win]]
+
+      cl_sf  <- build_cluster_sf(win, yr, ccm)
+      dat_ab <- dat_long %>%
+        filter(period == win, age_bucket == ab) %>%
+        select(cluster, detail)
+
+      sf_cl  <- cl_sf %>% left_join(dat_ab, by = "cluster")
+
+      ttl <- glue("{flavor} detail — {ab} — {win}")
+      p   <- make_map_age(sf_cl, "detail", ttl)
+
+      fout <- file.path(base_dir,
+                        glue("{tolower(flavor)}_detail_{.sanitize(ab)}_{win}.png"))
+      ggsave(filename = fout, plot = p, width = 8, height = 6, dpi = 320, device = "png")
+    }
+  })
+}
+
+# ── Run ───────────────────────────────────────────────────────
+.do_maps(ucod_map, "UCOD")
+.do_maps(mcod_map, "MCOD")
+
+message("Done. Maps saved to: ", out_dir_age)
+```
 
 
 
 
+```{r}
+# ──────────────────────────────────────────────────────────────
+# Map ALL cluster-level metrics from cluster_metrics.csv
+# ──────────────────────────────────────────────────────────────
+
+# 1) Read metrics
+cluster_metrics <- .read_csv_flex("cluster_metrics.csv") %>%
+  dplyr::mutate(cluster = as.character(cluster),
+                period  = as.character(period))
+
+stopifnot(all(c("cluster","period") %in% names(cluster_metrics)))
+
+# 2) Which columns to map? → all numeric (excluding obvious non-metrics)
+metric_cols <- names(cluster_metrics)[vapply(cluster_metrics, is.numeric, logical(1))]
+metric_cols <- setdiff(metric_cols, c("fips", "GEOID", "STATEFP", "COUNTYFP"))
+
+if (length(metric_cols) == 0) stop("No numeric metric columns found in cluster_metrics.csv.")
+
+message("Will map metrics: ", paste(metric_cols, collapse = ", "))
+
+# 3) Optional: per-metric overrides for limits/palette
+#    Add entries here if you want fixed ranges for specific metrics.
+metric_overrides <- list(
+  detail_phillips_refsize = list(lims = c(50, 70), diverging = FALSE),
+  detail_phillips_raw     = list(lims = c(50, 70), diverging = FALSE)
+)
+
+# 4) Helpers for scale selection
+.compute_limits <- function(x) {
+  x <- x[is.finite(x)]
+  if (!length(x)) return(list(lims = c(0, 1), diverging = FALSE))
+  q <- stats::quantile(x, c(0.02, 0.98), na.rm = TRUE, names = FALSE)
+  if (q[1] < 0 && q[2] > 0) {
+    L <- max(abs(q))
+    list(lims = c(-L, L), diverging = TRUE)
+  } else {
+    list(lims = c(q[1], q[2]), diverging = FALSE)
+  }
+}
+
+make_map_metric <- function(sf_data, var, lims, diverging, title = NULL) {
+  states <- tigris::states(cb = TRUE, class = "sf") %>% sf::st_transform(crs_proj)
+  plot_title <- if (is.null(title)) var else title
+
+  p <- ggplot() +
+    geom_sf(data = sf_data, aes(fill = .data[[var]]), colour = NA) +
+    geom_sf(data = states, fill = NA, colour = "white", linewidth = 0.3) +
+    coord_sf(xlim = c(-2500000, 2500000),
+             ylim = c(-2200000, 730000),
+             expand = FALSE) +
+    labs(title = plot_title, fill = NULL) +
+    theme_void() +
+    theme(
+      plot.title = element_text(size = 16, face = "bold", hjust = 0.5),
+      legend.text = element_text(size = 9)
+    )
+
+  if (diverging) {
+    p + scale_fill_distiller(palette = "RdBu", direction = 1,
+                             limits = lims, oob = scales::squish, na.value = "grey90")
+  } else {
+    p + scale_fill_viridis_c(limits = lims, oob = scales::squish, na.value = "grey90")
+  }
+}
+
+# 5) Output dir
+out_dir_metrics <- here("figures", "phillips_maps", "cluster_metrics")
+dir.create(out_dir_metrics, recursive = TRUE, showWarnings = FALSE)
+
+# 6) Iterate: metric × period
+purrr::walk(metric_cols, function(mcol) {
+  # Determine limits & palette (override → else robust auto)
+  if (!is.null(metric_overrides[[mcol]])) {
+    lims_info <- metric_overrides[[mcol]]
+  } else {
+    lims_info <- .compute_limits(cluster_metrics[[mcol]])
+  }
+
+  # Ensure per-metric subdir
+  subdir <- file.path(out_dir_metrics, .sanitize(mcol))
+  dir.create(subdir, recursive = TRUE, showWarnings = FALSE)
+
+  # Restrict to periods we have shapefiles for
+  periods_here <- intersect(names(shapefile_years), unique(cluster_metrics$period))
+  purrr::walk(periods_here, function(win) {
+    message("Mapping metric ", mcol, " — ", win, "…")
+    yr <- shapefile_years[[win]]
+    cl_sf <- build_cluster_sf(win, yr, ccm)
+
+    dat <- cluster_metrics %>%
+      dplyr::filter(period == win) %>%
+      dplyr::select(cluster, !!rlang::sym(mcol)) %>%
+      dplyr::rename(value = !!rlang::sym(mcol))
+
+    # Skip if all NA/constant
+    vals <- dat$value[is.finite(dat$value)]
+    if (!length(vals) || (length(unique(vals)) == 1)) {
+      message("  Skipping ", mcol, " (no finite variance in ", win, ").")
+      return(invisible(NULL))
+    }
+
+    sf_cl <- cl_sf %>% dplyr::left_join(dat, by = "cluster")
+
+    ttl <- glue::glue("{mcol} — {win}")
+    p <- make_map_metric(sf_cl, "value", lims = lims_info$lims,
+                         diverging = isTRUE(lims_info$diverging), title = ttl)
+
+    fout <- file.path(subdir, glue::glue("{.sanitize(mcol)}_{win}.png"))
+    ggsave(filename = fout, plot = p, width = 8, height = 6, dpi = 320, device = "png")
+  })
+})
+
+message("Done. Metric maps saved to: ", out_dir_metrics)
+```
 
 
 
