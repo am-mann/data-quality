@@ -572,14 +572,14 @@ mcod_contrib_root3 <- bind_rows(mcod_contrib_list_root3)
 # Also write "top 10" per cluster (handy for QA)
 topN <- function(df, n = 10) df %>% group_by(period, cluster, family) %>% slice_min(order_by = rank, n = n, with_ties = FALSE) %>% ungroup()
 
-write_csv(cluster_metrics,             file.path(out_dir, "cluster_metrics.csv"))
-write_csv(cluster_members,             file.path(out_dir, "county_cluster_membership.csv"))
-write_csv(ucod_contrib_root3,          file.path(out_dir, "detail_contrib_ucod_root3_full.csv"))
-write_csv(ucod_contrib_gbd,            file.path(out_dir, "detail_contrib_ucod_gbdl3_full.csv"))
-write_csv(mcod_contrib_root3,          file.path(out_dir, "detail_contrib_mcod_root3_full.csv"))
-write_csv(topN(ucod_contrib_root3),    file.path(out_dir, "detail_contrib_ucod_root3_top10.csv"))
-write_csv(topN(ucod_contrib_gbd),      file.path(out_dir, "detail_contrib_ucod_gbdl3_top10.csv"))
-write_csv(topN(mcod_contrib_root3),    file.path(out_dir, "detail_contrib_mcod_root3_top10.csv"))
+write_csv(cluster_metrics,             file.path(out_dir, "cluster_metrics.csv.gz"))
+write_csv(cluster_members,             file.path(out_dir, "county_cluster_membership.csv.gz"))
+write_csv(ucod_contrib_root3,          file.path(out_dir, "detail_contrib_ucod_root3_full.csv.gz"))
+write_csv(ucod_contrib_gbd,            file.path(out_dir, "detail_contrib_ucod_gbdl3_full.csv.gz"))
+write_csv(mcod_contrib_root3,          file.path(out_dir, "detail_contrib_mcod_root3_full.csv.gz"))
+write_csv(topN(ucod_contrib_root3),    file.path(out_dir, "detail_contrib_ucod_root3_top10.csv.gz"))
+write_csv(topN(ucod_contrib_gbd),      file.path(out_dir, "detail_contrib_ucod_gbdl3_top10.csv.gz"))
+write_csv(topN(mcod_contrib_root3),    file.path(out_dir, "detail_contrib_mcod_root3_top10.csv.gz"))
 
 # Summary
 if (nrow(cluster_metrics)) {
