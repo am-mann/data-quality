@@ -1,0 +1,2306 @@
+root3,gbd_l3
+A00,Diarrheal diseases
+A01,Garbage Code (GBD Level 3)
+A02,Diarrheal diseases
+A03,Diarrheal diseases
+A04,Diarrheal diseases
+A05,Diarrheal diseases
+A06,Diarrheal diseases
+A07,Diarrheal diseases
+A08,Diarrheal diseases
+A09,Diarrheal diseases
+A10,Drug-susceptible tuberculosis
+A11,Drug-susceptible tuberculosis
+A12,Drug-susceptible tuberculosis
+A13,Drug-susceptible tuberculosis
+A14,Drug-susceptible tuberculosis
+A15,Drug-susceptible tuberculosis
+A16,Drug-susceptible tuberculosis
+A17,Drug-susceptible tuberculosis
+A18,Drug-susceptible tuberculosis
+A19,Drug-susceptible tuberculosis
+A20,Other unspecified infectious diseases
+A21,Other unspecified infectious diseases
+A22,Other unspecified infectious diseases
+A23,Other unspecified infectious diseases
+A24,Other unspecified infectious diseases
+A25,Other unspecified infectious diseases
+A26,Other unspecified infectious diseases
+A27,Other unspecified infectious diseases
+A28,Other unspecified infectious diseases
+A29,Garbage Code (GBD Level 2)
+A30,Garbage Code (GBD Level 2)
+A31,Garbage Code (GBD Level 3)
+A32,Other unspecified infectious diseases
+A33,Tetanus
+A34,Tetanus
+A35,Tetanus
+A36,Diphtheria
+A37,Pertussis
+A38,Other unspecified infectious diseases
+A39,Meningitis
+A40,Garbage Code (GBD Level 1)
+A41,Garbage Code (GBD Level 1)
+A42,Garbage Code (GBD Level 3)
+A43,Garbage Code (GBD Level 3)
+A44,Garbage Code (GBD Level 3)
+A45,Garbage Code (GBD Level 2)
+A46,Bacterial skin diseases
+A47,Garbage Code (GBD Level 2)
+A48,Garbage Code (GBD Level 1)
+A49,Garbage Code (GBD Level 1)
+A50,Sexually transmitted infections excluding HIV
+A51,Sexually transmitted infections excluding HIV
+A52,Sexually transmitted infections excluding HIV
+A53,Sexually transmitted infections excluding HIV
+A54,Gonococcal infection
+A55,Chlamydial infection
+A56,Chlamydial infection
+A57,Other sexually transmitted infections
+A58,Other sexually transmitted infections
+A59,Garbage Code (GBD Level 1)
+A60,Sexually transmitted infections excluding HIV
+A61,Garbage Code (GBD Level 2)
+A62,Garbage Code (GBD Level 2)
+A63,Other sexually transmitted infections
+A64,Garbage Code (GBD Level 3)
+A65,Other unspecified infectious diseases
+A66,Bacterial skin diseases
+A67,Bacterial skin diseases
+A68,Other neglected tropical diseases
+A69,Other neglected tropical diseases
+A70,Lower respiratory infections
+A71,Garbage Code (GBD Level 1)
+A72,Garbage Code (GBD Level 2)
+A73,Garbage Code (GBD Level 2)
+A74,Garbage Code (GBD Level 1)
+A75,Other neglected tropical diseases
+A76,Garbage Code (GBD Level 2)
+A77,Other neglected tropical diseases
+A78,Other neglected tropical diseases
+A79,Other neglected tropical diseases
+A80,Other intestinal infectious diseases
+A81,Other unspecified infectious diseases
+A82,Rabies
+A83,Encephalitis
+A84,Encephalitis
+A85,Encephalitis
+A86,Encephalitis
+A87,Meningitis
+A88,Other unspecified infectious diseases
+A89,Other unspecified infectious diseases
+A90,Dengue
+A91,Dengue
+A92,Other neglected tropical diseases
+A93,Other neglected tropical diseases
+A94,Other neglected tropical diseases
+A95,Yellow fever
+A96,Other neglected tropical diseases
+A97,Garbage Code (GBD Level 2)
+A98,Ebola
+A99,Garbage Code (GBD Level 3)
+B00,Other unspecified infectious diseases
+B01,Varicella and herpes zoster
+B02,Varicella and herpes zoster
+B03,Other unspecified infectious diseases
+B04,Other unspecified infectious diseases
+B05,Measles
+B06,Other unspecified infectious diseases
+B07,Garbage Code (GBD Level 1)
+B08,Garbage Code (GBD Level 2)
+B09,Garbage Code (GBD Level 2)
+B10,Other unspecified infectious diseases
+B11,Garbage Code (GBD Level 2)
+B12,Garbage Code (GBD Level 2)
+B13,Garbage Code (GBD Level 2)
+B14,Garbage Code (GBD Level 2)
+B15,Acute hepatitis
+B16,Acute hepatitis
+B17,Acute hepatitis
+B18,Cirrhosis and other chronic liver diseases
+B19,Acute hepatitis
+B20,HIV/AIDS
+B21,HIV/AIDS
+B22,HIV/AIDS
+B23,HIV/AIDS
+B24,HIV/AIDS
+B25,Other unspecified infectious diseases
+B26,Other unspecified infectious diseases
+B27,Other unspecified infectious diseases
+B28,Garbage Code (GBD Level 2)
+B29,Garbage Code (GBD Level 2)
+B30,Garbage Code (GBD Level 1)
+B31,Garbage Code (GBD Level 2)
+B32,Garbage Code (GBD Level 2)
+B33,Cardiomyopathy and myocarditis
+B34,Garbage Code (GBD Level 2)
+B35,Garbage Code (GBD Level 1)
+B36,Garbage Code (GBD Level 1)
+B37,Garbage Code (GBD Level 3)
+B38,Garbage Code (GBD Level 3)
+B39,Garbage Code (GBD Level 3)
+B40,Garbage Code (GBD Level 3)
+B41,Garbage Code (GBD Level 3)
+B42,Garbage Code (GBD Level 3)
+B43,Garbage Code (GBD Level 3)
+B44,Garbage Code (GBD Level 3)
+B45,Garbage Code (GBD Level 3)
+B46,Garbage Code (GBD Level 3)
+B47,Other unspecified infectious diseases
+B48,Other unspecified infectious diseases
+B49,Garbage Code (GBD Level 3)
+B50,Malaria
+B51,Malaria
+B52,Malaria
+B53,Malaria
+B54,Garbage Code (GBD Level 4)
+B55,Garbage Code (GBD Level 3)
+B56,African trypanosomiasis
+B57,Chagas disease
+B58,Garbage Code (GBD Level 3)
+B59,Garbage Code (GBD Level 3)
+B60,Other neglected tropical diseases
+B61,Garbage Code (GBD Level 2)
+B62,Garbage Code (GBD Level 2)
+B63,Other sexually transmitted infections
+B64,Garbage Code (GBD Level 4)
+B65,Schistosomiasis
+B67,Cystic echinococcosis
+B68,Garbage Code (GBD Level 2)
+B69,Cysticercosis
+B70,Other neglected tropical diseases
+B71,Other neglected tropical diseases
+B73,Garbage Code (GBD Level 2)
+B74,Garbage Code (GBD Level 2)
+B75,Other neglected tropical diseases
+B76,Garbage Code (GBD Level 2)
+B77,Ascariasis
+B78,Garbage Code (GBD Level 2)
+B79,Garbage Code (GBD Level 2)
+B80,Garbage Code (GBD Level 2)
+B81,Garbage Code (GBD Level 2)
+B82,Garbage Code (GBD Level 4)
+B83,Garbage Code (GBD Level 4)
+B84,Garbage Code (GBD Level 2)
+B85,Garbage Code (GBD Level 1)
+B87,Garbage Code (GBD Level 1)
+B88,Garbage Code (GBD Level 1)
+B89,Garbage Code (GBD Level 3)
+B90,Drug-susceptible tuberculosis
+B91,Other unspecified infectious diseases
+B92,Garbage Code (GBD Level 2)
+B93,Garbage Code (GBD Level 2)
+B94,Encephalitis
+B95,Garbage Code (GBD Level 2)
+B96,Garbage Code (GBD Level 2)
+B97,Garbage Code (GBD Level 2)
+B98,Garbage Code (GBD Level 2)
+B99,Garbage Code (GBD Level 2)
+C00,Lip and oral cavity cancer
+C01,Lip and oral cavity cancer
+C02,Lip and oral cavity cancer
+C03,Lip and oral cavity cancer
+C04,Lip and oral cavity cancer
+C05,Lip and oral cavity cancer
+C06,Lip and oral cavity cancer
+C07,Lip and oral cavity cancer
+C08,Lip and oral cavity cancer
+C09,Other pharynx cancer
+C10,Other pharynx cancer
+C11,Nasopharynx cancer
+C12,Other pharynx cancer
+C13,Other pharynx cancer
+C14,Garbage Code (GBD Level 3)
+C15,Esophageal cancer
+C16,Stomach cancer
+C17,Other malignant neoplasms
+C18,Colon and rectum cancer
+C19,Colon and rectum cancer
+C20,Colon and rectum cancer
+C21,Colon and rectum cancer
+C22,Garbage Code (GBD Level 3)
+C23,Gallbladder and biliary tract cancer
+C24,Gallbladder and biliary tract cancer
+C25,Pancreatic cancer
+C26,Garbage Code (GBD Level 3)
+C27,Garbage Code (GBD Level 3)
+C28,Garbage Code (GBD Level 3)
+C29,Garbage Code (GBD Level 3)
+C30,Other malignant neoplasms
+C31,Other malignant neoplasms
+C32,Larynx cancer
+C33,"Tracheal, bronchus, and lung cancer"
+C34,"Tracheal, bronchus, and lung cancer"
+C35,Garbage Code (GBD Level 3)
+C36,Garbage Code (GBD Level 3)
+C37,Other malignant neoplasms
+C38,Other malignant neoplasms
+C39,Garbage Code (GBD Level 3)
+C40,Malignant neoplasm of bone and articular cartilage
+C41,Malignant neoplasm of bone and articular cartilage
+C42,Garbage Code (GBD Level 3)
+C43,Malignant skin melanoma
+C44,Non-melanoma skin cancer
+C45,Mesothelioma
+C46,Garbage Code (GBD Level 3)
+C47,Neuroblastoma and other peripheral nervous cell tumors
+C48,Other malignant neoplasms
+C49,Soft tissue and other extraosseous sarcomas
+C50,Breast cancer
+C51,Other malignant neoplasms
+C52,Other malignant neoplasms
+C53,Cervical cancer
+C54,Uterine cancer
+C55,Garbage Code (GBD Level 3)
+C56,Ovarian cancer
+C57,Garbage Code (GBD Level 3)
+C58,Maternal disorders
+C59,Garbage Code (GBD Level 3)
+C60,Other malignant neoplasms
+C61,Prostate cancer
+C62,Testicular cancer
+C63,Garbage Code (GBD Level 3)
+C64,Kidney cancer
+C65,Kidney cancer
+C66,Other malignant neoplasms
+C67,Bladder cancer
+C68,Garbage Code (GBD Level 3)
+C69,Eye cancer
+C70,Brain and central nervous system cancer
+C71,Brain and central nervous system cancer
+C72,Brain and central nervous system cancer
+C73,Thyroid cancer
+C74,Garbage Code (GBD Level 3)
+C75,Brain and central nervous system cancer
+C76,Garbage Code (GBD Level 3)
+C77,Garbage Code (GBD Level 3)
+C78,Garbage Code (GBD Level 3)
+C79,Garbage Code (GBD Level 3)
+C80,Garbage Code (GBD Level 3)
+C81,Hodgkin lymphoma
+C82,Non-Hodgkin lymphoma
+C83,Burkitt lymphoma
+C84,Non-Hodgkin lymphoma
+C85,Garbage Code (GBD Level 3)
+C86,Non-Hodgkin lymphoma
+C87,Garbage Code (GBD Level 3)
+C88,Multiple myeloma
+C89,Multiple myeloma
+C90,Multiple myeloma
+C91,Acute lymphoid leukemia
+C92,Acute myeloid leukemia
+C93,Acute myeloid leukemia
+C94,Acute myeloid leukemia
+C95,Leukemia
+C96,Non-Hodgkin lymphoma
+C97,Garbage Code (GBD Level 3)
+D00,Esophageal cancer
+D01,Colon and rectum cancer
+D02,Garbage Code (GBD Level 3)
+D03,Malignant skin melanoma
+D04,Non-melanoma skin cancer
+D05,Breast cancer
+D06,Cervical cancer
+D07,Garbage Code (GBD Level 3)
+D08,Garbage Code (GBD Level 3)
+D09,Bladder cancer
+D10,Garbage Code (GBD Level 3)
+D11,Lip and oral cavity cancer
+D12,Colon and rectum cancer
+D13,Esophageal cancer
+D14,Garbage Code (GBD Level 3)
+D15,Other malignant neoplasms
+D16,Other malignant neoplasms
+D17,Garbage Code (GBD Level 3)
+D18,Garbage Code (GBD Level 3)
+D19,Garbage Code (GBD Level 3)
+D20,Garbage Code (GBD Level 3)
+D21,Garbage Code (GBD Level 3)
+D22,Malignant skin melanoma
+D23,Malignant skin melanoma
+D24,Breast cancer
+D25,Gynecological diseases
+D26,Cervical cancer
+D27,Ovarian cancer
+D28,Garbage Code (GBD Level 3)
+D29,Garbage Code (GBD Level 3)
+D30,Bladder cancer
+D31,Other malignant neoplasms
+D32,Other neoplasms
+D33,Other neoplasms
+D34,Thyroid cancer
+D35,Other malignant neoplasms
+D36,Garbage Code (GBD Level 3)
+D37,Colon and rectum cancer
+D38,Garbage Code (GBD Level 3)
+D39,Garbage Code (GBD Level 3)
+D40,Garbage Code (GBD Level 3)
+D41,Bladder cancer
+D42,Other neoplasms
+D43,Other neoplasms
+D44,Garbage Code (GBD Level 3)
+D45,"Myelodysplastic, myeloproliferative, and other hematopoietic neoplasms"
+D46,"Myelodysplastic, myeloproliferative, and other hematopoietic neoplasms"
+D47,"Myelodysplastic, myeloproliferative, and other hematopoietic neoplasms"
+D48,Breast cancer
+D49,Bladder cancer
+D50,Garbage Code (GBD Level 1)
+D51,Other nutritional deficiencies
+D52,Adverse effects of medical treatment
+D53,Other nutritional deficiencies
+D54,Garbage Code (GBD Level 3)
+D55,G6PD deficiency
+D56,Hemoglobinopathies and hemolytic anemias
+D57,Hemoglobinopathies and hemolytic anemias
+D58,Hemoglobinopathies and hemolytic anemias
+D59,Adverse effects of medical treatment
+D60,Hemoglobinopathies and hemolytic anemias
+D61,Hemoglobinopathies and hemolytic anemias
+D62,Garbage Code (GBD Level 1)
+D63,Chronic kidney disease
+D64,Garbage Code (GBD Level 1)
+D65,Garbage Code (GBD Level 1)
+D66,"Endocrine, metabolic, blood, and immune disorders"
+D67,"Endocrine, metabolic, blood, and immune disorders"
+D68,"Endocrine, metabolic, blood, and immune disorders"
+D69,Adverse effects of medical treatment
+D70,Adverse effects of medical treatment
+D71,"Endocrine, metabolic, blood, and immune disorders"
+D72,"Endocrine, metabolic, blood, and immune disorders"
+D73,"Endocrine, metabolic, blood, and immune disorders"
+D74,"Endocrine, metabolic, blood, and immune disorders"
+D75,"Endocrine, metabolic, blood, and immune disorders"
+D76,"Endocrine, metabolic, blood, and immune disorders"
+D77,"Endocrine, metabolic, blood, and immune disorders"
+D78,Adverse effects of medical treatment
+D79,Garbage Code (GBD Level 3)
+D80,Garbage Code (GBD Level 3)
+D81,Garbage Code (GBD Level 3)
+D82,Garbage Code (GBD Level 3)
+D83,Garbage Code (GBD Level 3)
+D84,Garbage Code (GBD Level 3)
+D85,Garbage Code (GBD Level 3)
+D86,"Endocrine, metabolic, blood, and immune disorders"
+D87,Garbage Code (GBD Level 3)
+D88,Garbage Code (GBD Level 3)
+D89,"Endocrine, metabolic, blood, and immune disorders"
+D90,Garbage Code (GBD Level 3)
+D91,Garbage Code (GBD Level 3)
+D92,Garbage Code (GBD Level 3)
+D93,Garbage Code (GBD Level 3)
+D94,Garbage Code (GBD Level 3)
+D95,Garbage Code (GBD Level 3)
+D96,Garbage Code (GBD Level 3)
+D97,Garbage Code (GBD Level 3)
+D98,Garbage Code (GBD Level 3)
+D99,Garbage Code (GBD Level 3)
+E00,Other nutritional deficiencies
+E01,Other nutritional deficiencies
+E02,Other nutritional deficiencies
+E03,Adverse effects of medical treatment
+E04,"Endocrine, metabolic, blood, and immune disorders"
+E05,"Endocrine, metabolic, blood, and immune disorders"
+E06,Adverse effects of medical treatment
+E07,"Endocrine, metabolic, blood, and immune disorders"
+E08,Garbage Code (GBD Level 3)
+E09,Adverse effects of medical treatment
+E10,Chronic kidney disease
+E11,Chronic kidney disease
+E12,Garbage Code (GBD Level 4)
+E13,Garbage Code (GBD Level 4)
+E14,Garbage Code (GBD Level 4)
+E15,Garbage Code (GBD Level 1)
+E16,Adverse effects of medical treatment
+E17,Garbage Code (GBD Level 3)
+E18,Garbage Code (GBD Level 3)
+E19,Garbage Code (GBD Level 3)
+E20,"Endocrine, metabolic, blood, and immune disorders"
+E21,"Endocrine, metabolic, blood, and immune disorders"
+E22,"Endocrine, metabolic, blood, and immune disorders"
+E23,Adverse effects of medical treatment
+E24,Adverse effects of medical treatment
+E25,"Endocrine, metabolic, blood, and immune disorders"
+E26,"Endocrine, metabolic, blood, and immune disorders"
+E27,Adverse effects of medical treatment
+E28,"Endocrine, metabolic, blood, and immune disorders"
+E29,"Endocrine, metabolic, blood, and immune disorders"
+E30,"Endocrine, metabolic, blood, and immune disorders"
+E31,"Endocrine, metabolic, blood, and immune disorders"
+E32,"Endocrine, metabolic, blood, and immune disorders"
+E33,"Endocrine, metabolic, blood, and immune disorders"
+E34,"Endocrine, metabolic, blood, and immune disorders"
+E35,Garbage Code (GBD Level 3)
+E36,Adverse effects of medical treatment
+E37,Garbage Code (GBD Level 3)
+E38,Garbage Code (GBD Level 3)
+E39,Garbage Code (GBD Level 3)
+E40,Protein-energy malnutrition
+E41,Protein-energy malnutrition
+E42,Protein-energy malnutrition
+E43,Protein-energy malnutrition
+E44,Protein-energy malnutrition
+E45,Protein-energy malnutrition
+E46,Protein-energy malnutrition
+E47,Garbage Code (GBD Level 3)
+E48,Garbage Code (GBD Level 3)
+E49,Garbage Code (GBD Level 3)
+E50,Garbage Code (GBD Level 1)
+E51,Other nutritional deficiencies
+E52,Other nutritional deficiencies
+E53,Other nutritional deficiencies
+E54,Other nutritional deficiencies
+E55,Other nutritional deficiencies
+E56,Other nutritional deficiencies
+E57,Other nutritional deficiencies
+E58,Other nutritional deficiencies
+E59,Other nutritional deficiencies
+E60,Other nutritional deficiencies
+E61,Other nutritional deficiencies
+E62,Garbage Code (GBD Level 3)
+E63,Other nutritional deficiencies
+E64,Garbage Code (GBD Level 1)
+E65,"Endocrine, metabolic, blood, and immune disorders"
+E66,Adverse effects of medical treatment
+E67,"Endocrine, metabolic, blood, and immune disorders"
+E68,"Endocrine, metabolic, blood, and immune disorders"
+E69,Garbage Code (GBD Level 3)
+E70,"Endocrine, metabolic, blood, and immune disorders"
+E71,"Endocrine, metabolic, blood, and immune disorders"
+E72,"Endocrine, metabolic, blood, and immune disorders"
+E73,"Endocrine, metabolic, blood, and immune disorders"
+E74,"Endocrine, metabolic, blood, and immune disorders"
+E75,"Endocrine, metabolic, blood, and immune disorders"
+E76,"Endocrine, metabolic, blood, and immune disorders"
+E77,"Endocrine, metabolic, blood, and immune disorders"
+E78,"Endocrine, metabolic, blood, and immune disorders"
+E79,"Endocrine, metabolic, blood, and immune disorders"
+E80,"Endocrine, metabolic, blood, and immune disorders"
+E81,"Endocrine, metabolic, blood, and immune disorders"
+E82,"Endocrine, metabolic, blood, and immune disorders"
+E83,"Endocrine, metabolic, blood, and immune disorders"
+E84,"Endocrine, metabolic, blood, and immune disorders"
+E85,"Endocrine, metabolic, blood, and immune disorders"
+E86,Garbage Code (GBD Level 1)
+E87,Garbage Code (GBD Level 1)
+E88,Adverse effects of medical treatment
+E89,Adverse effects of medical treatment
+E90,Garbage Code (GBD Level 3)
+E91,Garbage Code (GBD Level 3)
+E92,Garbage Code (GBD Level 3)
+E93,Garbage Code (GBD Level 3)
+E94,Garbage Code (GBD Level 3)
+E95,Garbage Code (GBD Level 3)
+E96,Garbage Code (GBD Level 3)
+E97,Garbage Code (GBD Level 3)
+E98,Garbage Code (GBD Level 3)
+E99,Garbage Code (GBD Level 3)
+F00,Alzheimer's disease and other dementias
+F01,Alzheimer's disease and other dementias
+F02,Alzheimer's disease and other dementias
+F03,Alzheimer's disease and other dementias
+F04,Garbage Code (GBD Level 3)
+F05,Garbage Code (GBD Level 3)
+F06,Garbage Code (GBD Level 1)
+F07,Encephalitis
+F08,Garbage Code (GBD Level 3)
+F09,Garbage Code (GBD Level 1)
+F10,Alcohol use disorders
+F11,Drug use disorders
+F12,Drug use disorders
+F13,Drug use disorders
+F14,Cocaine use disorders
+F15,Amphetamine use disorders
+F16,Drug use disorders
+F17,Garbage Code (GBD Level 2)
+F18,Drug use disorders
+F19,Garbage Code (GBD Level 1)
+F20,Garbage Code (GBD Level 1)
+F21,Garbage Code (GBD Level 1)
+F22,Garbage Code (GBD Level 1)
+F23,Garbage Code (GBD Level 1)
+F25,Garbage Code (GBD Level 1)
+F26,Garbage Code (GBD Level 1)
+F27,Garbage Code (GBD Level 1)
+F28,Garbage Code (GBD Level 1)
+F29,Garbage Code (GBD Level 1)
+F30,Garbage Code (GBD Level 1)
+F31,Garbage Code (GBD Level 1)
+F32,Garbage Code (GBD Level 1)
+F33,Garbage Code (GBD Level 1)
+F34,Garbage Code (GBD Level 1)
+F35,Garbage Code (GBD Level 1)
+F36,Garbage Code (GBD Level 1)
+F37,Garbage Code (GBD Level 1)
+F38,Garbage Code (GBD Level 1)
+F39,Garbage Code (GBD Level 1)
+F40,Garbage Code (GBD Level 1)
+F41,Garbage Code (GBD Level 1)
+F42,Garbage Code (GBD Level 1)
+F43,Garbage Code (GBD Level 1)
+F44,Garbage Code (GBD Level 1)
+F45,Garbage Code (GBD Level 1)
+F46,Garbage Code (GBD Level 1)
+F47,Garbage Code (GBD Level 1)
+F48,Garbage Code (GBD Level 1)
+F49,Garbage Code (GBD Level 1)
+F50,Anorexia nervosa
+F51,Garbage Code (GBD Level 1)
+F52,Garbage Code (GBD Level 1)
+F53,Garbage Code (GBD Level 1)
+F54,Garbage Code (GBD Level 1)
+F55,Garbage Code (GBD Level 1)
+F56,Garbage Code (GBD Level 1)
+F57,Garbage Code (GBD Level 1)
+F58,Garbage Code (GBD Level 1)
+F59,Garbage Code (GBD Level 1)
+F60,Garbage Code (GBD Level 1)
+F61,Garbage Code (GBD Level 1)
+F62,Garbage Code (GBD Level 1)
+F63,Garbage Code (GBD Level 1)
+F64,Garbage Code (GBD Level 1)
+F65,Garbage Code (GBD Level 1)
+F66,Garbage Code (GBD Level 1)
+F67,Garbage Code (GBD Level 1)
+F68,Garbage Code (GBD Level 1)
+F69,Garbage Code (GBD Level 1)
+F70,Garbage Code (GBD Level 1)
+F71,Garbage Code (GBD Level 1)
+F72,Garbage Code (GBD Level 1)
+F73,Garbage Code (GBD Level 1)
+F74,Garbage Code (GBD Level 1)
+F75,Garbage Code (GBD Level 1)
+F76,Garbage Code (GBD Level 1)
+F77,Garbage Code (GBD Level 1)
+F78,Garbage Code (GBD Level 1)
+F79,Garbage Code (GBD Level 1)
+F80,Garbage Code (GBD Level 1)
+F81,Garbage Code (GBD Level 1)
+F82,Garbage Code (GBD Level 1)
+F83,Garbage Code (GBD Level 1)
+F84,Garbage Code (GBD Level 1)
+F85,Garbage Code (GBD Level 1)
+F86,Garbage Code (GBD Level 1)
+F87,Garbage Code (GBD Level 1)
+F88,Garbage Code (GBD Level 1)
+F89,Garbage Code (GBD Level 1)
+F90,Garbage Code (GBD Level 1)
+F91,Garbage Code (GBD Level 1)
+F92,Garbage Code (GBD Level 1)
+F93,Garbage Code (GBD Level 1)
+F94,Garbage Code (GBD Level 1)
+F95,Garbage Code (GBD Level 1)
+F96,Garbage Code (GBD Level 1)
+F97,Garbage Code (GBD Level 1)
+F98,Garbage Code (GBD Level 1)
+F99,Garbage Code (GBD Level 1)
+G00,Garbage Code (GBD Level 4)
+G01,Garbage Code (GBD Level 4)
+G02,Garbage Code (GBD Level 4)
+G03,Garbage Code (GBD Level 4)
+G04,Encephalitis
+G05,Encephalitis
+G06,Garbage Code (GBD Level 1)
+G07,Garbage Code (GBD Level 1)
+G08,Garbage Code (GBD Level 1)
+G09,Garbage Code (GBD Level 3)
+G10,Other neurological disorders
+G11,Other neurological disorders
+G12,Motor neuron disease
+G13,Other neurological disorders
+G14,Other unspecified infectious diseases
+G15,Garbage Code (GBD Level 3)
+G16,Garbage Code (GBD Level 3)
+G17,Garbage Code (GBD Level 3)
+G18,Garbage Code (GBD Level 3)
+G19,Garbage Code (GBD Level 3)
+G20,Parkinson's disease
+G21,Adverse effects of medical treatment
+G22,Garbage Code (GBD Level 3)
+G23,Other neurological disorders
+G24,Adverse effects of medical treatment
+G25,Adverse effects of medical treatment
+G26,Other neurological disorders
+G27,Garbage Code (GBD Level 3)
+G28,Garbage Code (GBD Level 3)
+G29,Garbage Code (GBD Level 3)
+G30,Alzheimer's disease and other dementias
+G31,Alcohol use disorders
+G32,Garbage Code (GBD Level 1)
+G33,Garbage Code (GBD Level 3)
+G34,Garbage Code (GBD Level 3)
+G35,Multiple sclerosis
+G36,Other neurological disorders
+G37,Other neurological disorders
+G38,Garbage Code (GBD Level 3)
+G39,Garbage Code (GBD Level 3)
+G40,Idiopathic epilepsy
+G41,Idiopathic epilepsy
+G42,Garbage Code (GBD Level 3)
+G43,Garbage Code (GBD Level 1)
+G44,Garbage Code (GBD Level 1)
+G45,Ischemic stroke
+G46,Ischemic stroke
+G47,Garbage Code (GBD Level 1)
+G48,Garbage Code (GBD Level 3)
+G49,Garbage Code (GBD Level 3)
+G50,Garbage Code (GBD Level 1)
+G51,Garbage Code (GBD Level 1)
+G52,Garbage Code (GBD Level 1)
+G53,Garbage Code (GBD Level 1)
+G54,Garbage Code (GBD Level 1)
+G55,Garbage Code (GBD Level 1)
+G56,Garbage Code (GBD Level 1)
+G57,Garbage Code (GBD Level 1)
+G58,Garbage Code (GBD Level 1)
+G59,Garbage Code (GBD Level 1)
+G60,Garbage Code (GBD Level 1)
+G61,Other neurological disorders
+G62,Alcohol use disorders
+G63,Garbage Code (GBD Level 1)
+G64,Garbage Code (GBD Level 1)
+G65,Garbage Code (GBD Level 1)
+G66,Garbage Code (GBD Level 3)
+G67,Garbage Code (GBD Level 3)
+G68,Garbage Code (GBD Level 3)
+G69,Garbage Code (GBD Level 3)
+G70,Other neurological disorders
+G71,Congenital birth defects
+G72,Adverse effects of medical treatment
+G73,Other neurological disorders
+G74,Garbage Code (GBD Level 3)
+G75,Garbage Code (GBD Level 3)
+G76,Garbage Code (GBD Level 3)
+G77,Garbage Code (GBD Level 3)
+G78,Garbage Code (GBD Level 3)
+G79,Garbage Code (GBD Level 3)
+G80,Garbage Code (GBD Level 1)
+G81,Garbage Code (GBD Level 1)
+G82,Garbage Code (GBD Level 1)
+G83,Garbage Code (GBD Level 1)
+G84,Garbage Code (GBD Level 3)
+G85,Garbage Code (GBD Level 3)
+G86,Garbage Code (GBD Level 3)
+G87,Garbage Code (GBD Level 3)
+G88,Garbage Code (GBD Level 3)
+G89,Garbage Code (GBD Level 1)
+G90,Other neurological disorders
+G91,Garbage Code (GBD Level 1)
+G92,Garbage Code (GBD Level 1)
+G93,Adverse effects of medical treatment
+G94,Garbage Code (GBD Level 1)
+G95,Other neurological disorders
+G96,Garbage Code (GBD Level 3)
+G97,Adverse effects of medical treatment
+G98,Garbage Code (GBD Level 3)
+G99,Garbage Code (GBD Level 1)
+H05,Bacterial skin diseases
+H06,Garbage Code (GBD Level 1)
+H07,Garbage Code (GBD Level 1)
+H08,Garbage Code (GBD Level 1)
+H09,Garbage Code (GBD Level 1)
+H10,Garbage Code (GBD Level 1)
+H11,Garbage Code (GBD Level 1)
+H12,Garbage Code (GBD Level 1)
+H13,Garbage Code (GBD Level 1)
+H14,Garbage Code (GBD Level 1)
+H15,Garbage Code (GBD Level 1)
+H16,Garbage Code (GBD Level 1)
+H17,Garbage Code (GBD Level 1)
+H18,Garbage Code (GBD Level 1)
+H19,Garbage Code (GBD Level 1)
+H20,Garbage Code (GBD Level 1)
+H21,Garbage Code (GBD Level 1)
+H22,Garbage Code (GBD Level 1)
+H23,Garbage Code (GBD Level 1)
+H24,Garbage Code (GBD Level 1)
+H25,Garbage Code (GBD Level 1)
+H26,Garbage Code (GBD Level 1)
+H27,Garbage Code (GBD Level 1)
+H28,Garbage Code (GBD Level 1)
+H29,Garbage Code (GBD Level 1)
+H30,Garbage Code (GBD Level 1)
+H31,Garbage Code (GBD Level 1)
+H32,Garbage Code (GBD Level 1)
+H33,Garbage Code (GBD Level 1)
+H34,Garbage Code (GBD Level 1)
+H35,Garbage Code (GBD Level 1)
+H36,Garbage Code (GBD Level 1)
+H37,Garbage Code (GBD Level 1)
+H38,Garbage Code (GBD Level 1)
+H39,Garbage Code (GBD Level 1)
+H40,Garbage Code (GBD Level 1)
+H41,Garbage Code (GBD Level 1)
+H42,Garbage Code (GBD Level 1)
+H43,Garbage Code (GBD Level 1)
+H44,Garbage Code (GBD Level 1)
+H45,Garbage Code (GBD Level 1)
+H46,Garbage Code (GBD Level 1)
+H47,Garbage Code (GBD Level 1)
+H48,Garbage Code (GBD Level 1)
+H49,Garbage Code (GBD Level 1)
+H50,Garbage Code (GBD Level 1)
+H51,Garbage Code (GBD Level 1)
+H52,Garbage Code (GBD Level 1)
+H53,Garbage Code (GBD Level 1)
+H54,Garbage Code (GBD Level 1)
+H55,Garbage Code (GBD Level 1)
+H56,Garbage Code (GBD Level 1)
+H57,Garbage Code (GBD Level 1)
+H58,Garbage Code (GBD Level 1)
+H59,Garbage Code (GBD Level 1)
+H60,Garbage Code (GBD Level 1)
+H61,Garbage Code (GBD Level 1)
+H62,Garbage Code (GBD Level 1)
+H63,Garbage Code (GBD Level 1)
+H64,Garbage Code (GBD Level 1)
+H65,Garbage Code (GBD Level 1)
+H66,Garbage Code (GBD Level 1)
+H67,Garbage Code (GBD Level 1)
+H68,Garbage Code (GBD Level 1)
+H69,Garbage Code (GBD Level 1)
+H70,Otitis media
+H71,Garbage Code (GBD Level 1)
+H72,Garbage Code (GBD Level 1)
+H73,Garbage Code (GBD Level 1)
+H74,Garbage Code (GBD Level 1)
+H75,Garbage Code (GBD Level 1)
+H76,Garbage Code (GBD Level 1)
+H77,Garbage Code (GBD Level 1)
+H78,Garbage Code (GBD Level 1)
+H79,Garbage Code (GBD Level 1)
+H80,Garbage Code (GBD Level 1)
+H81,Garbage Code (GBD Level 1)
+H82,Garbage Code (GBD Level 1)
+H83,Garbage Code (GBD Level 1)
+H84,Garbage Code (GBD Level 1)
+H85,Garbage Code (GBD Level 1)
+H86,Garbage Code (GBD Level 1)
+H87,Garbage Code (GBD Level 1)
+H88,Garbage Code (GBD Level 1)
+H89,Garbage Code (GBD Level 1)
+H90,Garbage Code (GBD Level 1)
+H91,Garbage Code (GBD Level 1)
+H92,Garbage Code (GBD Level 1)
+H93,Garbage Code (GBD Level 1)
+H94,Garbage Code (GBD Level 1)
+H95,Garbage Code (GBD Level 1)
+H96,Garbage Code (GBD Level 1)
+H97,Garbage Code (GBD Level 1)
+H98,Garbage Code (GBD Level 1)
+H99,Garbage Code (GBD Level 1)
+I00,Garbage Code (GBD Level 3)
+I01,Rheumatic heart disease
+I02,Other unspecified infectious diseases
+I03,Garbage Code (GBD Level 3)
+I04,Garbage Code (GBD Level 3)
+I05,Rheumatic heart disease
+I06,Rheumatic heart disease
+I07,Rheumatic heart disease
+I08,Rheumatic heart disease
+I09,Rheumatic heart disease
+I10,Garbage Code (GBD Level 2)
+I11,Hypertensive heart disease
+I12,Chronic kidney disease
+I13,Chronic kidney disease
+I14,Garbage Code (GBD Level 3)
+I15,Garbage Code (GBD Level 2)
+I16,Garbage Code (GBD Level 3)
+I17,Garbage Code (GBD Level 3)
+I18,Garbage Code (GBD Level 3)
+I19,Garbage Code (GBD Level 3)
+I20,Ischemic heart disease
+I21,Ischemic heart disease
+I22,Ischemic heart disease
+I23,Ischemic heart disease
+I24,Ischemic heart disease
+I25,Ischemic heart disease
+I26,Garbage Code (GBD Level 1)
+I27,Garbage Code (GBD Level 2)
+I28,Other cardiovascular and circulatory diseases
+I29,Garbage Code (GBD Level 3)
+I30,Other cardiovascular and circulatory diseases
+I31,Garbage Code (GBD Level 1)
+I32,Other cardiovascular and circulatory diseases
+I33,Endocarditis
+I34,Non-rheumatic degenerative mitral valve disease
+I35,Non-rheumatic calcific aortic valve disease
+I36,Non-rheumatic valvular heart disease
+I37,Garbage Code (GBD Level 4)
+I38,Endocarditis
+I39,Endocarditis
+I40,Cardiomyopathy and myocarditis
+I41,Cardiomyopathy and myocarditis
+I42,Alcoholic cardiomyopathy
+I43,Cardiomyopathy and myocarditis
+I44,Garbage Code (GBD Level 3)
+I45,Garbage Code (GBD Level 3)
+I46,Garbage Code (GBD Level 1)
+I47,Other cardiovascular and circulatory diseases
+I48,Atrial fibrillation and flutter
+I49,Garbage Code (GBD Level 3)
+I50,Garbage Code (GBD Level 1)
+I51,Cardiomyopathy and myocarditis
+I52,Garbage Code (GBD Level 3)
+I53,Garbage Code (GBD Level 3)
+I54,Garbage Code (GBD Level 3)
+I55,Garbage Code (GBD Level 3)
+I56,Garbage Code (GBD Level 3)
+I57,Garbage Code (GBD Level 3)
+I58,Garbage Code (GBD Level 3)
+I59,Garbage Code (GBD Level 3)
+I60,Stroke
+I61,Intracerebral hemorrhage
+I62,Intracerebral hemorrhage
+I63,Ischemic stroke
+I64,Garbage Code (GBD Level 4)
+I65,Ischemic stroke
+I66,Ischemic stroke
+I67,Garbage Code (GBD Level 2)
+I68,Garbage Code (GBD Level 4)
+I69,Garbage Code (GBD Level 4)
+I70,Garbage Code (GBD Level 2)
+I71,Aortic aneurysm
+I72,Other cardiovascular and circulatory diseases
+I73,Lower extremity peripheral arterial disease
+I74,Garbage Code (GBD Level 2)
+I75,Garbage Code (GBD Level 2)
+I76,Garbage Code (GBD Level 1)
+I77,Other cardiovascular and circulatory diseases
+I78,Other cardiovascular and circulatory diseases
+I79,Other cardiovascular and circulatory diseases
+I80,Other cardiovascular and circulatory diseases
+I81,Other cardiovascular and circulatory diseases
+I82,Other cardiovascular and circulatory diseases
+I83,Other cardiovascular and circulatory diseases
+I84,Other digestive diseases
+I85,Cirrhosis and other chronic liver diseases
+I86,Other cardiovascular and circulatory diseases
+I87,Other cardiovascular and circulatory diseases
+I88,Other cardiovascular and circulatory diseases
+I89,Bacterial skin diseases
+I90,Garbage Code (GBD Level 3)
+I91,Garbage Code (GBD Level 3)
+I92,Garbage Code (GBD Level 3)
+I93,Garbage Code (GBD Level 3)
+I94,Garbage Code (GBD Level 3)
+I95,Adverse effects of medical treatment
+I96,Garbage Code (GBD Level 3)
+I97,Adverse effects of medical treatment
+I98,Adverse effects of medical treatment
+J00,Upper respiratory infections
+J01,Upper respiratory infections
+J02,Garbage Code (GBD Level 3)
+J03,Garbage Code (GBD Level 3)
+J04,Garbage Code (GBD Level 3)
+J05,Upper respiratory infections
+J06,Garbage Code (GBD Level 3)
+J07,Garbage Code (GBD Level 4)
+J08,Garbage Code (GBD Level 4)
+J09,Influenza
+J10,Influenza
+J11,Influenza
+J12,Lower respiratory infections
+J13,Lower respiratory infections
+J14,H influenzae type B pneumonia
+J15,Garbage Code (GBD Level 4)
+J16,Lower respiratory infections
+J17,Garbage Code (GBD Level 4)
+J18,Garbage Code (GBD Level 4)
+J19,Garbage Code (GBD Level 4)
+J20,Lower respiratory infections
+J21,Lower respiratory infections
+J22,Garbage Code (GBD Level 4)
+J23,Garbage Code (GBD Level 4)
+J24,Garbage Code (GBD Level 4)
+J25,Garbage Code (GBD Level 4)
+J26,Garbage Code (GBD Level 4)
+J27,Garbage Code (GBD Level 4)
+J28,Garbage Code (GBD Level 4)
+J29,Garbage Code (GBD Level 4)
+J30,Other chronic respiratory diseases
+J31,Other chronic respiratory diseases
+J32,Other chronic respiratory diseases
+J33,Other chronic respiratory diseases
+J34,Other chronic respiratory diseases
+J35,Other chronic respiratory diseases
+J36,Upper respiratory infections
+J37,Other chronic respiratory diseases
+J38,Other chronic respiratory diseases
+J39,Other chronic respiratory diseases
+J40,Garbage Code (GBD Level 3)
+J41,Chronic obstructive pulmonary disease
+J42,Chronic obstructive pulmonary disease
+J43,Chronic obstructive pulmonary disease
+J44,Chronic obstructive pulmonary disease
+J45,Asthma
+J46,Asthma
+J47,Garbage Code (GBD Level 3)
+J48,Garbage Code (GBD Level 3)
+J49,Garbage Code (GBD Level 3)
+J50,Garbage Code (GBD Level 3)
+J51,Garbage Code (GBD Level 3)
+J52,Garbage Code (GBD Level 3)
+J53,Garbage Code (GBD Level 3)
+J54,Garbage Code (GBD Level 3)
+J55,Garbage Code (GBD Level 3)
+J56,Garbage Code (GBD Level 3)
+J57,Garbage Code (GBD Level 3)
+J58,Garbage Code (GBD Level 3)
+J59,Garbage Code (GBD Level 3)
+J60,Coal workers pneumoconiosis
+J61,Asbestosis
+J62,Pneumoconiosis
+J63,Other pneumoconiosis
+J64,Garbage Code (GBD Level 4)
+J65,Garbage Code (GBD Level 3)
+J66,Other chronic respiratory diseases
+J67,Other chronic respiratory diseases
+J68,Other chronic respiratory diseases
+J69,Garbage Code (GBD Level 1)
+J70,Adverse effects of medical treatment
+J71,Garbage Code (GBD Level 3)
+J72,Garbage Code (GBD Level 3)
+J73,Garbage Code (GBD Level 3)
+J74,Garbage Code (GBD Level 3)
+J75,Garbage Code (GBD Level 3)
+J76,Garbage Code (GBD Level 3)
+J77,Garbage Code (GBD Level 3)
+J78,Garbage Code (GBD Level 3)
+J79,Garbage Code (GBD Level 3)
+J80,Garbage Code (GBD Level 1)
+J81,Garbage Code (GBD Level 1)
+J82,Other chronic respiratory diseases
+J83,Garbage Code (GBD Level 3)
+J84,Interstitial lung disease and pulmonary sarcoidosis
+J85,Garbage Code (GBD Level 1)
+J86,Garbage Code (GBD Level 1)
+J87,Garbage Code (GBD Level 3)
+J88,Garbage Code (GBD Level 3)
+J89,Garbage Code (GBD Level 3)
+J90,Garbage Code (GBD Level 1)
+J91,Lower respiratory infections
+J92,Asbestosis
+J93,Garbage Code (GBD Level 1)
+J94,Garbage Code (GBD Level 1)
+J95,Adverse effects of medical treatment
+J96,Garbage Code (GBD Level 1)
+J97,Garbage Code (GBD Level 3)
+J98,Garbage Code (GBD Level 1)
+J99,Garbage Code (GBD Level 3)
+K00,Garbage Code (GBD Level 1)
+K01,Garbage Code (GBD Level 1)
+K02,Garbage Code (GBD Level 1)
+K03,Garbage Code (GBD Level 1)
+K04,Garbage Code (GBD Level 1)
+K05,Garbage Code (GBD Level 1)
+K06,Garbage Code (GBD Level 1)
+K07,Garbage Code (GBD Level 1)
+K08,Garbage Code (GBD Level 1)
+K09,Garbage Code (GBD Level 1)
+K10,Garbage Code (GBD Level 1)
+K11,Garbage Code (GBD Level 1)
+K12,Garbage Code (GBD Level 1)
+K13,Garbage Code (GBD Level 1)
+K14,Garbage Code (GBD Level 1)
+K15,Garbage Code (GBD Level 1)
+K16,Garbage Code (GBD Level 1)
+K17,Garbage Code (GBD Level 1)
+K18,Garbage Code (GBD Level 1)
+K19,Garbage Code (GBD Level 1)
+K20,Other digestive diseases
+K21,Garbage Code (GBD Level 3)
+K22,Garbage Code (GBD Level 3)
+K23,Other digestive diseases
+K24,Other digestive diseases
+K25,Peptic ulcer disease
+K26,Peptic ulcer disease
+K27,Peptic ulcer disease
+K28,Peptic ulcer disease
+K29,Gastritis and duodenitis
+K30,Garbage Code (GBD Level 1)
+K31,Garbage Code (GBD Level 3)
+K32,Garbage Code (GBD Level 3)
+K33,Garbage Code (GBD Level 3)
+K34,Garbage Code (GBD Level 3)
+K35,Appendicitis
+K36,Appendicitis
+K37,Appendicitis
+K38,Appendicitis
+K39,Garbage Code (GBD Level 3)
+K40,"Inguinal, femoral, and abdominal hernia"
+K41,"Inguinal, femoral, and abdominal hernia"
+K42,"Inguinal, femoral, and abdominal hernia"
+K43,Adverse effects of medical treatment
+K44,"Inguinal, femoral, and abdominal hernia"
+K45,"Inguinal, femoral, and abdominal hernia"
+K46,"Inguinal, femoral, and abdominal hernia"
+K47,Garbage Code (GBD Level 3)
+K48,Garbage Code (GBD Level 3)
+K49,Garbage Code (GBD Level 3)
+K50,Crohn's disease
+K51,Inflammatory bowel disease
+K52,Adverse effects of medical treatment
+K53,Garbage Code (GBD Level 3)
+K54,Garbage Code (GBD Level 3)
+K55,Vascular intestinal disorders
+K56,Paralytic ileus and intestinal obstruction
+K57,Other digestive diseases
+K58,Other digestive diseases
+K59,Other digestive diseases
+K60,Other digestive diseases
+K61,Other digestive diseases
+K62,Adverse effects of medical treatment
+K63,Garbage Code (GBD Level 3)
+K64,Other digestive diseases
+K65,Garbage Code (GBD Level 1)
+K66,Garbage Code (GBD Level 1)
+K67,Chlamydial infection
+K68,Garbage Code (GBD Level 1)
+K69,Garbage Code (GBD Level 3)
+K70,Cirrhosis and other chronic liver diseases
+K71,Cirrhosis and other chronic liver diseases
+K72,Garbage Code (GBD Level 1)
+K73,Cirrhosis and other chronic liver diseases
+K74,Cirrhosis and other chronic liver diseases
+K75,Cirrhosis and other chronic liver diseases
+K76,Cirrhosis and other chronic liver diseases
+K77,Cirrhosis and other chronic liver diseases
+K78,Garbage Code (GBD Level 3)
+K79,Garbage Code (GBD Level 3)
+K80,Gallbladder and biliary diseases
+K81,Gallbladder and biliary diseases
+K82,Gallbladder and biliary diseases
+K83,Gallbladder and biliary diseases
+K84,Garbage Code (GBD Level 3)
+K85,Pancreatitis
+K86,Pancreatitis
+K87,Garbage Code (GBD Level 3)
+K88,Garbage Code (GBD Level 3)
+K89,Garbage Code (GBD Level 3)
+K90,Other digestive diseases
+K91,Adverse effects of medical treatment
+K92,Garbage Code (GBD Level 2)
+K93,Chagas disease
+K94,Adverse effects of medical treatment
+K95,Adverse effects of medical treatment
+K96,Garbage Code (GBD Level 3)
+K97,Garbage Code (GBD Level 3)
+K98,Garbage Code (GBD Level 3)
+K99,Garbage Code (GBD Level 3)
+L00,Bacterial skin diseases
+L01,Bacterial skin diseases
+L02,Bacterial skin diseases
+L03,Bacterial skin diseases
+L04,Bacterial skin diseases
+L05,Bacterial skin diseases
+L06,Garbage Code (GBD Level 3)
+L07,Garbage Code (GBD Level 3)
+L08,Bacterial skin diseases
+L09,Garbage Code (GBD Level 3)
+L10,Other skin and subcutaneous diseases
+L11,Other skin and subcutaneous diseases
+L12,Other skin and subcutaneous diseases
+L13,Other skin and subcutaneous diseases
+L14,Other skin and subcutaneous diseases
+L15,Garbage Code (GBD Level 3)
+L16,Garbage Code (GBD Level 3)
+L17,Garbage Code (GBD Level 3)
+L18,Garbage Code (GBD Level 3)
+L19,Garbage Code (GBD Level 3)
+L20,Garbage Code (GBD Level 1)
+L21,Garbage Code (GBD Level 1)
+L22,Garbage Code (GBD Level 1)
+L23,Garbage Code (GBD Level 1)
+L24,Garbage Code (GBD Level 1)
+L25,Garbage Code (GBD Level 1)
+L26,Garbage Code (GBD Level 1)
+L27,Garbage Code (GBD Level 1)
+L28,Garbage Code (GBD Level 1)
+L29,Garbage Code (GBD Level 1)
+L30,Garbage Code (GBD Level 1)
+L31,Garbage Code (GBD Level 3)
+L32,Garbage Code (GBD Level 3)
+L33,Garbage Code (GBD Level 3)
+L34,Garbage Code (GBD Level 3)
+L35,Garbage Code (GBD Level 3)
+L36,Garbage Code (GBD Level 3)
+L37,Garbage Code (GBD Level 3)
+L38,Garbage Code (GBD Level 3)
+L39,Garbage Code (GBD Level 3)
+L40,Garbage Code (GBD Level 1)
+L41,Garbage Code (GBD Level 1)
+L42,Garbage Code (GBD Level 1)
+L43,Garbage Code (GBD Level 1)
+L44,Garbage Code (GBD Level 1)
+L45,Garbage Code (GBD Level 1)
+L46,Garbage Code (GBD Level 1)
+L47,Garbage Code (GBD Level 1)
+L48,Garbage Code (GBD Level 1)
+L49,Garbage Code (GBD Level 1)
+L50,Garbage Code (GBD Level 1)
+L51,Other skin and subcutaneous diseases
+L52,Garbage Code (GBD Level 1)
+L53,Garbage Code (GBD Level 1)
+L54,Garbage Code (GBD Level 1)
+L55,Environmental heat and cold exposure
+L56,Environmental heat and cold exposure
+L57,Garbage Code (GBD Level 1)
+L58,Environmental heat and cold exposure
+L59,Garbage Code (GBD Level 1)
+L60,Garbage Code (GBD Level 1)
+L61,Garbage Code (GBD Level 1)
+L62,Garbage Code (GBD Level 1)
+L63,Garbage Code (GBD Level 1)
+L64,Garbage Code (GBD Level 1)
+L65,Garbage Code (GBD Level 1)
+L66,Garbage Code (GBD Level 1)
+L67,Garbage Code (GBD Level 1)
+L68,Garbage Code (GBD Level 1)
+L69,Garbage Code (GBD Level 3)
+L70,Garbage Code (GBD Level 1)
+L71,Garbage Code (GBD Level 1)
+L72,Garbage Code (GBD Level 1)
+L73,Garbage Code (GBD Level 1)
+L74,Garbage Code (GBD Level 1)
+L75,Garbage Code (GBD Level 1)
+L76,Garbage Code (GBD Level 1)
+L77,Garbage Code (GBD Level 3)
+L78,Garbage Code (GBD Level 3)
+L79,Garbage Code (GBD Level 3)
+L80,Garbage Code (GBD Level 1)
+L81,Garbage Code (GBD Level 1)
+L82,Garbage Code (GBD Level 1)
+L83,Garbage Code (GBD Level 1)
+L84,Garbage Code (GBD Level 1)
+L85,Garbage Code (GBD Level 1)
+L86,Garbage Code (GBD Level 1)
+L87,Garbage Code (GBD Level 1)
+L88,Bacterial skin diseases
+L89,Decubitus ulcer
+L90,Garbage Code (GBD Level 1)
+L91,Garbage Code (GBD Level 1)
+L92,Garbage Code (GBD Level 1)
+L93,Other musculoskeletal disorders
+L94,Garbage Code (GBD Level 1)
+L95,Garbage Code (GBD Level 1)
+L96,Garbage Code (GBD Level 1)
+L97,Bacterial skin diseases
+L98,Bacterial skin diseases
+L99,Garbage Code (GBD Level 1)
+M00,Other musculoskeletal disorders
+M01,Other musculoskeletal disorders
+M02,Other musculoskeletal disorders
+M03,Other musculoskeletal disorders
+M04,Garbage Code (GBD Level 1)
+M05,Rheumatoid arthritis
+M06,Rheumatoid arthritis
+M07,Other musculoskeletal disorders
+M08,Other musculoskeletal disorders
+M09,Crohn's disease
+M10,Garbage Code (GBD Level 1)
+M11,Garbage Code (GBD Level 1)
+M12,Garbage Code (GBD Level 1)
+M13,Garbage Code (GBD Level 1)
+M14,Garbage Code (GBD Level 1)
+M15,Garbage Code (GBD Level 1)
+M16,Garbage Code (GBD Level 1)
+M17,Garbage Code (GBD Level 1)
+M18,Garbage Code (GBD Level 1)
+M19,Garbage Code (GBD Level 1)
+M20,Garbage Code (GBD Level 1)
+M21,Garbage Code (GBD Level 1)
+M22,Garbage Code (GBD Level 1)
+M23,Garbage Code (GBD Level 1)
+M24,Garbage Code (GBD Level 1)
+M25,Garbage Code (GBD Level 1)
+M26,Garbage Code (GBD Level 1)
+M27,Garbage Code (GBD Level 1)
+M28,Garbage Code (GBD Level 1)
+M29,Garbage Code (GBD Level 1)
+M30,Other musculoskeletal disorders
+M31,Other musculoskeletal disorders
+M32,Other musculoskeletal disorders
+M33,Other neurological disorders
+M34,Other musculoskeletal disorders
+M35,Other musculoskeletal disorders
+M36,Other musculoskeletal disorders
+M37,Garbage Code (GBD Level 1)
+M38,Garbage Code (GBD Level 1)
+M39,Garbage Code (GBD Level 1)
+M40,Other musculoskeletal disorders
+M41,Other musculoskeletal disorders
+M42,Other musculoskeletal disorders
+M43,Garbage Code (GBD Level 1)
+M44,Garbage Code (GBD Level 1)
+M45,Garbage Code (GBD Level 1)
+M46,Garbage Code (GBD Level 1)
+M47,Garbage Code (GBD Level 1)
+M48,Garbage Code (GBD Level 1)
+M49,Drug-susceptible tuberculosis
+M50,Garbage Code (GBD Level 1)
+M51,Garbage Code (GBD Level 1)
+M52,Garbage Code (GBD Level 1)
+M53,Garbage Code (GBD Level 1)
+M54,Garbage Code (GBD Level 1)
+M55,Garbage Code (GBD Level 1)
+M56,Garbage Code (GBD Level 1)
+M57,Garbage Code (GBD Level 1)
+M58,Garbage Code (GBD Level 1)
+M59,Garbage Code (GBD Level 1)
+M60,Garbage Code (GBD Level 1)
+M61,Garbage Code (GBD Level 1)
+M62,Garbage Code (GBD Level 1)
+M63,Garbage Code (GBD Level 1)
+M64,Garbage Code (GBD Level 1)
+M65,Garbage Code (GBD Level 1)
+M66,Garbage Code (GBD Level 1)
+M67,Garbage Code (GBD Level 1)
+M68,Garbage Code (GBD Level 1)
+M69,Garbage Code (GBD Level 1)
+M70,Garbage Code (GBD Level 1)
+M71,Garbage Code (GBD Level 1)
+M72,Bacterial skin diseases
+M73,Garbage Code (GBD Level 1)
+M74,Garbage Code (GBD Level 1)
+M75,Garbage Code (GBD Level 1)
+M76,Garbage Code (GBD Level 1)
+M77,Garbage Code (GBD Level 1)
+M78,Garbage Code (GBD Level 1)
+M79,Garbage Code (GBD Level 1)
+M80,Other musculoskeletal disorders
+M81,Other musculoskeletal disorders
+M82,Other musculoskeletal disorders
+M83,Garbage Code (GBD Level 1)
+M84,Garbage Code (GBD Level 1)
+M85,Garbage Code (GBD Level 1)
+M86,Garbage Code (GBD Level 1)
+M87,Adverse effects of medical treatment
+M88,Other musculoskeletal disorders
+M89,Garbage Code (GBD Level 1)
+M90,Garbage Code (GBD Level 1)
+M91,Garbage Code (GBD Level 1)
+M92,Garbage Code (GBD Level 1)
+M93,Garbage Code (GBD Level 1)
+M94,Garbage Code (GBD Level 1)
+M95,Garbage Code (GBD Level 1)
+M96,Garbage Code (GBD Level 1)
+M97,Garbage Code (GBD Level 1)
+M98,Garbage Code (GBD Level 1)
+M99,Garbage Code (GBD Level 1)
+N00,Acute glomerulonephritis
+N01,Acute glomerulonephritis
+N02,Chronic kidney disease
+N03,Chronic kidney disease
+N04,Chronic kidney disease
+N05,Chronic kidney disease
+N06,Chronic kidney disease
+N07,Chronic kidney disease
+N08,Chronic kidney disease
+N09,Garbage Code (GBD Level 3)
+N10,Urinary diseases and male infertility
+N11,Urinary diseases and male infertility
+N12,Urinary diseases and male infertility
+N13,Garbage Code (GBD Level 3)
+N14,Adverse effects of medical treatment
+N15,Chronic kidney disease
+N16,Urinary diseases and male infertility
+N17,Garbage Code (GBD Level 1)
+N18,Chronic kidney disease
+N19,Garbage Code (GBD Level 1)
+N20,Urinary diseases and male infertility
+N21,Urinary diseases and male infertility
+N22,Urinary diseases and male infertility
+N23,Urinary diseases and male infertility
+N24,Garbage Code (GBD Level 3)
+N25,Other urinary diseases
+N26,Other urinary diseases
+N27,Other urinary diseases
+N28,Garbage Code (GBD Level 3)
+N29,Other urinary diseases
+N30,Adverse effects of medical treatment
+N31,Other urinary diseases
+N32,Garbage Code (GBD Level 1)
+N33,Garbage Code (GBD Level 1)
+N34,Urinary diseases and male infertility
+N35,Garbage Code (GBD Level 1)
+N36,Other urinary diseases
+N37,Garbage Code (GBD Level 1)
+N38,Garbage Code (GBD Level 3)
+N39,Garbage Code (GBD Level 1)
+N40,Garbage Code (GBD Level 3)
+N41,Other urinary diseases
+N42,Garbage Code (GBD Level 1)
+N43,Garbage Code (GBD Level 1)
+N44,Garbage Code (GBD Level 1)
+N45,Other urinary diseases
+N46,Garbage Code (GBD Level 1)
+N47,Garbage Code (GBD Level 1)
+N48,Garbage Code (GBD Level 1)
+N49,Other urinary diseases
+N50,Garbage Code (GBD Level 1)
+N51,Garbage Code (GBD Level 1)
+N52,Garbage Code (GBD Level 1)
+N53,Garbage Code (GBD Level 1)
+N54,Garbage Code (GBD Level 3)
+N55,Garbage Code (GBD Level 3)
+N56,Garbage Code (GBD Level 3)
+N57,Garbage Code (GBD Level 3)
+N58,Garbage Code (GBD Level 3)
+N59,Garbage Code (GBD Level 3)
+N60,Other benign and in situ neoplasms
+N61,Garbage Code (GBD Level 1)
+N62,Garbage Code (GBD Level 1)
+N63,Garbage Code (GBD Level 1)
+N64,Garbage Code (GBD Level 1)
+N65,Adverse effects of medical treatment
+N66,Garbage Code (GBD Level 3)
+N67,Garbage Code (GBD Level 3)
+N68,Garbage Code (GBD Level 3)
+N69,Garbage Code (GBD Level 3)
+N70,Garbage Code (GBD Level 2)
+N71,Garbage Code (GBD Level 2)
+N72,Gynecological diseases
+N73,Garbage Code (GBD Level 2)
+N74,Drug-susceptible tuberculosis
+N75,Gynecological diseases
+N76,Gynecological diseases
+N77,Gynecological diseases
+N78,Garbage Code (GBD Level 3)
+N79,Garbage Code (GBD Level 3)
+N80,Endometriosis
+N81,Genital prolapse
+N82,Garbage Code (GBD Level 1)
+N83,Gynecological diseases
+N84,Garbage Code (GBD Level 3)
+N85,Garbage Code (GBD Level 3)
+N86,Garbage Code (GBD Level 3)
+N87,Other neoplasms
+N88,Garbage Code (GBD Level 3)
+N89,Garbage Code (GBD Level 3)
+N90,Garbage Code (GBD Level 3)
+N91,Garbage Code (GBD Level 1)
+N92,Garbage Code (GBD Level 3)
+N93,Garbage Code (GBD Level 3)
+N94,Garbage Code (GBD Level 3)
+N95,Garbage Code (GBD Level 1)
+N96,Maternal abortion and miscarriage
+N97,Garbage Code (GBD Level 1)
+N98,Maternal disorders
+N99,Adverse effects of medical treatment
+O00,Ectopic pregnancy
+O01,Maternal abortion and miscarriage
+O02,Maternal abortion and miscarriage
+O03,Maternal abortion and miscarriage
+O04,Maternal abortion and miscarriage
+O05,Maternal abortion and miscarriage
+O06,Maternal abortion and miscarriage
+O07,Maternal abortion and miscarriage
+O08,Garbage Code (GBD Level 3)
+O09,Maternal disorders
+O10,Maternal disorders
+O11,Maternal disorders
+O12,Maternal disorders
+O13,Maternal disorders
+O14,Maternal disorders
+O15,Maternal disorders
+O16,Maternal disorders
+O17,Garbage Code (GBD Level 3)
+O18,Garbage Code (GBD Level 3)
+O19,Garbage Code (GBD Level 3)
+O20,Maternal disorders
+O21,Maternal disorders
+O22,Maternal disorders
+O23,Maternal disorders
+O24,Indirect maternal deaths
+O25,Indirect maternal deaths
+O26,Maternal disorders
+O27,Garbage Code (GBD Level 3)
+O28,Maternal disorders
+O29,Maternal disorders
+O30,Maternal disorders
+O31,Maternal disorders
+O32,Maternal disorders
+O33,Maternal disorders
+O34,Maternal disorders
+O35,Maternal disorders
+O36,Maternal disorders
+O37,Garbage Code (GBD Level 3)
+O38,Garbage Code (GBD Level 3)
+O39,Garbage Code (GBD Level 3)
+O40,Maternal disorders
+O41,Maternal disorders
+O42,Maternal disorders
+O43,Maternal disorders
+O44,Maternal disorders
+O45,Maternal disorders
+O46,Maternal disorders
+O47,Maternal disorders
+O48,Maternal disorders
+O49,Garbage Code (GBD Level 3)
+O50,Garbage Code (GBD Level 3)
+O51,Garbage Code (GBD Level 3)
+O52,Garbage Code (GBD Level 3)
+O53,Garbage Code (GBD Level 3)
+O54,Garbage Code (GBD Level 3)
+O55,Garbage Code (GBD Level 3)
+O56,Garbage Code (GBD Level 3)
+O57,Garbage Code (GBD Level 3)
+O58,Garbage Code (GBD Level 3)
+O59,Garbage Code (GBD Level 3)
+O60,Maternal disorders
+O61,Maternal disorders
+O62,Maternal disorders
+O63,Maternal disorders
+O64,Maternal disorders
+O65,Maternal disorders
+O66,Maternal disorders
+O67,Maternal disorders
+O68,Maternal disorders
+O69,Maternal disorders
+O70,Maternal disorders
+O71,Maternal disorders
+O72,Maternal disorders
+O73,Maternal disorders
+O74,Maternal disorders
+O75,Maternal disorders
+O76,Maternal disorders
+O77,Maternal disorders
+O78,Garbage Code (GBD Level 3)
+O79,Garbage Code (GBD Level 3)
+O80,Maternal disorders
+O81,Maternal disorders
+O82,Maternal disorders
+O83,Maternal disorders
+O84,Maternal disorders
+O85,Maternal disorders
+O86,Maternal disorders
+O87,Maternal disorders
+O88,Maternal disorders
+O89,Maternal disorders
+O90,Maternal disorders
+O91,Maternal disorders
+O92,Maternal disorders
+O93,Garbage Code (GBD Level 3)
+O94,Garbage Code (GBD Level 3)
+O95,Garbage Code (GBD Level 3)
+O96,Late maternal deaths
+O97,Late maternal deaths
+O98,Indirect maternal deaths
+O99,Indirect maternal deaths
+P00,Neonatal disorders
+P01,Neonatal disorders
+P02,Neonatal disorders
+P03,Neonatal disorders
+P04,Alcohol use disorders
+P05,Neonatal disorders
+P06,Garbage Code (GBD Level 3)
+P07,Neonatal disorders
+P08,Neonatal disorders
+P09,Neonatal disorders
+P10,Neonatal disorders
+P11,Neonatal disorders
+P12,Neonatal disorders
+P13,Neonatal disorders
+P14,Neonatal disorders
+P15,Neonatal disorders
+P16,Garbage Code (GBD Level 3)
+P17,Garbage Code (GBD Level 3)
+P18,Garbage Code (GBD Level 3)
+P19,Neonatal disorders
+P20,Neonatal disorders
+P21,Neonatal disorders
+P22,Neonatal disorders
+P23,Garbage Code (GBD Level 4)
+P24,Neonatal disorders
+P25,Neonatal disorders
+P26,Neonatal disorders
+P27,Neonatal disorders
+P28,Neonatal disorders
+P29,Neonatal disorders
+P30,Garbage Code (GBD Level 3)
+P31,Garbage Code (GBD Level 3)
+P32,Garbage Code (GBD Level 3)
+P33,Garbage Code (GBD Level 3)
+P34,Garbage Code (GBD Level 3)
+P35,Acute hepatitis
+P36,Neonatal disorders
+P37,Drug-susceptible tuberculosis
+P38,Neonatal disorders
+P39,Neonatal disorders
+P40,Garbage Code (GBD Level 3)
+P41,Garbage Code (GBD Level 3)
+P42,Garbage Code (GBD Level 3)
+P43,Garbage Code (GBD Level 3)
+P44,Garbage Code (GBD Level 3)
+P45,Garbage Code (GBD Level 3)
+P46,Garbage Code (GBD Level 3)
+P47,Garbage Code (GBD Level 3)
+P48,Garbage Code (GBD Level 3)
+P49,Garbage Code (GBD Level 3)
+P50,Neonatal disorders
+P51,Neonatal disorders
+P52,Neonatal disorders
+P53,Neonatal disorders
+P54,Neonatal disorders
+P55,Hemolytic disease and other neonatal jaundice
+P56,Hemolytic disease and other neonatal jaundice
+P57,Hemolytic disease and other neonatal jaundice
+P58,Hemolytic disease and other neonatal jaundice
+P59,Hemolytic disease and other neonatal jaundice
+P60,Neonatal disorders
+P61,Neonatal disorders
+P62,Garbage Code (GBD Level 3)
+P63,Garbage Code (GBD Level 3)
+P64,Garbage Code (GBD Level 3)
+P65,Garbage Code (GBD Level 3)
+P66,Garbage Code (GBD Level 3)
+P67,Garbage Code (GBD Level 3)
+P68,Garbage Code (GBD Level 3)
+P69,Garbage Code (GBD Level 3)
+P70,Diabetes mellitus
+P71,Neonatal disorders
+P72,Neonatal disorders
+P73,Garbage Code (GBD Level 3)
+P74,Neonatal disorders
+P75,Neonatal disorders
+P76,Neonatal disorders
+P77,Neonatal disorders
+P78,Neonatal disorders
+P79,Garbage Code (GBD Level 3)
+P80,Neonatal disorders
+P81,Neonatal disorders
+P82,Garbage Code (GBD Level 3)
+P83,Neonatal disorders
+P84,Neonatal disorders
+P85,Garbage Code (GBD Level 3)
+P86,Garbage Code (GBD Level 3)
+P87,Garbage Code (GBD Level 3)
+P88,Garbage Code (GBD Level 3)
+P89,Garbage Code (GBD Level 3)
+P90,Neonatal disorders
+P91,Neonatal disorders
+P92,Neonatal disorders
+P93,Adverse effects of medical treatment
+P94,Neonatal disorders
+P95,Still Born
+P96,Adverse effects of medical treatment
+P97,Garbage Code (GBD Level 3)
+P98,Garbage Code (GBD Level 3)
+P99,Garbage Code (GBD Level 3)
+Q00,Congenital birth defects
+Q01,Congenital birth defects
+Q02,Congenital birth defects
+Q03,Congenital birth defects
+Q04,Congenital birth defects
+Q05,Congenital birth defects
+Q06,Congenital birth defects
+Q07,Congenital birth defects
+Q08,Garbage Code (GBD Level 3)
+Q09,Garbage Code (GBD Level 3)
+Q10,Congenital birth defects
+Q11,Congenital birth defects
+Q12,Congenital birth defects
+Q13,Congenital birth defects
+Q14,Congenital birth defects
+Q15,Congenital birth defects
+Q16,Congenital birth defects
+Q17,Congenital birth defects
+Q18,Congenital birth defects
+Q19,Garbage Code (GBD Level 3)
+Q20,Congenital birth defects
+Q21,Congenital birth defects
+Q22,Congenital birth defects
+Q23,Congenital birth defects
+Q24,Congenital birth defects
+Q25,Congenital birth defects
+Q26,Congenital birth defects
+Q27,Congenital birth defects
+Q28,Congenital birth defects
+Q29,Garbage Code (GBD Level 3)
+Q30,Congenital birth defects
+Q31,Congenital birth defects
+Q32,Congenital birth defects
+Q33,Congenital birth defects
+Q34,Congenital birth defects
+Q35,Congenital birth defects
+Q36,Congenital birth defects
+Q37,Congenital birth defects
+Q38,Congenital birth defects
+Q39,Congenital birth defects
+Q40,Congenital birth defects
+Q41,Congenital birth defects
+Q42,Congenital birth defects
+Q43,Congenital birth defects
+Q44,Congenital birth defects
+Q45,Congenital birth defects
+Q46,Garbage Code (GBD Level 3)
+Q47,Garbage Code (GBD Level 3)
+Q48,Garbage Code (GBD Level 3)
+Q49,Garbage Code (GBD Level 3)
+Q50,Congenital birth defects
+Q51,Congenital birth defects
+Q52,Congenital birth defects
+Q53,Congenital birth defects
+Q54,Congenital birth defects
+Q55,Congenital birth defects
+Q56,Congenital birth defects
+Q57,Congenital birth defects
+Q58,Congenital birth defects
+Q59,Congenital birth defects
+Q60,Congenital birth defects
+Q61,Chronic kidney disease
+Q62,Chronic kidney disease
+Q63,Congenital birth defects
+Q64,Congenital birth defects
+Q65,Congenital birth defects
+Q66,Congenital birth defects
+Q67,Congenital birth defects
+Q68,Congenital birth defects
+Q69,Congenital birth defects
+Q70,Congenital birth defects
+Q71,Congenital birth defects
+Q72,Congenital birth defects
+Q73,Congenital birth defects
+Q74,Congenital birth defects
+Q75,Congenital birth defects
+Q76,Congenital birth defects
+Q77,Congenital birth defects
+Q78,Congenital birth defects
+Q79,Congenital birth defects
+Q80,Congenital birth defects
+Q81,Congenital birth defects
+Q82,Congenital birth defects
+Q83,Congenital birth defects
+Q84,Congenital birth defects
+Q85,Congenital birth defects
+Q86,Alcohol use disorders
+Q87,Congenital birth defects
+Q88,Garbage Code (GBD Level 3)
+Q89,Congenital birth defects
+Q90,Congenital birth defects
+Q91,Congenital birth defects
+Q92,Congenital birth defects
+Q93,Congenital birth defects
+Q94,Garbage Code (GBD Level 3)
+Q95,Congenital birth defects
+Q96,Congenital birth defects
+Q97,Congenital birth defects
+Q98,Congenital birth defects
+Q99,Congenital birth defects
+R01,Garbage Code (GBD Level 3)
+R02,Garbage Code (GBD Level 1)
+R03,Garbage Code (GBD Level 1)
+R04,Garbage Code (GBD Level 1)
+R05,Garbage Code (GBD Level 2)
+R06,Garbage Code (GBD Level 2)
+R07,Garbage Code (GBD Level 1)
+R08,Garbage Code (GBD Level 1)
+R09,Garbage Code (GBD Level 1)
+R10,Garbage Code (GBD Level 1)
+R11,Garbage Code (GBD Level 1)
+R12,Garbage Code (GBD Level 1)
+R13,Garbage Code (GBD Level 2)
+R14,Garbage Code (GBD Level 1)
+R15,Garbage Code (GBD Level 1)
+R16,Garbage Code (GBD Level 1)
+R17,Garbage Code (GBD Level 1)
+R18,Garbage Code (GBD Level 1)
+R19,Diarrheal diseases
+R20,Garbage Code (GBD Level 1)
+R21,Garbage Code (GBD Level 1)
+R22,Garbage Code (GBD Level 1)
+R23,Garbage Code (GBD Level 1)
+R24,Garbage Code (GBD Level 1)
+R25,Garbage Code (GBD Level 1)
+R26,Garbage Code (GBD Level 1)
+R27,Garbage Code (GBD Level 1)
+R28,Garbage Code (GBD Level 1)
+R29,Garbage Code (GBD Level 1)
+R30,Garbage Code (GBD Level 1)
+R31,Garbage Code (GBD Level 3)
+R32,Garbage Code (GBD Level 1)
+R33,Garbage Code (GBD Level 1)
+R34,Garbage Code (GBD Level 1)
+R35,Garbage Code (GBD Level 1)
+R36,Garbage Code (GBD Level 1)
+R37,Garbage Code (GBD Level 1)
+R38,Garbage Code (GBD Level 1)
+R39,Garbage Code (GBD Level 1)
+R40,Garbage Code (GBD Level 1)
+R41,Garbage Code (GBD Level 1)
+R42,Garbage Code (GBD Level 1)
+R43,Garbage Code (GBD Level 1)
+R44,Garbage Code (GBD Level 1)
+R45,Garbage Code (GBD Level 1)
+R46,Garbage Code (GBD Level 1)
+R47,Garbage Code (GBD Level 1)
+R48,Garbage Code (GBD Level 1)
+R49,Garbage Code (GBD Level 1)
+R50,Adverse effects of medical treatment
+R51,Garbage Code (GBD Level 1)
+R52,Garbage Code (GBD Level 1)
+R53,Garbage Code (GBD Level 1)
+R54,Garbage Code (GBD Level 1)
+R55,Garbage Code (GBD Level 1)
+R56,Garbage Code (GBD Level 1)
+R57,Garbage Code (GBD Level 1)
+R58,Garbage Code (GBD Level 1)
+R59,Garbage Code (GBD Level 1)
+R60,Garbage Code (GBD Level 1)
+R61,Garbage Code (GBD Level 1)
+R62,Garbage Code (GBD Level 1)
+R63,Garbage Code (GBD Level 1)
+R64,Garbage Code (GBD Level 1)
+R65,Garbage Code (GBD Level 1)
+R66,Garbage Code (GBD Level 1)
+R67,Garbage Code (GBD Level 1)
+R68,Garbage Code (GBD Level 1)
+R69,Garbage Code (GBD Level 1)
+R70,Garbage Code (GBD Level 1)
+R71,Garbage Code (GBD Level 1)
+R72,Garbage Code (GBD Level 1)
+R73,Garbage Code (GBD Level 4)
+R74,Garbage Code (GBD Level 1)
+R75,Garbage Code (GBD Level 1)
+R76,Garbage Code (GBD Level 1)
+R77,Garbage Code (GBD Level 1)
+R78,Alcohol use disorders
+R79,Garbage Code (GBD Level 1)
+R80,Garbage Code (GBD Level 1)
+R81,Garbage Code (GBD Level 1)
+R82,Garbage Code (GBD Level 1)
+R83,Garbage Code (GBD Level 1)
+R84,Garbage Code (GBD Level 1)
+R85,Garbage Code (GBD Level 1)
+R86,Garbage Code (GBD Level 1)
+R87,Garbage Code (GBD Level 1)
+R88,Garbage Code (GBD Level 1)
+R89,Garbage Code (GBD Level 1)
+R90,Garbage Code (GBD Level 1)
+R91,Garbage Code (GBD Level 1)
+R92,Garbage Code (GBD Level 1)
+R93,Garbage Code (GBD Level 1)
+R94,Garbage Code (GBD Level 1)
+R95,Sudden infant death syndrome
+R96,Garbage Code (GBD Level 1)
+R97,Garbage Code (GBD Level 1)
+R98,Garbage Code (GBD Level 1)
+R99,Garbage Code (GBD Level 1)
+S00,Garbage Code (GBD Level 2)
+T98,Garbage Code (GBD Level 2)
+U00,Conflict and terrorism
+U01,Conflict and terrorism
+U02,Conflict and terrorism
+U03,Conflict and terrorism
+U04,Influenza
+U05,Garbage Code (GBD Level 1)
+U06,Zika virus
+U07,COVID-19
+U08,Garbage Code (GBD Level 1)
+U09,Garbage Code (GBD Level 1)
+U10,Garbage Code (GBD Level 1)
+U11,Garbage Code (GBD Level 1)
+U12,Garbage Code (GBD Level 1)
+U13,Garbage Code (GBD Level 1)
+U14,Garbage Code (GBD Level 1)
+U15,Garbage Code (GBD Level 1)
+U16,Garbage Code (GBD Level 1)
+U17,Garbage Code (GBD Level 1)
+U18,Garbage Code (GBD Level 1)
+U19,Garbage Code (GBD Level 1)
+U20,Garbage Code (GBD Level 1)
+U21,Garbage Code (GBD Level 1)
+U22,Garbage Code (GBD Level 1)
+U23,Garbage Code (GBD Level 1)
+U24,Garbage Code (GBD Level 1)
+U25,Garbage Code (GBD Level 1)
+U26,Garbage Code (GBD Level 1)
+U27,Garbage Code (GBD Level 1)
+U28,Garbage Code (GBD Level 1)
+U29,Garbage Code (GBD Level 1)
+U30,Garbage Code (GBD Level 1)
+U31,Garbage Code (GBD Level 1)
+U32,Garbage Code (GBD Level 1)
+U33,Garbage Code (GBD Level 1)
+U34,Garbage Code (GBD Level 1)
+U35,Garbage Code (GBD Level 1)
+U36,Garbage Code (GBD Level 1)
+U37,Garbage Code (GBD Level 1)
+U38,Garbage Code (GBD Level 1)
+U39,Garbage Code (GBD Level 1)
+U40,Garbage Code (GBD Level 1)
+U41,Garbage Code (GBD Level 1)
+U42,Garbage Code (GBD Level 1)
+U43,Garbage Code (GBD Level 1)
+U44,Garbage Code (GBD Level 1)
+U45,Garbage Code (GBD Level 1)
+U46,Garbage Code (GBD Level 1)
+U47,Garbage Code (GBD Level 1)
+U48,Garbage Code (GBD Level 1)
+U49,Garbage Code (GBD Level 1)
+U50,Garbage Code (GBD Level 1)
+U51,Garbage Code (GBD Level 1)
+U52,Garbage Code (GBD Level 1)
+U53,Garbage Code (GBD Level 1)
+U54,Garbage Code (GBD Level 1)
+U55,Garbage Code (GBD Level 1)
+U56,Garbage Code (GBD Level 1)
+U57,Garbage Code (GBD Level 1)
+U58,Garbage Code (GBD Level 1)
+U59,Garbage Code (GBD Level 1)
+U60,Garbage Code (GBD Level 1)
+U61,Garbage Code (GBD Level 1)
+U62,Garbage Code (GBD Level 1)
+U63,Garbage Code (GBD Level 1)
+U64,Garbage Code (GBD Level 1)
+U65,Garbage Code (GBD Level 1)
+U66,Garbage Code (GBD Level 1)
+U67,Garbage Code (GBD Level 1)
+U68,Garbage Code (GBD Level 1)
+U69,Garbage Code (GBD Level 1)
+U70,Garbage Code (GBD Level 1)
+U71,Garbage Code (GBD Level 1)
+U72,Garbage Code (GBD Level 1)
+U73,Garbage Code (GBD Level 1)
+U74,Garbage Code (GBD Level 1)
+U75,Garbage Code (GBD Level 1)
+U76,Garbage Code (GBD Level 1)
+U77,Garbage Code (GBD Level 1)
+U78,Garbage Code (GBD Level 1)
+U79,Garbage Code (GBD Level 1)
+U80,Garbage Code (GBD Level 1)
+U81,Garbage Code (GBD Level 1)
+U82,Other unspecified infectious diseases
+U83,Other unspecified infectious diseases
+U84,Multidrug-resistant tuberculosis without extensive drug resistance
+U85,Other unspecified infectious diseases
+U86,Other unspecified infectious diseases
+U87,Other unspecified infectious diseases
+U88,Other unspecified infectious diseases
+U89,Garbage Code (GBD Level 1)
+U90,Garbage Code (GBD Level 1)
+U91,Garbage Code (GBD Level 1)
+U92,Garbage Code (GBD Level 1)
+U93,Garbage Code (GBD Level 1)
+U94,Garbage Code (GBD Level 1)
+U95,Garbage Code (GBD Level 1)
+U96,Garbage Code (GBD Level 1)
+U97,Garbage Code (GBD Level 1)
+U98,Garbage Code (GBD Level 1)
+U99,Garbage Code (GBD Level 1)
+V00,Other transport injuries
+V01,Pedestrian road injuries
+V02,Pedestrian road injuries
+V03,Pedestrian road injuries
+V04,Pedestrian road injuries
+V05,Other transport injuries
+V06,Pedestrian road injuries
+V07,Pedestrian road injuries
+V08,Pedestrian road injuries
+V09,Pedestrian road injuries
+V10,Cyclist road injuries
+V11,Cyclist road injuries
+V12,Cyclist road injuries
+V13,Cyclist road injuries
+V14,Cyclist road injuries
+V15,Cyclist road injuries
+V16,Cyclist road injuries
+V17,Cyclist road injuries
+V18,Cyclist road injuries
+V19,Cyclist road injuries
+V20,Motorcyclist road injuries
+V21,Motorcyclist road injuries
+V22,Motorcyclist road injuries
+V23,Motorcyclist road injuries
+V24,Motorcyclist road injuries
+V25,Motorcyclist road injuries
+V26,Motorcyclist road injuries
+V27,Motorcyclist road injuries
+V28,Motorcyclist road injuries
+V29,Motorcyclist road injuries
+V30,Motor vehicle road injuries
+V31,Motor vehicle road injuries
+V32,Motor vehicle road injuries
+V33,Motor vehicle road injuries
+V34,Motor vehicle road injuries
+V35,Motor vehicle road injuries
+V36,Motor vehicle road injuries
+V37,Motor vehicle road injuries
+V38,Motor vehicle road injuries
+V39,Motor vehicle road injuries
+V40,Motor vehicle road injuries
+V41,Motor vehicle road injuries
+V42,Motor vehicle road injuries
+V43,Motor vehicle road injuries
+V44,Motor vehicle road injuries
+V45,Motor vehicle road injuries
+V46,Motor vehicle road injuries
+V47,Motor vehicle road injuries
+V48,Motor vehicle road injuries
+V49,Motor vehicle road injuries
+V50,Motor vehicle road injuries
+V51,Motor vehicle road injuries
+V52,Motor vehicle road injuries
+V53,Motor vehicle road injuries
+V54,Motor vehicle road injuries
+V55,Motor vehicle road injuries
+V56,Motor vehicle road injuries
+V57,Motor vehicle road injuries
+V58,Motor vehicle road injuries
+V59,Motor vehicle road injuries
+V60,Motor vehicle road injuries
+V61,Motor vehicle road injuries
+V62,Motor vehicle road injuries
+V63,Motor vehicle road injuries
+V64,Motor vehicle road injuries
+V65,Motor vehicle road injuries
+V66,Motor vehicle road injuries
+V67,Motor vehicle road injuries
+V68,Motor vehicle road injuries
+V69,Motor vehicle road injuries
+V70,Motor vehicle road injuries
+V71,Motor vehicle road injuries
+V72,Motor vehicle road injuries
+V73,Motor vehicle road injuries
+V74,Motor vehicle road injuries
+V75,Motor vehicle road injuries
+V76,Motor vehicle road injuries
+V77,Motor vehicle road injuries
+V78,Motor vehicle road injuries
+V79,Motor vehicle road injuries
+V80,Other road injuries
+V81,Other transport injuries
+V82,Other road injuries
+V83,Other transport injuries
+V84,Other transport injuries
+V85,Other transport injuries
+V86,Other transport injuries
+V87,Garbage Code (GBD Level 4)
+V88,Garbage Code (GBD Level 4)
+V89,Garbage Code (GBD Level 4)
+V90,Other transport injuries
+V91,Other transport injuries
+V92,Other transport injuries
+V93,Other transport injuries
+V94,Other transport injuries
+V95,Other transport injuries
+V96,Other transport injuries
+V97,Other transport injuries
+V98,Other transport injuries
+V99,Garbage Code (GBD Level 4)
+W00,Falls
+W01,Falls
+W02,Falls
+W03,Falls
+W04,Falls
+W05,Falls
+W06,Falls
+W07,Falls
+W08,Falls
+W09,Falls
+W10,Falls
+W11,Falls
+W12,Falls
+W13,Falls
+W14,Falls
+W15,Falls
+W16,Falls
+W17,Falls
+W18,Falls
+W19,Falls
+W20,Exposure to mechanical forces
+W21,Exposure to mechanical forces
+W22,Exposure to mechanical forces
+W23,Exposure to mechanical forces
+W24,Exposure to mechanical forces
+W25,Exposure to mechanical forces
+W26,Exposure to mechanical forces
+W27,Exposure to mechanical forces
+W28,Exposure to mechanical forces
+W29,Exposure to mechanical forces
+W30,Exposure to mechanical forces
+W31,Exposure to mechanical forces
+W32,Exposure to mechanical forces
+W33,Exposure to mechanical forces
+W34,Exposure to mechanical forces
+W35,Exposure to mechanical forces
+W36,Exposure to mechanical forces
+W37,Exposure to mechanical forces
+W38,Exposure to mechanical forces
+W39,Other unintentional injuries (internal)
+W40,Exposure to mechanical forces
+W41,Exposure to mechanical forces
+W42,Exposure to mechanical forces
+W43,Exposure to mechanical forces
+W44,Foreign body
+W45,Exposure to mechanical forces
+W46,Exposure to mechanical forces
+W47,Garbage Code (GBD Level 2)
+W48,Garbage Code (GBD Level 2)
+W49,Exposure to mechanical forces
+W50,Exposure to mechanical forces
+W51,Exposure to mechanical forces
+W52,Animal contact
+W53,Animal contact
+W54,Animal contact
+W55,Animal contact
+W56,Animal contact
+W57,Animal contact
+W58,Animal contact
+W59,Animal contact
+W60,Animal contact
+W61,Animal contact
+W62,Animal contact
+W63,Garbage Code (GBD Level 2)
+W64,Animal contact
+W65,Drowning
+W66,Drowning
+W67,Drowning
+W68,Drowning
+W69,Drowning
+W70,Drowning
+W71,Garbage Code (GBD Level 2)
+W72,Garbage Code (GBD Level 2)
+W73,Drowning
+W74,Drowning
+W75,Foreign body
+W76,Garbage Code (GBD Level 2)
+W77,Other unintentional injuries (internal)
+W78,Foreign body
+W79,Foreign body
+W80,Foreign body
+W81,Other unintentional injuries (internal)
+W82,Garbage Code (GBD Level 2)
+W83,Foreign body
+W84,Foreign body
+W85,Electrocution
+W86,Electrocution
+W87,Electrocution
+W88,Environmental heat and cold exposure
+W89,Environmental heat and cold exposure
+W90,Environmental heat and cold exposure
+W91,Environmental heat and cold exposure
+W92,Environmental heat and cold exposure
+W93,Environmental heat and cold exposure
+W94,Environmental heat and cold exposure
+W95,Garbage Code (GBD Level 2)
+W96,Garbage Code (GBD Level 2)
+W97,Environmental heat and cold exposure
+W98,Garbage Code (GBD Level 2)
+W99,Environmental heat and cold exposure
+X00,"Fire, heat, and hot substances"
+X01,"Fire, heat, and hot substances"
+X02,"Fire, heat, and hot substances"
+X03,"Fire, heat, and hot substances"
+X04,"Fire, heat, and hot substances"
+X05,"Fire, heat, and hot substances"
+X06,"Fire, heat, and hot substances"
+X07,Garbage Code (GBD Level 2)
+X08,"Fire, heat, and hot substances"
+X09,"Fire, heat, and hot substances"
+X10,"Fire, heat, and hot substances"
+X11,"Fire, heat, and hot substances"
+X12,"Fire, heat, and hot substances"
+X13,"Fire, heat, and hot substances"
+X14,"Fire, heat, and hot substances"
+X15,"Fire, heat, and hot substances"
+X16,"Fire, heat, and hot substances"
+X17,"Fire, heat, and hot substances"
+X18,"Fire, heat, and hot substances"
+X19,"Fire, heat, and hot substances"
+X20,Animal contact
+X21,Animal contact
+X22,Animal contact
+X23,Animal contact
+X24,Animal contact
+X25,Animal contact
+X26,Animal contact
+X27,Animal contact
+X28,Animal contact
+X29,Animal contact
+X30,Environmental heat and cold exposure
+X31,Environmental heat and cold exposure
+X32,Environmental heat and cold exposure
+X33,Exposure to forces of nature
+X34,Exposure to forces of nature
+X35,Exposure to forces of nature
+X36,Exposure to forces of nature
+X37,Exposure to forces of nature
+X38,Exposure to forces of nature
+X39,Environmental heat and cold exposure
+X40,Garbage Code (GBD Level 1)
+X41,Garbage Code (GBD Level 1)
+X42,Garbage Code (GBD Level 1)
+X43,Garbage Code (GBD Level 1)
+X44,Garbage Code (GBD Level 1)
+X45,Alcohol use disorders
+X46,Garbage Code (GBD Level 1)
+X47,Poisoning by carbon monoxide
+X48,Poisoning by other means
+X49,Garbage Code (GBD Level 1)
+X50,Other unintentional injuries (internal)
+X51,Other unintentional injuries (internal)
+X52,Other unintentional injuries (internal)
+X53,Other unintentional injuries (internal)
+X54,Other unintentional injuries (internal)
+X55,Garbage Code (GBD Level 2)
+X56,Garbage Code (GBD Level 2)
+X57,Other unintentional injuries (internal)
+X58,Other unintentional injuries (internal)
+X59,Garbage Code (GBD Level 2)
+X60,Self-harm
+X61,Self-harm
+X62,Self-harm
+X63,Self-harm
+X64,Self-harm
+X65,Alcohol use disorders
+X66,Self-harm
+X67,Self-harm
+X68,Self-harm
+X69,Self-harm
+X70,Self-harm
+X71,Self-harm
+X72,Self-harm
+X73,Self-harm
+X74,Self-harm
+X75,Self-harm
+X76,Self-harm
+X77,Self-harm
+X78,Self-harm
+X79,Self-harm
+X80,Self-harm
+X81,Self-harm
+X82,Self-harm
+X83,Self-harm
+X84,Garbage Code (GBD Level 4)
+X85,Interpersonal violence
+X86,Physical violence by other means
+X87,Physical violence by other means
+X88,Physical violence by other means
+X89,Physical violence by other means
+X90,Physical violence by other means
+X91,Physical violence by other means
+X92,Physical violence by other means
+X93,Physical violence by firearm
+X94,Physical violence by firearm
+X95,Physical violence by firearm
+X96,Physical violence by other means
+X97,Physical violence by other means
+X98,Physical violence by other means
+X99,Physical violence by sharp object
+Y00,Physical violence by other means
+Y01,Physical violence by other means
+Y02,Physical violence by other means
+Y03,Physical violence by other means
+Y04,Physical violence by other means
+Y06,Physical violence by other means
+Y07,Physical violence by other means
+Y08,Interpersonal violence
+Y09,Garbage Code (GBD Level 4)
+Y10,Garbage Code (GBD Level 1)
+Y11,Garbage Code (GBD Level 1)
+Y12,Garbage Code (GBD Level 1)
+Y13,Garbage Code (GBD Level 1)
+Y14,Garbage Code (GBD Level 1)
+Y15,Alcohol use disorders
+Y16,Garbage Code (GBD Level 1)
+Y17,Garbage Code (GBD Level 1)
+Y18,Garbage Code (GBD Level 1)
+Y19,Garbage Code (GBD Level 1)
+Y20,Garbage Code (GBD Level 2)
+Y21,Garbage Code (GBD Level 2)
+Y22,Garbage Code (GBD Level 2)
+Y23,Garbage Code (GBD Level 2)
+Y24,Garbage Code (GBD Level 2)
+Y25,Garbage Code (GBD Level 2)
+Y26,Garbage Code (GBD Level 2)
+Y27,Garbage Code (GBD Level 2)
+Y28,Garbage Code (GBD Level 2)
+Y29,Garbage Code (GBD Level 2)
+Y30,Garbage Code (GBD Level 2)
+Y31,Garbage Code (GBD Level 2)
+Y32,Garbage Code (GBD Level 2)
+Y33,Garbage Code (GBD Level 2)
+Y34,Garbage Code (GBD Level 2)
+Y35,Police conflict and executions
+Y36,Conflict and terrorism
+Y37,Conflict and terrorism
+Y38,Conflict and terrorism
+Y40,Adverse effects of medical treatment
+Y41,Adverse effects of medical treatment
+Y42,Adverse effects of medical treatment
+Y43,Adverse effects of medical treatment
+Y44,Adverse effects of medical treatment
+Y45,Adverse effects of medical treatment
+Y46,Adverse effects of medical treatment
+Y47,Adverse effects of medical treatment
+Y48,Adverse effects of medical treatment
+Y49,Adverse effects of medical treatment
+Y50,Adverse effects of medical treatment
+Y51,Adverse effects of medical treatment
+Y52,Adverse effects of medical treatment
+Y53,Adverse effects of medical treatment
+Y54,Adverse effects of medical treatment
+Y55,Adverse effects of medical treatment
+Y56,Adverse effects of medical treatment
+Y57,Adverse effects of medical treatment
+Y58,Adverse effects of medical treatment
+Y59,Adverse effects of medical treatment
+Y60,Adverse effects of medical treatment
+Y61,Adverse effects of medical treatment
+Y62,Adverse effects of medical treatment
+Y63,Adverse effects of medical treatment
+Y64,Adverse effects of medical treatment
+Y65,Adverse effects of medical treatment
+Y66,Adverse effects of medical treatment
+Y67,Adverse effects of medical treatment
+Y68,Adverse effects of medical treatment
+Y69,Adverse effects of medical treatment
+Y70,Adverse effects of medical treatment
+Y71,Adverse effects of medical treatment
+Y72,Adverse effects of medical treatment
+Y73,Adverse effects of medical treatment
+Y74,Adverse effects of medical treatment
+Y75,Adverse effects of medical treatment
+Y76,Adverse effects of medical treatment
+Y77,Adverse effects of medical treatment
+Y78,Adverse effects of medical treatment
+Y79,Adverse effects of medical treatment
+Y80,Adverse effects of medical treatment
+Y81,Adverse effects of medical treatment
+Y82,Adverse effects of medical treatment
+Y83,Adverse effects of medical treatment
+Y84,Adverse effects of medical treatment
+Y85,Garbage Code (GBD Level 4)
+Y86,Garbage Code (GBD Level 2)
+Y87,Garbage Code (GBD Level 2)
+Y88,Adverse effects of medical treatment
+Y89,Conflict and terrorism
+Y90,Garbage Code (GBD Level 2)
+Y91,Garbage Code (GBD Level 2)
+Y92,Garbage Code (GBD Level 2)
+Y93,Garbage Code (GBD Level 2)
+Y94,Garbage Code (GBD Level 2)
+Y95,Garbage Code (GBD Level 2)
+Y96,Garbage Code (GBD Level 2)
+Y97,Garbage Code (GBD Level 2)
+Y98,Garbage Code (GBD Level 2)
+Y99,Garbage Code (GBD Level 2)
+Z00,Garbage Code (GBD Level 1)
+Z01,Garbage Code (GBD Level 1)
+Z02,Garbage Code (GBD Level 1)
+Z03,Garbage Code (GBD Level 1)
+Z04,Garbage Code (GBD Level 1)
+Z05,Garbage Code (GBD Level 1)
+Z06,Garbage Code (GBD Level 1)
+Z07,Garbage Code (GBD Level 1)
+Z08,Garbage Code (GBD Level 1)
+Z09,Garbage Code (GBD Level 1)
+Z10,Garbage Code (GBD Level 1)
+Z11,Garbage Code (GBD Level 1)
+Z12,Garbage Code (GBD Level 1)
+Z13,Garbage Code (GBD Level 1)
+Z14,Garbage Code (GBD Level 1)
+Z15,Garbage Code (GBD Level 1)
+Z16,Other unspecified infectious diseases
+Z17,Garbage Code (GBD Level 1)
