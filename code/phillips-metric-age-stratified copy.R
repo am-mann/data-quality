@@ -44,7 +44,7 @@ diag_dir <- file.path(out_dir, "diag"); dir_create(diag_dir)
 parquet_dir <- if (dir_exists(here("data_private","mcod"))) here("data_private","mcod") else here("data_private","mcod_sample")
 
 garbage_csv   <- here("data_raw","cause-codes","gbd_garbage_codes_without_overdose.csv")
-GBD_ROOT3_CSV <- here("data_raw", "icd10_root3_to_gbdl3.csv")
+GBD_ROOT3_CSV <- here("data_raw","lookup_icd10root_to_gbd_lvl3_lvl2.csv")
 GBD_ROOT3_COL <- "icd10_root"
 GBD_L3_COL    <- "gbd_cause_lvl3"
 
@@ -75,22 +75,71 @@ extract_q1 <- function(est) {
     ifelse(length(out) && is.finite(out) && out > 0, out, NA_real_)
 }
 
+# Phillips detail at stabilized maxH; interpolate only (m_use = min(m_ref, n))
+compute_detail_row <- function(tbl_counts, max_H_global, m_ref = M_REF) {
+    ftab <- as.numeric(tbl_counts$n); names(ftab) <- tbl_counts$domain_code
+    ftab <- ftab[is.finite(ftab) & ftab > 0]
+    n <- sum(ftab); S <- length(ftab); f1 <- sum(ftab == 1); f2 <- sum(ftab == 2)
+    if (!is.finite(n) || n < 2 || S < 2 || !is.finite(max_H_global) || max_H_global <= 0) {
+        return(tibble(
+            deaths_no_garbage = n, S = S, f1 = f1, f2 = f2,
+            H_raw = NA_real_, detail_phillips_raw = NA_real_, detail_phillips_refsize = NA_real_,
+            D1_mref = NA_real_, D1_eff_used = NA_real_,
+            m_ref = m_ref, eff_m_used = NA_integer_, used_extrapolation = FALSE, fallback_reason = "degenerate"
+        ))
+    }
+    p <- ftab / n
+    H_raw <- -sum(p * log(p))
+    detail_raw <- .clamp100(100 * H_raw / max_H_global)
+    m_use <- as.integer(min(m_ref, n))  # interpolate only; no extrapolation
+    est   <- try(iNEXT::estimateD(ftab, datatype = "abundance", base = "size", level = m_use, conf = FALSE), silent = TRUE)
+    D1_use <- extract_q1(est)
+    if (is.na(D1_use) && is.finite(H_raw)) D1_use <- exp(H_raw)
+    tibble(
+        deaths_no_garbage = n, S = S, f1 = f1, f2 = f2, H_raw = H_raw,
+        detail_phillips_raw     = detail_raw,
+        detail_phillips_refsize = if (is.finite(D1_use) && D1_use > 0) .clamp100(100 * log(D1_use) / max_H_global) else NA_real_,
+        D1_mref = if (m_ref <= n) D1_use else NA_real_,
+        D1_eff_used = D1_use,
+        m_ref = as.integer(m_ref), eff_m_used = m_use, used_extrapolation = FALSE, fallback_reason = "ok"
+    )
+}
+
+# Entropy contribution diagnostics (per cluster × domain)
+contrib_from_counts <- function(df_counts, value_col = c("n","incidence")) {
+    value_col <- match.arg(value_col)
+    df_counts %>%
+        group_by(cluster) %>%
+        mutate(
+            total = sum(.data[[value_col]], na.rm = TRUE),
+            p     = ifelse(total > 0, .data[[value_col]] / total, NA_real_),
+            contr_nats = ifelse(is.finite(p) & p > 0, -p * log(p), 0)
+        ) %>%
+        group_by(cluster) %>%
+        mutate(H_cluster = sum(contr_nats, na.rm = TRUE),
+               contr_frac = ifelse(H_cluster > 0, contr_nats / H_cluster, NA_real_)) %>%
+        ungroup() %>%
+        arrange(cluster, desc(contr_frac)) %>%
+        group_by(cluster) %>%
+        mutate(rank = row_number()) %>%
+        ungroup() %>%
+        select(cluster, domain_code, !!value_col, p, contr_nats, contr_frac, H_cluster, rank)
+}
+
+# -------------------- static inputs: maps, neighbors --------------------
 garbage_root_set <- readr::read_csv(garbage_csv, show_col_types = FALSE) %>%
-    transmute(root3 = icd_root3(icd10)) %>%
-    filter(!is.na(root3)) %>% distinct() %>%
-    pull(root3)
+    transmute(root3 = icd_root3(icd10)) %>% filter(!is.na(root3)) %>% distinct() %>% pull(root3)
 
 gbd_map_df <- readr::read_csv(GBD_ROOT3_CSV, show_col_types = FALSE) |>
     transmute(
-        root3  = toupper(substr(root3, 1, 3)),
-        gbd_l3 = as.character(gbd_l3)
+        root3  = toupper(substr(.data[[GBD_ROOT3_COL]], 1, 3)),
+        gbd_l3 = as.character(.data[[GBD_L3_COL]])
     ) |>
     filter(!is.na(root3), nzchar(root3), !is.na(gbd_l3), nzchar(gbd_l3)) |>
-    distinct(root3, .keep_all = TRUE)
-
-# sanity checks 
-stopifnot(!anyDuplicated(gbd_map_df$root3))
-if (nrow(gbd_map_df) < 1200) warning("GBD map seems small (", nrow(gbd_map_df), " rows).")
+    distinct() |>
+    add_count(root3, name = "n_l3") |>
+    filter(n_l3 == 1L) |>
+    select(root3, gbd_l3)
 
 if (!nrow(gbd_map_df)) stop("GBD root3→L3 map is empty after cleaning.")
 
@@ -115,6 +164,7 @@ dbExecute(con0, paste0("PRAGMA threads = ", threads))
 duckdb::duckdb_register(con0, "garbage", tibble(root3 = garbage_root_set))
 duckdb::duckdb_register(con0, "gbd_root3_map", gbd_map_df)
 
+# Build minimal cert_all for global pass (id, fips, ucod, record_1..20)
 MCOD_COLS_ALL <- paste0("record_", 1:20)
 dbExecute(con0, glue("
   CREATE TEMP TABLE cert_all AS
@@ -128,6 +178,7 @@ dbExecute(con0, glue("
     AND ucod IS NOT NULL
 "))
 
+# UCOD (non-garbage)
 dbExecute(con0, "
   CREATE TEMP TABLE ucod_valid_all AS
   SELECT id, fips,

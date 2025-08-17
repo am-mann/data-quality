@@ -840,7 +840,6 @@ cat("Income R²:", sprintf("%.3f", r2_income),
 
 ```
 
-
 ```{r}
 # ──────────────────────────────────────────────────────────────
 # 11 · Education: time-series + variance explained
@@ -2008,10 +2007,803 @@ print(round(cor_pearson, 3))
 cat("\nSpearman correlations:\n")
 print(round(cor_spearman, 3))
 ```
+New diversity metrics
+```{r}
+# ──────────────────────────────────────────────────────────────
+# Map age-bucket detail (UCOD & MCOD) — CLUSTERS ONLY
+#   • Handles *_wide.csv (e.g., ucod_age_0-44) and long (age_bucket + value)
+#   • Adds optional weighted "ALL" using age_weights_skew4_global.csv
+#   • Builds cluster polygons from county_cluster_membership.csv
+#   • Saves per-period × age-bucket PNGs for UCOD and MCOD
+# ──────────────────────────────────────────────────────────────
+
+suppressPackageStartupMessages({
+  library(dplyr); library(readr); library(stringr); library(purrr)
+  library(sf); library(tigris); library(ggplot2); library(glue); library(here)
+  library(tidyr)
+})
+
+options(tigris_use_cache = TRUE, tigris_class = "sf")
+crs_proj <- 2163
+
+# ── CONFIG ─────────────────────────────────────────────────────
+# Period → shapefile year
+shapefile_years <- c(
+  "1999_2006" = 2000,
+  "2007_2014" = 2010,
+  "2015_2022" = 2020
+)
+
+# Color scale limits for age-bucket detail maps
+lims_age <- c(50, 70)
+
+# Output base directory
+out_dir_age <- here("figures","phillips_maps","cluster_age_detail")
+
+# If you want to limit to a subset while testing, set e.g.:
+# ONLY_BUCKETS <- c("0-44", "ALL-weighted")
+ONLY_BUCKETS <- NULL  # NULL = map all available buckets
+
+# ── Helpers: IO & parsing ─────────────────────────────────────
+.read_csv_flex <- function(fname_options) {
+  # Try output/, then project root, then /mnt/data
+  opts  <- as.character(fname_options)
+  paths <- c(file.path(here("output"), opts),
+             here(opts),
+             file.path("/mnt/data", basename(opts)))
+  hit <- paths[file.exists(paths)][1]
+  if (is.na(hit)) stop("File not found among: ", paste(paths, collapse=" | "))
+  readr::read_csv(hit, show_col_types = FALSE)
+}
+
+# Recognize age buckets anywhere in a name, e.g. "ucod_age_0-44", "80+"
+# (ASCII only; no lookarounds; robust to "_", space, or "-" as separator)
+.is_age_col <- function(nm) {
+  grepl("\\d{1,2}([-_ ]\\d{1,2}|\\+)", nm)
+}
+
+# Normalize UCOD/MCOD age detail to LONG: cluster, period, age_bucket, detail
+.normalize_age_detail <- function(df) {
+  nm <- names(df)
+
+  # Harmonize id columns
+  if (!"cluster" %in% nm && "clu" %in% nm) df <- dplyr::rename(df, cluster = clu)
+  if (!"period"  %in% names(df)) stop("Expected a 'period' column.")
+  if (!"cluster" %in% names(df)) stop("Expected a 'cluster' column.")
+
+  if ("age_bucket" %in% names(df)) {
+    # LONG input: guess value column if not named 'detail'
+    val_cols <- setdiff(names(df), c("cluster","period","age_bucket"))
+    if (!"detail" %in% names(df)) {
+      numeric_candidates <- val_cols[vapply(df[val_cols], is.numeric, logical(1))]
+      chosen <- if (length(numeric_candidates) >= 1) numeric_candidates[1] else val_cols[1]
+      df <- dplyr::rename(df, detail = dplyr::all_of(chosen))
+    }
+    out <- df %>% dplyr::select(cluster, period, age_bucket, detail)
+  } else {
+    # WIDE input: gather any columns that contain an age bucket
+    age_cols <- names(df)[vapply(names(df), .is_age_col, logical(1))]
+    if (length(age_cols) == 0) stop("Wide input has no recognizable age-bucket columns.")
+
+    out <- df %>%
+      tidyr::pivot_longer(dplyr::all_of(age_cols),
+                          names_to = "age_bucket", values_to = "detail") %>%
+      dplyr::mutate(
+        # Extract just the bucket piece (e.g., "0-44" from "ucod_age_0-44")
+        age_bucket = stringr::str_extract(age_bucket, "\\d{1,2}([-_ ]\\d{1,2}|\\+)"),
+        age_bucket = gsub("[-_ ]", "-", age_bucket)
+      ) %>%
+      dplyr::select(cluster, period, age_bucket, detail)
+  }
+
+  out %>%
+    dplyr::mutate(
+      cluster = as.character(cluster),
+      period  = as.character(period),
+      age_bucket = as.character(age_bucket),
+      detail  = as.numeric(detail)
+    )
+}
+
+# Load optional age weights (expects columns: age_bucket + weight/prop/w)
+.load_age_weights <- function() {
+  w <- tryCatch(
+    .read_csv_flex(c("age_weights_skew4_global.csv", "age_weights.csv")),
+    error = function(e) NULL
+  )
+  if (is.null(w)) return(NULL)
+
+  # Harmonize names
+  if (!"age_bucket" %in% names(w)) {
+    cand <- names(w)[vapply(names(w), .is_age_col, logical(1))]
+    if (length(cand)) {
+      w <- w %>% tidyr::pivot_longer(dplyr::all_of(cand), names_to="age_bucket", values_to="weight")
+      w <- w %>% dplyr::mutate(age_bucket = gsub("[-_ ]", "-", age_bucket))
+    } else {
+      stop("Weights file lacks 'age_bucket' column and no age-like columns found.")
+    }
+  }
+  if (!"weight" %in% names(w)) {
+    guess <- intersect(names(w), c("w","prop","weight","share","Weight","W"))
+    if (length(guess)==0) stop("Weights file found but no weight column (w/prop/weight/share).")
+    w <- dplyr::rename(w, weight = dplyr::all_of(guess[1]))
+  }
+
+  w %>%
+    dplyr::select(age_bucket, weight) %>%
+    dplyr::mutate(weight = as.numeric(weight)) %>%
+    dplyr::filter(!is.na(weight)) %>%
+    dplyr::mutate(weight = weight / sum(weight))
+}
+
+# Add weighted "ALL" bucket (if weights supplied)
+.prepare_for_mapping <- function(df_age_long, weights = NULL, include_weighted_all = TRUE) {
+  out <- df_age_long
+  if (include_weighted_all && !is.null(weights)) {
+    w_all <- out %>%
+      dplyr::inner_join(weights, by = "age_bucket") %>%
+      dplyr::group_by(cluster, period) %>%
+      dplyr::summarise(detail = stats::weighted.mean(detail, weight, na.rm = TRUE), .groups = "drop") %>%
+      dplyr::mutate(age_bucket = "ALL-weighted")
+    out <- dplyr::bind_rows(out, w_all)
+  }
+  out
+}
+
+# Filename-safe conversion of labels like "80+"
+.sanitize <- function(x) {
+  x %>% gsub("\\+", "plus", ., perl = TRUE) %>% gsub("[^0-9A-Za-z]+", "_", ., perl = TRUE)
+}
+
+# ── Geospatial helpers ────────────────────────────────────────
+.pick_fips <- function(df) {
+  hits <- grep("^GEOID", names(df), value = TRUE)
+  if (length(hits) >= 1) return(df[[hits[1]]])
+  if (all(c("STATEFP","COUNTYFP") %in% names(df))) return(paste0(df$STATEFP, df$COUNTYFP))
+  stop("No GEOID or STATEFP/COUNTYFP columns found in tigris::counties() output.")
+}
+
+build_cluster_sf <- function(period_name, shp_year, ccm_df) {
+  counties_raw <- tigris::counties(year = shp_year, cb = TRUE, class = "sf") %>%
+    sf::st_zm(drop = TRUE, what = "ZM") %>%
+    sf::st_transform(crs_proj)
+
+  counties_sf <- counties_raw %>%
+    mutate(fips = stringr::str_pad(.pick_fips(counties_raw), 5, pad = "0")) %>%
+    select(fips, geometry)
+
+  m <- ccm_df %>% filter(period == period_name)
+  if (nrow(m) == 0) stop("No county→cluster rows for period ", period_name)
+
+  j <- counties_sf %>% left_join(m, by = "fips") %>% filter(!is.na(cluster))
+
+  clusters_sf <- j %>%
+    group_by(cluster) %>%
+    summarise(geometry = sf::st_union(geometry), .groups = "drop")
+  suppressWarnings(clusters_sf)
+}
+
+make_map_age <- function(sf_data, var, title = NULL) {
+  states <- tigris::states(cb = TRUE, class = "sf") %>% sf::st_transform(crs_proj)
+  plot_title <- if (is.null(title)) var else title
+
+  ggplot() +
+    geom_sf(data = sf_data, aes(fill = .data[[var]]), colour = NA) +
+    geom_sf(data = states, fill = NA, colour = "white", linewidth = 0.3) +
+    scale_fill_distiller(palette = "RdBu", direction = 1,
+                         limits = lims_age, oob = scales::squish, na.value = "grey90") +
+    coord_sf(xlim = c(-2500000, 2500000),
+             ylim = c(-2200000, 730000),
+             expand = FALSE) +
+    labs(title = plot_title, fill = NULL) +
+    theme_void() +
+    theme(
+      plot.title = element_text(size = 16, face = "bold", hjust = 0.5),
+      legend.text = element_text(size = 9)
+    )
+}
+
+# ── Read inputs ───────────────────────────────────────────────
+# County→cluster membership
+ccm <- {
+  df <- .read_csv_flex(c("county_cluster_membership.csv"))
+  if (!all(c("fips","period","cluster") %in% names(df))) {
+    stop("county_cluster_membership.csv must have columns: fips, period, cluster")
+  }
+  df %>%
+    mutate(fips = stringr::str_pad(as.character(fips), 5, pad = "0")) %>%
+    select(fips, period, cluster)
+}
+
+# UCOD / MCOD age detail (wide or long)
+ucod_df <- .read_csv_flex(c("ucod_detail_by_age_bucket_wide.csv",
+                            "ucod_detail_by_age_bucket.csv"))
+mcod_df <- .read_csv_flex(c("mcod_detail_by_age_bucket_wide.csv",
+                            "mcod_detail_by_age_bucket.csv"))
+
+ucod_long <- .normalize_age_detail(ucod_df)
+mcod_long <- .normalize_age_detail(mcod_df)
+
+# Optional weights
+age_w <- .load_age_weights()
+
+ucod_map <- .prepare_for_mapping(ucod_long, age_w, include_weighted_all = TRUE)
+mcod_map <- .prepare_for_mapping(mcod_long, age_w, include_weighted_all = TRUE)
+
+stopifnot(all(c("cluster","period","age_bucket","detail") %in% names(ucod_map)))
+stopifnot(all(c("cluster","period","age_bucket","detail") %in% names(mcod_map)))
+
+message("UCOD buckets: ", paste(sort(unique(ucod_map$age_bucket)), collapse=", "))
+message("MCOD buckets: ", paste(sort(unique(mcod_map$age_bucket)), collapse=", "))
+
+# ── Mapping engine ────────────────────────────────────────────
+dir.create(out_dir_age, recursive = TRUE, showWarnings = FALSE)
+
+.do_maps <- function(dat_long, flavor = c("UCOD","MCOD")) {
+  flavor <- match.arg(flavor)
+  base_dir <- file.path(out_dir_age, tolower(flavor))
+  dir.create(base_dir, recursive = TRUE, showWarnings = FALSE)
+
+  # Periods present in data that we have shapefiles for
+  periods <- intersect(names(shapefile_years), unique(dat_long$period))
+
+  # Age buckets to draw
+  buckets <- sort(unique(dat_long$age_bucket))
+  if (!is.null(ONLY_BUCKETS)) {
+    buckets <- intersect(buckets, ONLY_BUCKETS)
+  }
+
+  walk(buckets, function(ab) {
+    for (win in periods) {
+      message("Mapping ", flavor, " — ", ab, " — ", win, "…")
+      yr <- shapefile_years[[win]]
+
+      cl_sf  <- build_cluster_sf(win, yr, ccm)
+      dat_ab <- dat_long %>%
+        filter(period == win, age_bucket == ab) %>%
+        select(cluster, detail)
+
+      sf_cl  <- cl_sf %>% left_join(dat_ab, by = "cluster")
+
+      ttl <- glue("{flavor} detail — {ab} — {win}")
+      p   <- make_map_age(sf_cl, "detail", ttl)
+
+      fout <- file.path(base_dir,
+                        glue("{tolower(flavor)}_detail_{.sanitize(ab)}_{win}.png"))
+      ggsave(filename = fout, plot = p, width = 8, height = 6, dpi = 320, device = "png")
+    }
+  })
+}
+
+# ── Run ───────────────────────────────────────────────────────
+.do_maps(ucod_map, "UCOD")
+.do_maps(mcod_map, "MCOD")
+
+message("Done. Maps saved to: ", out_dir_age)
+```
+Map every metric
+```{r}
+# ──────────────────────────────────────────────────────────────
+# Map ALL cluster-level metrics from cluster_metrics.csv
+# ──────────────────────────────────────────────────────────────
+
+# 1) Read metrics
+cluster_metrics <- .read_csv_flex("cluster_metrics.csv") %>%
+  dplyr::mutate(cluster = as.character(cluster),
+                period  = as.character(period))
+
+stopifnot(all(c("cluster","period") %in% names(cluster_metrics)))
+
+# 2) Which columns to map? → all numeric (excluding obvious non-metrics)
+metric_cols <- names(cluster_metrics)[vapply(cluster_metrics, is.numeric, logical(1))]
+metric_cols <- setdiff(metric_cols, c("fips", "GEOID", "STATEFP", "COUNTYFP"))
+
+if (length(metric_cols) == 0) stop("No numeric metric columns found in cluster_metrics.csv.")
+
+message("Will map metrics: ", paste(metric_cols, collapse = ", "))
+
+# 3) Optional: per-metric overrides for limits/palette
+#    Add entries here if you want fixed ranges for specific metrics.
+metric_overrides <- list(
+  detail_phillips_refsize = list(lims = c(50, 70), diverging = FALSE),
+  detail_phillips_raw     = list(lims = c(50, 70), diverging = FALSE)
+)
+
+# 4) Helpers for scale selection
+.compute_limits <- function(x) {
+  x <- x[is.finite(x)]
+  if (!length(x)) return(list(lims = c(0, 1), diverging = FALSE))
+  q <- stats::quantile(x, c(0.02, 0.98), na.rm = TRUE, names = FALSE)
+  if (q[1] < 0 && q[2] > 0) {
+    L <- max(abs(q))
+    list(lims = c(-L, L), diverging = TRUE)
+  } else {
+    list(lims = c(q[1], q[2]), diverging = FALSE)
+  }
+}
+
+make_map_metric <- function(sf_data, var, lims, diverging, title = NULL) {
+  states <- tigris::states(cb = TRUE, class = "sf") %>% sf::st_transform(crs_proj)
+  plot_title <- if (is.null(title)) var else title
+
+  p <- ggplot() +
+    geom_sf(data = sf_data, aes(fill = .data[[var]]), colour = NA) +
+    geom_sf(data = states, fill = NA, colour = "white", linewidth = 0.3) +
+    coord_sf(xlim = c(-2500000, 2500000),
+             ylim = c(-2200000, 730000),
+             expand = FALSE) +
+    labs(title = plot_title, fill = NULL) +
+    theme_void() +
+    theme(
+      plot.title = element_text(size = 16, face = "bold", hjust = 0.5),
+      legend.text = element_text(size = 9)
+    )
+
+  if (diverging) {
+    p + scale_fill_distiller(palette = "RdBu", direction = 1,
+                             limits = lims, oob = scales::squish, na.value = "grey90")
+  } else {
+    p + scale_fill_viridis_c(limits = lims, oob = scales::squish, na.value = "grey90")
+  }
+}
+
+# 5) Output dir
+out_dir_metrics <- here("figures", "phillips_maps", "cluster_metrics")
+dir.create(out_dir_metrics, recursive = TRUE, showWarnings = FALSE)
+
+# 6) Iterate: metric × period
+purrr::walk(metric_cols, function(mcol) {
+  # Determine limits & palette (override → else robust auto)
+  if (!is.null(metric_overrides[[mcol]])) {
+    lims_info <- metric_overrides[[mcol]]
+  } else {
+    lims_info <- .compute_limits(cluster_metrics[[mcol]])
+  }
+
+  # Ensure per-metric subdir
+  subdir <- file.path(out_dir_metrics, .sanitize(mcol))
+  dir.create(subdir, recursive = TRUE, showWarnings = FALSE)
+
+  # Restrict to periods we have shapefiles for
+  periods_here <- intersect(names(shapefile_years), unique(cluster_metrics$period))
+  purrr::walk(periods_here, function(win) {
+    message("Mapping metric ", mcol, " — ", win, "…")
+    yr <- shapefile_years[[win]]
+    cl_sf <- build_cluster_sf(win, yr, ccm)
+
+    dat <- cluster_metrics %>%
+      dplyr::filter(period == win) %>%
+      dplyr::select(cluster, !!rlang::sym(mcol)) %>%
+      dplyr::rename(value = !!rlang::sym(mcol))
+
+    # Skip if all NA/constant
+    vals <- dat$value[is.finite(dat$value)]
+    if (!length(vals) || (length(unique(vals)) == 1)) {
+      message("  Skipping ", mcol, " (no finite variance in ", win, ").")
+      return(invisible(NULL))
+    }
+
+    sf_cl <- cl_sf %>% dplyr::left_join(dat, by = "cluster")
+
+    ttl <- glue::glue("{mcol} — {win}")
+    p <- make_map_metric(sf_cl, "value", lims = lims_info$lims,
+                         diverging = isTRUE(lims_info$diverging), title = ttl)
+
+    fout <- file.path(subdir, glue::glue("{.sanitize(mcol)}_{win}.png"))
+    ggsave(filename = fout, plot = p, width = 8, height = 6, dpi = 320, device = "png")
+  })
+})
+
+message("Done. Metric maps saved to: ", out_dir_metrics)
+```
+Find drivers of diversity metric
+```{r}
+# ──────────────────────────────────────────────────────────────
+# Drivers of Phillips "detail" (diversity) metric — CLUSTERS
+#   • Reads UCOD/MCOD contribution files (gbdl3 or root3; top10/full)
+#   • Chooses a target age bucket (prefers ALL-weighted → ALL → first found)
+#   • Builds cluster polygons from county_cluster_membership.csv(.gz)
+#   • Maps:
+#       (A) Top driver category per cluster (limited to top-K nationwide)
+#       (B) Dominant driver share (continuous)
+#       (C) Small-multiples of shares for top-K categories
+# ──────────────────────────────────────────────────────────────
+
+suppressPackageStartupMessages({
+  library(dplyr); library(readr); library(stringr); library(purrr)
+  library(sf); library(tigris); library(ggplot2); library(glue); library(here)
+  library(tidyr); library(forcats); library(tools)
+})
+
+options(tigris_use_cache = TRUE, tigris_class = "sf")
+crs_proj <- 2163
+
+# ── CONFIG ─────────────────────────────────────────────────────
+# Period → shapefile year (match your clustering windows)
+shapefile_years <- c(
+  "1999_2006" = 2000,
+  "2007_2014" = 2010,
+  "2015_2022" = 2020
+)
+
+# Preferred age bucket(s) to map (first match wins)
+PREFERRED_BUCKETS <- c("ALL-weighted","ALL","0-44","0-14","15-24","25-44","45-64","65-74","75-84","85+")
+
+# How many top categories to keep for mapping; others → "Other"
+TOP_K <- 8
+
+# Color scale for share maps (in %)
+lims_share <- c(0, 50)  # dominant share often in 20–50% range; adjust as needed
+
+# Output base directory
+out_dir <- here("figures","phillips_maps","drivers")
+
+# ── Helpers: IO & parsing ─────────────────────────────────────
+.read_csv_flex <- function(fname_options) {
+  opts  <- as.character(fname_options)
+  paths <- c(
+    file.path(here("output"), opts),
+    here(opts),
+    file.path("/mnt/data", basename(opts))
+  )
+  hit <- paths[file.exists(paths)][1]
+  if (is.na(hit)) stop("File not found among: ", paste(paths, collapse=" | "))
+  readr::read_csv(hit, show_col_types = FALSE)
+}
+
+# Accepts .csv or .csv.gz
+.try_read <- function(paths) {
+  for (p in paths) {
+    if (file.exists(p)) return(readr::read_csv(p, show_col_types = FALSE))
+  }
+  NULL
+}
+
+# Recognize an age-bucket-like string (ASCII)
+.is_age_col <- function(nm) grepl("\\d{1,2}([-_ ]\\d{1,2}|\\+)|ALL", nm, ignore.case = TRUE)
+
+# Normalizes contribution file to: cluster, period, age_bucket, cause, contrib
+.normalize_contrib <- function(df) {
+  nm <- names(df)
+
+  # Harmonize id cols
+  if (!"cluster" %in% nm && "clu" %in% nm) df <- dplyr::rename(df, cluster = clu)
+  req <- c("cluster","period")
+  if (!all(req %in% names(df))) stop("Contribution file must have: cluster, period (found: ", paste(nm, collapse=", "), ")")
+
+  # Age bucket: if absent, assume ALL
+  if (!"age_bucket" %in% nm) {
+    # Some files might encode bucket inside column names; detect & gather:
+    age_cols <- nm[vapply(nm, .is_age_col, logical(1))]
+    if (length(age_cols) >= 2 && !"contrib" %in% nm) {
+      # Wide w/ buckets as columns → long
+      value_cols <- setdiff(age_cols, c("cluster","period"))
+      df <- df %>%
+        tidyr::pivot_longer(dplyr::all_of(value_cols), names_to = "age_bucket", values_to = "contrib")
+      # guess cause col
+      nm <- names(df)
+    } else {
+      df$age_bucket <- "ALL"
+    }
+  }
+
+  # Contribution column (numeric)
+  contrib_col <- intersect(names(df), c("contrib","contribution","value","detail_contrib","weight","share"))
+  if (length(contrib_col) == 0) {
+    # guess first numeric that's not an id
+    cand <- setdiff(names(df), c("cluster","period","age_bucket"))
+    numeric_candidates <- cand[vapply(df[cand], is.numeric, logical(1))]
+    if (length(numeric_candidates) == 0) stop("No numeric contribution column found.")
+    contrib_col <- numeric_candidates[1]
+  }
+  if (contrib_col[1] != "contrib") df <- dplyr::rename(df, contrib = dplyr::all_of(contrib_col[1]))
+
+  # Cause column
+  cause_candidates <- c("cause","gbd_l3","gbdl3","root3","uc3","cause_name","code","category")
+  cause_col <- intersect(names(df), cause_candidates)
+  if (length(cause_col) == 0) {
+    # pick first non-id, non-numeric col
+    cand <- setdiff(names(df), c("cluster","period","age_bucket","contrib"))
+    chr_cand <- cand[vapply(df[cand], is.character, logical(1))]
+    if (length(chr_cand) == 0) stop("No cause/category column found.")
+    cause_col <- chr_cand[1]
+  }
+  if (cause_col[1] != "cause") df <- dplyr::rename(df, cause = dplyr::all_of(cause_col[1]))
+
+  out <- df %>%
+    dplyr::transmute(
+      cluster = as.character(cluster),
+      period  = as.character(period),
+      age_bucket = as.character(age_bucket),
+      cause   = as.character(cause),
+      contrib = as.numeric(contrib)
+    ) %>%
+    dplyr::filter(!is.na(cluster), !is.na(period), !is.na(cause), !is.na(contrib))
+
+  # Clean bucket label
+  out$age_bucket <- gsub("[-_ ]", "-", out$age_bucket)
+  out
+}
+
+# Choose the best available age bucket to map
+.choose_bucket <- function(buckets) {
+  buckets <- unique(as.character(buckets))
+  hit <- intersect(PREFERRED_BUCKETS, buckets)
+  if (length(hit)) return(hit[1])
+  buckets[1]
+}
+
+# Filename-safe label
+.sanitize <- function(x) x %>% gsub("\\+", "plus", ., perl = TRUE) %>% gsub("[^0-9A-Za-z]+", "_", ., perl = TRUE)
+
+# ── Geospatial helpers ────────────────────────────────────────
+.pick_fips <- function(df) {
+  hits <- grep("^GEOID", names(df), value = TRUE)
+  if (length(hits) >= 1) return(df[[hits[1]]])
+  if (all(c("STATEFP","COUNTYFP") %in% names(df))) return(paste0(df$STATEFP, df$COUNTYFP))
+  stop("No GEOID or STATEFP/COUNTYFP columns found in tigris::counties() output.")
+}
+
+build_cluster_sf <- function(period_name, shp_year, ccm_df) {
+  counties_raw <- tigris::counties(year = shp_year, cb = TRUE, class = "sf") %>%
+    sf::st_zm(drop = TRUE, what = "ZM") %>%
+    sf::st_transform(crs_proj)
+
+  counties_sf <- counties_raw %>%
+    mutate(fips = stringr::str_pad(.pick_fips(counties_raw), 5, pad = "0")) %>%
+    select(fips, geometry)
+
+  m <- ccm_df %>% filter(period == period_name)
+  if (nrow(m) == 0) stop("No county→cluster rows for period ", period_name)
+
+  j <- counties_sf %>% left_join(m, by = "fips") %>% filter(!is.na(cluster))
+
+  clusters_sf <- j %>%
+    group_by(cluster) %>%
+    summarise(geometry = sf::st_union(geometry), .groups = "drop")
+  suppressWarnings(clusters_sf)
+}
+
+# Base map (states for outlines)
+.states_sf <- function() tigris::states(cb = TRUE, class = "sf") %>% sf::st_transform(crs_proj)
+
+# ── Plotters ──────────────────────────────────────────────────
+make_category_map <- function(sf_data, var, title = NULL, palette = NULL) {
+  states <- .states_sf()
+  plot_title <- if (is.null(title)) var else title
+  if (is.null(palette)) {
+    palette <- scales::hue_pal()(length(unique(na.omit(sf_data[[var]]))))
+  }
+  ggplot() +
+    geom_sf(data = sf_data, aes(fill = .data[[var]]), colour = NA) +
+    geom_sf(data = states, fill = NA, colour = "white", linewidth = 0.3) +
+    coord_sf(xlim = c(-2500000, 2500000), ylim = c(-2200000, 730000), expand = FALSE) +
+    scale_fill_manual(values = palette, na.value = "grey90") +
+    labs(title = plot_title, fill = NULL) +
+    theme_void() +
+    theme(
+      plot.title = element_text(size = 16, face = "bold", hjust = 0.5),
+      legend.text = element_text(size = 9)
+    )
+}
+
+make_share_map <- function(sf_data, var, title = NULL, limits = lims_share) {
+  states <- .states_sf()
+  plot_title <- if (is.null(title)) var else title
+  ggplot() +
+    geom_sf(data = sf_data, aes(fill = .data[[var]]), colour = NA) +
+    geom_sf(data = states, fill = NA, colour = "white", linewidth = 0.3) +
+    scale_fill_distiller(palette = "RdBu", direction = 1,
+                         limits = limits, oob = scales::squish, na.value = "grey90") +
+    coord_sf(xlim = c(-2500000, 2500000), ylim = c(-2200000, 730000), expand = FALSE) +
+    labs(title = plot_title, fill = "%") +
+    theme_void() +
+    theme(
+      plot.title = element_text(size = 16, face = "bold", hjust = 0.5),
+      legend.text = element_text(size = 9)
+    )
+}
+
+# ── Read inputs ───────────────────────────────────────────────
+# County→cluster membership (csv or csv.gz)
+ccm <- {
+  paths <- c(
+    here("output","county_cluster_membership.csv.gz"),
+    here("output","county_cluster_membership.csv"),
+    here("county_cluster_membership.csv.gz"),
+    here("county_cluster_membership.csv"),
+    "/mnt/data/county_cluster_membership.csv.gz"
+  )
+  df <- .try_read(paths)
+  if (is.null(df)) stop("county_cluster_membership file not found (csv or csv.gz).")
+  if (!all(c("fips","period","cluster") %in% names(df))) {
+    stop("county_cluster_membership must have columns: fips, period, cluster")
+  }
+  df %>%
+    mutate(fips = stringr::str_pad(as.character(fips), 5, pad = "0")) %>%
+    select(fips, period, cluster) %>%
+    mutate(period = as.character(period),
+           cluster = as.character(cluster))
+}
+
+# Convenience loader for contrib files
+read_contrib <- function(flavor = c("UCOD","MCOD"), domain = c("gbdl3","root3")) {
+  flavor <- tolower(match.arg(flavor))
+  domain <- tolower(match.arg(domain))
+  base <- glue("detail_contrib_{flavor}_{domain}")
+  candidates <- c(
+    here("output", glue("{base}_top10.csv.gz")),
+    here("output", glue("{base}_full.csv.gz")),
+    here(glue("{base}_top10.csv.gz")),
+    here(glue("{base}_full.csv.gz")),
+    file.path("/mnt/data", glue("{base}_top10.csv.gz")),
+    file.path("/mnt/data", glue("{base}_full.csv.gz")),
+    here("output", glue("{base}_top10.csv")),
+    here("output", glue("{base}_full.csv")),
+    here(glue("{base}_top10.csv")),
+    here(glue("{base}_full.csv")),
+    file.path("/mnt/data", glue("{base}_top10.csv")),
+    file.path("/mnt/data", glue("{base}_full.csv"))
+  )
+  df <- .try_read(candidates)
+  if (is.null(df)) stop("No contribution file found for ", base)
+  .normalize_contrib(df)
+}
+
+# ── Engine: build summaries and maps ──────────────────────────
+make_driver_maps <- function(flavor = c("UCOD","MCOD"),
+                             domain = c("gbdl3","root3"),
+                             target_bucket = NULL,
+                             top_k = TOP_K) {
+  flavor <- toupper(match.arg(flavor))
+  domain <- tolower(match.arg(domain))
+  message("→ Loading contributions: ", flavor, " / ", toupper(domain))
+  contrib <- read_contrib(flavor, domain)
+
+  # Select target age bucket
+  if (is.null(target_bucket)) {
+    target_bucket <- .choose_bucket(contrib$age_bucket)
+  }
+  message("→ Using age bucket: ", target_bucket)
+
+  contrib_tb <- contrib %>% filter(age_bucket == target_bucket)
+
+  # Periods present that we have shapefiles for
+  periods <- intersect(names(shapefile_years), unique(contrib_tb$period))
+
+  # Create output dir
+  base_dir <- file.path(out_dir, glue("{tolower(flavor)}-{domain}"))
+  dir.create(base_dir, recursive = TRUE, showWarnings = FALSE)
+
+  # Top-K categories nationwide (by total contrib) — separate by period to reflect shifts
+  topk_by_period <- contrib_tb %>%
+    group_by(period, cause) %>%
+    summarise(total_contrib = sum(contrib, na.rm = TRUE), .groups = "drop_last") %>%
+    arrange(period, desc(total_contrib)) %>%
+    group_modify(~ head(.x, top_k)) %>%
+    ungroup() %>%
+    group_by(period) %>%
+    summarise(top_k_causes = list(.data$cause), .groups = "drop")
+
+  # For facet maps we’ll use a stable ordering of causes by national total
+  topk_global <- contrib_tb %>%
+    group_by(cause) %>%
+    summarise(total_contrib = sum(contrib, na.rm = TRUE), .groups = "drop") %>%
+    arrange(desc(total_contrib)) %>%
+    slice_head(n = top_k) %>%
+    pull(cause)
+
+  # Build per-period maps
+  walk(periods, function(win) {
+    message("→ Mapping period: ", win)
+    yr <- shapefile_years[[win]]
+    cl_sf <- build_cluster_sf(win, yr, ccm)
+
+    # Compute shares within cluster
+    shares <- contrib_tb %>%
+      filter(period == win) %>%
+      group_by(cluster) %>%
+      mutate(total = sum(contrib, na.rm = TRUE)) %>%
+      filter(total > 0) %>%
+      mutate(share = 100 * contrib / total) %>%
+      ungroup()
+
+    # Dominant cause and its share
+    dom <- shares %>%
+      arrange(cluster, desc(share)) %>%
+      group_by(cluster) %>%
+      slice_head(n = 1) %>%
+      ungroup() %>%
+      transmute(cluster, dom_cause = cause, dom_share = share)
+
+    # Limit category map to period-specific top-K (others → "Other")
+    period_top <- topk_by_period %>% filter(period == win) %>% pull(top_k_causes) %>% .[[1]]
+    dom <- dom %>%
+      mutate(dom_cause_limited = ifelse(dom_cause %in% period_top, dom_cause, "Other"),
+             dom_cause_limited = forcats::fct_inorder(dom_cause_limited))
+
+    # Join to geometry
+    sf_dom <- cl_sf %>% left_join(dom, by = "cluster")
+
+    # (A) Category map — dominant driver
+    cats <- levels(sf_dom$dom_cause_limited)
+    pal <- setNames(scales::hue_pal()(length(cats)), cats)
+    pal["Other"] <- "grey70"
+
+    pA <- make_category_map(
+      sf_dom, "dom_cause_limited",
+      title = glue("{flavor} {toupper(domain)} — Dominant driver — {win} (bucket: {target_bucket})"),
+      palette = pal
+    )
+    foutA <- file.path(base_dir, glue("driver_domcat_{tolower(flavor)}_{domain}_{.sanitize(target_bucket)}_{win}.png"))
+    ggsave(foutA, pA, width = 9, height = 6.2, dpi = 320)
+
+    # (B) Share map — % share of dominant cause
+    pB <- make_share_map(
+      sf_dom, "dom_share",
+      title = glue("{flavor} {toupper(domain)} — Dominant driver share (%) — {win} (bucket: {target_bucket})"),
+      limits = lims_share
+    )
+    foutB <- file.path(base_dir, glue("driver_domshare_{tolower(flavor)}_{domain}_{.sanitize(target_bucket)}_{win}.png"))
+    ggsave(foutB, pB, width = 9, height = 6.2, dpi = 320)
+
+    # (C) Small multiples for global top-K causes — share by cluster
+    shares_top <- shares %>%
+      mutate(cause_f = ifelse(cause %in% topk_global, cause, NA_character_)) %>%
+      filter(!is.na(cause_f)) %>%
+      select(cluster, cause_f, share) %>%
+      distinct()
+
+    sf_facets <- cl_sf %>%
+      left_join(shares_top, by = "cluster")
+
+pC <- ggplot() +
+  geom_sf(data = sf_facets, aes(fill = share, geometry = geometry), colour = NA) +
+  geom_sf(data = .states_sf(), fill = NA, colour = "white", linewidth = 0.25) +
+  scale_fill_distiller(
+    palette = "RdBu", direction = 1,
+    limits = c(0, max(25, ceiling(max(sf_facets$share, na.rm = TRUE) / 5) * 5))) + 
+  coord_sf(
+    xlim = c(-2500000, 2500000),
+    ylim = c(-2200000, 730000),
+    expand = FALSE
+  ) +
+  facet_wrap(~ cause_f, ncol = 3) +
+  labs(
+    title = glue("{flavor} {toupper(domain)} — Share of detail by cause — {win} (bucket: {target_bucket})"),
+    fill = "%"
+  ) +
+  theme_void() +
+  theme(
+    plot.title = element_text(size = 16, face = "bold", hjust = 0.5),
+    legend.text = element_text(size = 9),
+    strip.text = element_text(size = 10, face = "bold")
+  )
 
 
+    foutC <- file.path(base_dir, glue("driver_facets_{tolower(flavor)}_{domain}_{.sanitize(target_bucket)}_{win}.png"))
+    ggsave(foutC, pC, width = 10, height = 9.5, dpi = 300)
 
+    message("   Saved: ", foutA)
+    message("   Saved: ", foutB)
+    message("   Saved: ", foutC)
+  })
 
+  message("Done. Output in: ", base_dir)
+}
+
+# ── Run (edit as needed) ──────────────────────────────────────
+dir.create(out_dir, recursive = TRUE, showWarnings = FALSE)
+
+# Example runs (uncomment what you want)
+make_driver_maps("UCOD", "gbdl3")  # preferred if you have GBD L3 files
+make_driver_maps("MCOD", "gbdl3")
+
+# If you want ICD-10 root-3 drivers:
+# make_driver_maps("UCOD", "root3")
+# make_driver_maps("MCOD", "root3")
+
+```
 
 
 
