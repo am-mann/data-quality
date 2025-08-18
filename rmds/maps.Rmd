@@ -2797,13 +2797,272 @@ dir.create(out_dir, recursive = TRUE, showWarnings = FALSE)
 
 # Example runs (uncomment what you want)
 make_driver_maps("UCOD", "gbdl3")  # preferred if you have GBD L3 files
-make_driver_maps("MCOD", "gbdl3")
 
 # If you want ICD-10 root-3 drivers:
-# make_driver_maps("UCOD", "root3")
-# make_driver_maps("MCOD", "root3")
+make_driver_maps("UCOD", "root3")
+make_driver_maps("MCOD", "root3")
 
 ```
+COD standardized diversity maps
+```{r}
+# ──────────────────────────────────────────────────────────────
+# Map ALL cluster-level metrics from a metrics CSV
+# (self-contained; no project-specific helpers required)
+# ──────────────────────────────────────────────────────────────
+
+suppressPackageStartupMessages({
+    library(readr)
+    library(dplyr)
+    library(stringr)
+    library(tidyr)
+    library(tibble)
+    library(ggplot2)
+    library(sf)
+    library(tigris)
+    library(scales)
+    library(rlang)
+    library(glue)
+})
+
+options(tigris_use_cache = TRUE, tigris_class = "sf")
+
+# ----------------------- user-set paths -----------------------
+# Metrics file: try your cause-standardized file first, else a generic fallback.
+metrics_file_candidates <- c(
+    "output/cluster_metrics_ucr39_cstd.csv.gz",
+    "output/cluster_metrics.csv.gz",
+    "cluster_metrics.csv.gz",
+    "cluster_metrics.csv"
+)
+metrics_file <- metrics_file_candidates[file.exists(metrics_file_candidates)][1]
+if (is.na(metrics_file)) stop("No metrics file found. Looked for: ", paste(metrics_file_candidates, collapse=", "))
+
+# County→cluster membership (for dissolves)
+membership_file_candidates <- c(
+    "output/county_cluster_membership.csv.gz",
+    "county_cluster_membership.csv.gz",
+    "county_cluster_membership.csv"
+)
+membership_file <- membership_file_candidates[file.exists(membership_file_candidates)][1]
+if (is.na(membership_file)) stop("No county_cluster_membership file found. Looked for: ",
+                                 paste(membership_file_candidates, collapse=", "))
+
+# Output directory
+out_dir_metrics <- file.path("figures", "phillips_maps", "cluster_metrics")
+dir.create(out_dir_metrics, recursive = TRUE, showWarnings = FALSE)
+
+# ----------------------- parameters ---------------------------
+crs_proj <- 5070  # NAD83 / Conus Albers (meters), nice for US maps
+
+# If you want a specific year shapefile per period, set it here.
+# (These match your requested windows.)
+shapefile_years <- c(
+    "1999_2005" = 2000,
+    "2006_2012" = 2010,
+    "2013_2019" = 2019,
+    "2020_2022" = 2020
+)
+
+# Optional fixed ranges for particular metrics (name = list(lims, diverging))
+metric_overrides <- list(
+    detail_phillips_refsize = list(lims = c(50, 70), diverging = FALSE),
+    detail_phillips_raw     = list(lims = c(50, 70), diverging = FALSE)
+)
+
+# ----------------------- helpers ------------------------------
+.read_csv_flex <- function(path) {
+    if (grepl("\\.gz$", path, ignore.case = TRUE)) readr::read_csv(path, show_col_types = FALSE)
+    else                                           readr::read_csv(path, show_col_types = FALSE)
+}
+
+.sanitize <- function(x) {
+    x %>%
+        str_replace_all("[^A-Za-z0-9]+", "_") %>%
+        str_replace_all("^_+|_+$", "") %>%
+        tolower()
+}
+
+.compute_limits <- function(x) {
+    x <- x[is.finite(x)]
+    if (!length(x)) return(list(lims = c(0, 1), diverging = FALSE))
+    q <- stats::quantile(x, c(0.02, 0.98), na.rm = TRUE, names = FALSE)
+    if (q[1] < 0 && q[2] > 0) {
+        L <- max(abs(q))
+        list(lims = c(-L, L), diverging = TRUE)
+    } else {
+        list(lims = c(q[1], q[2]), diverging = FALSE)
+    }
+}
+
+make_map_metric <- function(sf_data, var, lims, diverging, title = NULL) {
+    states <- tigris::states(cb = TRUE, class = "sf") %>% sf::st_transform(crs_proj)
+    plot_title <- if (is.null(title)) var else title
+    
+    p <- ggplot() +
+        geom_sf(data = sf_data, aes(fill = .data[[var]]), colour = NA) +
+        geom_sf(data = states, fill = NA, colour = "white", linewidth = 0.3) +
+        coord_sf(xlim = c(-2500000, 2500000),
+                 ylim = c(-2200000,  730000), expand = FALSE) +
+        labs(title = plot_title, fill = NULL) +
+        theme_void() +
+        theme(
+            plot.title = element_text(size = 16, face = "bold", hjust = 0.5),
+            legend.text = element_text(size = 9)
+        )
+    
+    if (isTRUE(diverging)) {
+        p + scale_fill_distiller(palette = "RdBu", direction = 1,
+                                 limits = lims, oob = scales::squish, na.value = "grey90")
+    } else {
+        p + scale_fill_viridis_c(limits = lims, oob = scales::squish, na.value = "grey90")
+    }
+}
+
+# Build cluster polygons for a given period by dissolving counties
+# Build cluster polygons for a given period by dissolving counties
+build_cluster_sf <- function(period_key, shp_year, membership_df, crs_proj = 5070) {
+    library(dplyr); library(sf); library(tigris); library(stringr)
+    
+    # 1) Filter membership for chosen period
+    mm <- membership_df %>%
+        filter(.data$period == period_key) %>%
+        transmute(GEOID = str_pad(as.character(fips), 5, pad = "0"),
+                  cluster = as.character(cluster)) %>%
+        distinct()
+    if (!nrow(mm)) stop("No membership rows for period ", period_key)
+    
+    # 2) Grab counties for that year
+    cnty <- tigris::counties(cb = TRUE, year = shp_year, class = "sf")
+    
+    # 3) Ensure a 'GEOID' exists under some schema
+    make_geoid <- function(cnty) {
+        nm <- names(cnty)
+        
+        # Direct GEOID-style columns first
+        cand <- c("GEOID", "GEOID10", "GEOID20", "GEOIDFP")
+        hit  <- cand[cand %in% nm]
+        if (length(hit)) {
+            if (!("GEOID" %in% nm)) {
+                cnty <- cnty %>% mutate(GEOID = .data[[hit[1]]])
+            }
+            return(cnty)
+        }
+        
+        # Compose from state/county code pairs (various vintages)
+        pairs <- list(
+            c("STATEFP",   "COUNTYFP"),
+            c("STATEFP10", "COUNTYFP10"),
+            c("STATEFP20", "COUNTYFP20"),
+            c("STATEA",    "COUNTYA") # rare, but seen in some exports
+        )
+        for (p in pairs) {
+            if (all(p %in% nm)) {
+                cnty <- cnty %>%
+                    mutate(
+                        GEOID = str_pad(as.character(.data[[p[1]]]), 2, pad = "0") %>%
+                            paste0(str_pad(as.character(.data[[p[2]]]), 3, pad = "0"))
+                    )
+                return(cnty)
+            }
+        }
+        
+        stop("Could not construct GEOID: none of GEOID/GEOID10/GEOID20/GEOIDFP or STATEFP(+COUNTYFP) variants found in counties(", shp_year, ").")
+    }
+    
+    # 4) Build a clean, projected county layer BEFORE union
+    cnty <- make_geoid(cnty) %>%
+        select(GEOID, geometry) %>%
+        sf::st_transform(crs_proj) %>%            # project first (fixes st_union warning)
+        sf::st_make_valid()
+    
+    # 5) Join membership and dissolve by cluster
+    sf_cl <- cnty %>%
+        inner_join(mm, by = "GEOID") %>%
+        group_by(cluster) %>%
+        summarise(geometry = sf::st_union(geometry), .groups = "drop") %>%
+        sf::st_make_valid()
+    
+    sf_cl
+}
+
+# ----------------------- load data ----------------------------
+message("Reading metrics from: ", metrics_file)
+cluster_metrics <- .read_csv_flex(metrics_file) %>%
+    mutate(cluster = as.character(cluster),
+           period  = as.character(period))
+
+if (!all(c("cluster","period") %in% names(cluster_metrics))) {
+    stop("Metrics file must contain columns 'cluster' and 'period'.")
+}
+
+message("Reading cluster membership from: ", membership_file)
+ccm <- .read_csv_flex(membership_file) %>%
+    mutate(cluster = as.character(cluster),
+           period  = as.character(period),
+           fips    = str_pad(as.character(fips), 5, pad = "0"))
+
+# Numeric metrics (exclude typical ID-ish columns if they slipped in)
+metric_cols <- names(cluster_metrics)[vapply(cluster_metrics, is.numeric, logical(1))]
+metric_cols <- setdiff(metric_cols, c("fips", "GEOID", "STATEFP", "COUNTYFP"))
+if (!length(metric_cols)) stop("No numeric metric columns found in: ", metrics_file)
+
+message("Will map metrics: ", paste(metric_cols, collapse = ", "))
+
+# Figure out which period labels we actually have (and map them to shapefile years if present)
+periods_in_data <- unique(cluster_metrics$period)
+periods_here <- intersect(names(shapefile_years), periods_in_data)
+if (!length(periods_here)) {
+    message("No overlap between shapefile_years names and period labels in metrics. ",
+            "I will try to infer a shapefile year = 2020 for all periods.")
+    shapefile_years <- setNames(rep(2020, length(periods_in_data)), periods_in_data)
+    periods_here <- periods_in_data
+}
+
+# ----------------------- map all metrics -----------------------
+walk(metric_cols, function(mcol) {
+    # Determine limits & palette
+    lims_info <- metric_overrides[[mcol]]
+    if (is.null(lims_info)) lims_info <- .compute_limits(cluster_metrics[[mcol]])
+    
+    # Ensure per-metric subdir
+    subdir <- file.path(out_dir_metrics, .sanitize(mcol))
+    dir.create(subdir, recursive = TRUE, showWarnings = FALSE)
+    
+    walk(periods_here, function(win) {
+        message(glue("Mapping metric {mcol} — {win}…"))
+        shp_year <- shapefile_years[[win]]
+        
+        # Build cluster polygons for this window
+        cl_sf <- build_cluster_sf(win, shp_year, ccm)
+        
+        dat <- cluster_metrics %>%
+            filter(period == win) %>%
+            select(cluster, !!sym(mcol)) %>%
+            rename(value = !!sym(mcol))
+        
+        # Skip if no variance
+        vals <- dat$value[is.finite(dat$value)]
+        if (!length(vals) || length(unique(vals)) == 1) {
+            message(glue("  Skipping {mcol} (no finite variance in {win})."))
+            return(invisible(NULL))
+        }
+        
+        sf_cl <- cl_sf %>% left_join(dat, by = "cluster")
+        
+        ttl <- glue("{mcol} — {win}")
+        p <- make_map_metric(sf_cl, "value",
+                             lims = lims_info$lims,
+                             diverging = isTRUE(lims_info$diverging),
+                             title = ttl)
+        
+        fout <- file.path(subdir, glue("{.sanitize(mcol)}_{win}.png"))
+        ggsave(filename = fout, plot = p, width = 8, height = 6, dpi = 320, device = "png")
+    })
+})
+
+message("Done. Metric maps saved to: ", out_dir_metrics)
+```
+
 
 
 
