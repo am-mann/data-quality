@@ -27,7 +27,6 @@ suppressPackageStartupMessages({
     library(here); library(DBI); library(duckdb); library(glue)
 })
 
-# -------------------- helpers & params --------------------
 log_msg <- function(...) cat(format(Sys.time(), "%H:%M:%S"), "│", paste0(..., collapse=""), "\n")
 CLAMP_0_100 <- TRUE
 .clamp100 <- function(x){ if(!CLAMP_0_100) return(x); y <- x; y[x<0]<-0; y[x>100]<-100; y }
@@ -66,11 +65,9 @@ icd4_clean <- function(code){
     substr(x,1,4)
 }
 
-# -------------------- reference data --------------------
 garbage_root_set <- readr::read_csv(garbage_csv, show_col_types = FALSE) %>%
     transmute(root3 = icd_root3(icd10)) %>% filter(!is.na(root3)) %>% distinct() %>% pull(root3)
 
-# Geography & adjacency (for clustering)
 sf::sf_use_s2(FALSE)
 counties_sf <- tigris::counties(cb = TRUE, year = 2020) %>% select(GEOID, geometry)
 adj <- sf::st_touches(counties_sf)
@@ -84,7 +81,6 @@ county_centroids <- st_centroid(counties_proj) %>% mutate(GEOID = counties_sf$GE
 coords <- st_coordinates(county_centroids)
 centroid_mat <- coords[, c("X","Y"), drop=FALSE]; rownames(centroid_mat) <- county_centroids$GEOID
 
-# -------------------- clustering helpers --------------------
 make_greedy_clusters <- function(death_tbl, nbrs_list, min_deaths){
     deaths <- setNames(death_tbl$deaths, death_tbl$fips)
     to_assign <- names(deaths)
@@ -155,44 +151,7 @@ merge_small_clusters_by_distance <- function(clu, death_tbl, centroid_mat, min_d
     clu
 }
 
-# -------------------- global K for normalization --------------------
-log_msg("Computing global K for root3 & icd4 across ", years_all[1], "–", years_all[2])
-con0 <- dbConnect(duckdb::duckdb(), dbdir=":memory:"); on.exit(try(dbDisconnect(con0, shutdown=TRUE), silent=TRUE), add=TRUE)
-dbExecute(con0, paste0("PRAGMA threads = ", threads))
-duckdb::duckdb_register(con0, "garbage", tibble(root3 = garbage_root_set))
 
-dbExecute(con0, glue("
-  CREATE TEMP TABLE cert_all AS
-  SELECT
-    row_number() OVER () AS id,
-    LPAD(CAST({`county_var`} AS VARCHAR), 5, '0') AS fips,
-    ucod,
-    {`UCR39_COL`} AS ucr39
-  FROM parquet_scan('{normalizePath(parquet_dir, winslash = '/') }/*.parquet')
-  WHERE year BETWEEN {years_all[1]} AND {years_all[2]}
-    AND ucod IS NOT NULL
-    AND {`UCR39_COL`} IS NOT NULL
-"))
-
-dbExecute(con0, "
-  CREATE TEMP TABLE ucod_valid_all AS
-  SELECT id, fips,
-         SUBSTR(UPPER(regexp_replace(ucod,'[^A-Za-z0-9]','')),1,3) AS root3,
-         SUBSTR(UPPER(regexp_replace(ucod,'[^A-Za-z0-9]','')),1,4) AS icd4,
-         ucr39
-  FROM cert_all
-  WHERE SUBSTR(UPPER(regexp_replace(ucod,'[^A-Za-z0-9]','')),1,3) NOT IN (SELECT root3 FROM garbage)
-")
-
-K_root3_global <- dbGetQuery(con0, "SELECT COUNT(DISTINCT root3) AS K FROM ucod_valid_all")$K
-K_icd4_global  <- dbGetQuery(con0, "SELECT COUNT(DISTINCT icd4)  AS K FROM ucod_valid_all")$K
-maxH_root3_global <- if (K_root3_global > 1) log(K_root3_global) else NA_real_
-maxH_icd4_global  <- if (K_icd4_global  > 1) log(K_icd4_global)  else NA_real_
-log_msg("K_global: root3=", K_root3_global, " | icd4=", K_icd4_global)
-dbDisconnect(con0, shutdown=TRUE)
-
-
-# ----- MCOD global K (icd4, non-underlying) for normalization -----
 conK4 <- DBI::dbConnect(duckdb::duckdb(), dbdir=":memory:")
 on.exit(try(DBI::dbDisconnect(conK4, shutdown=TRUE), silent=TRUE), add=TRUE)
 DBI::dbExecute(conK4, paste0("PRAGMA threads = ", threads))
@@ -261,13 +220,11 @@ message("K_global (MCOD icd4, non-underlying) = ", K_mcod_icd4_global)
 DBI::dbDisconnect(conK4, shutdown=TRUE)
 
 
-# ----- MCOD global K (non-underlying) for normalization -----
 conK <- DBI::dbConnect(duckdb::duckdb(), dbdir=":memory:")
 on.exit(try(DBI::dbDisconnect(conK, shutdown=TRUE), silent=TRUE), add=TRUE)
 DBI::dbExecute(conK, paste0("PRAGMA threads = ", threads))
 duckdb::duckdb_register(conK, "garbage", tibble(root3 = garbage_root_set))
 
-# Minimal cert with ucr39
 DBI::dbExecute(conK, glue("
   CREATE TEMP TABLE cert_all AS
   SELECT row_number() OVER () AS id,
@@ -288,7 +245,6 @@ DBI::dbExecute(conK, "
   WHERE SUBSTR(UPPER(regexp_replace(ucod,'[^A-Za-z0-9]','')),1,3) NOT IN (SELECT root3 FROM garbage)
 ")
 
-# Extract MCOD root-3 per id, drop garbage, drop UCOD root if present
 DBI::dbExecute(conK, "CREATE TEMP TABLE mcod_codes_all (id BIGINT, root3 VARCHAR)")
 DBI::dbExecute(conK, "
   INSERT INTO mcod_codes_all
@@ -332,14 +288,13 @@ message("K_global (MCOD root3, non-underlying) = ", K_mcod_global)
 DBI::dbDisconnect(conK, shutdown=TRUE)
 
 
-# -------------------- containers --------------------
 cluster_membership <- list()
 metrics_list       <- list()
 std_ucr_list       <- list()
 us_within_root3    <- list()
 us_within_icd4     <- list()
 
-# -------------------- main loop --------------------
+# main loop
 for (pname in names(periods)) {
     log_msg("Processing ", pname)
     yrs <- range(periods[[pname]])
@@ -400,7 +355,6 @@ for (pname in names(periods)) {
     dbExecute(con, "CREATE TEMP TABLE map_fips_cluster (fips VARCHAR, cluster VARCHAR)")
     DBI::dbAppendTable(con, "map_fips_cluster", clu_df %>% select(fips, cluster) %>% as.data.frame())
     
-    # ----- US standard shares over UCR-39 (per period) -----
     std_ucr <- dbGetQuery(con, "
     SELECT ucr39, COUNT(*) AS n
     FROM ucod_valid
@@ -410,7 +364,6 @@ for (pname in names(periods)) {
         mutate(period = pname, s = n / sum(n))
     std_ucr_list[[pname]] <- std_ucr %>% select(period, ucr39, s)
     
-    # ----- National within-cause (fallback) shares for root3 & icd4 -----
     us_r3 <- dbGetQuery(con, "
     SELECT ucr39, root3 AS domain, COUNT(*) AS n
     FROM ucod_valid
@@ -426,12 +379,9 @@ for (pname in names(periods)) {
   ") %>% as_tibble() %>%
         group_by(ucr39) %>% mutate(w_us = n / sum(n)) %>% ungroup() %>%
         mutate(period = pname) %>% select(period, ucr39, domain, w_us)
-    # ---- MCOD (non-underlying) by (cluster, ucr39, root3) ----
-    # 1) Build MCOD tables in this period
     DBI::dbExecute(con, "DROP TABLE IF EXISTS mcod_codes_raw")
     DBI::dbExecute(con, "CREATE TEMP TABLE mcod_codes_raw (id BIGINT, fips VARCHAR, root3 VARCHAR)")
     
-    # Pull all 20 record fields; drop garbage early
     DBI::dbExecute(con, "
   INSERT INTO mcod_codes_raw
   SELECT id, fips,
@@ -513,7 +463,6 @@ for (pname in names(periods)) {
     # 5) Add to metrics
     metrics_list[[pname]] <- dplyr::bind_rows(metrics_list[[pname]], det_mcod_r3)
     
-    # ---- MCOD icd4 (non-underlying) by (cluster, ucr39, icd4) ----
     # Reuse the mcod_nonunderlying already built above, but derive icd4 alongside root3
     DBI::dbExecute(con, "DROP TABLE IF EXISTS mcod_nonunderlying_icd4")
     DBI::dbExecute(con, "
@@ -601,7 +550,6 @@ for (pname in names(periods)) {
     GROUP BY 1,2,3
   ") %>% as_tibble() %>% mutate(period = pname, domain_type = "icd4")
     
-    # ----- Cause-standardized detail helper -----
     compute_cstd_detail <- function(counts_df, std_ucr_df, us_within_df, maxH_global){
         if (!nrow(counts_df)) return(tibble(period=character(), cluster=character(), detail=numeric()))
         # cluster within-cause shares
@@ -659,7 +607,7 @@ for (pname in names(periods)) {
     dbDisconnect(con, shutdown=TRUE); gc()
 }
 
-# -------------------- outputs --------------------
+# OUTPUTS
 cluster_members <- bind_rows(cluster_membership) %>%
     transmute(period, cluster, fips, cluster_deaths = deaths)
 
