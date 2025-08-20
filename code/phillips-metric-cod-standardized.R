@@ -27,22 +27,6 @@ suppressPackageStartupMessages({
     library(here); library(DBI); library(duckdb); library(glue)
 })
 
-log_msg <- function(...) cat(format(Sys.time(), "%H:%M:%S"), "│", paste0(..., collapse=""), "\n")
-CLAMP_0_100 <- TRUE
-.clamp100 <- function(x){ if(!CLAMP_0_100) return(x); y <- x; y[x<0]<-0; y[x>100]<-100; y }
-
-# Paths
-out_dir   <- here("output"); dir_create(out_dir)
-parquet_dir <- if (dir_exists(here("data_private","mcod"))) here("data_private","mcod") else here("data_private","mcod_sample")
-
-garbage_csv <- here("data_raw","cause-codes","gbd_garbage_codes_without_overdose.csv")
-stopifnot(file.exists(garbage_csv))
-
-# Data columns
-county_var <- "county_ihme"
-UCR39_COL  <- "ucr39"   # <-- already in your files
-
-# Periods and clustering
 min_deaths <- 2000L
 periods <- list(
     "1999_2005" = 1999:2005,
@@ -50,11 +34,25 @@ periods <- list(
     "2013_2019" = 2013:2019,
     "2020_2022" = 2020:2022
 )
+
+out_dir   <- here("output"); dir_create(out_dir)
+parquet_dir <- if (dir_exists(here("data_private","mcod"))) here("data_private","mcod") else here("data_private","mcod_sample")
+
+garbage_csv <- here("data_raw","cause-codes","gbd_garbage_codes_without_overdose.csv")
+stopifnot(file.exists(garbage_csv))
+
+log_msg <- function(...) cat(format(Sys.time(), "%H:%M:%S"), "│", paste0(..., collapse=""), "\n")
+CLAMP_0_100 <- TRUE
+.clamp100 <- function(x){ if(!CLAMP_0_100) return(x); y <- x; y[x<0]<-0; y[x>100]<-100; y }
+
+county_var <- "county_ihme"
+UCR39_COL  <- "ucr39"
+
 years_all <- range(unlist(periods))
 crs_proj  <- 5070
 threads   <- max(1L, parallel::detectCores() - 1L)
 
-# Cleaners
+# ----------------------- helpers -----------------------
 icd_root3 <- function(code){
     x <- toupper(gsub("[^A-Z0-9]","",as.character(code)))
     m <- stringr::str_match(x, "^([A-Z])([0-9])([0-9A-Z])")
@@ -69,14 +67,17 @@ garbage_root_set <- readr::read_csv(garbage_csv, show_col_types = FALSE) %>%
     transmute(root3 = icd_root3(icd10)) %>% filter(!is.na(root3)) %>% distinct() %>% pull(root3)
 
 sf::sf_use_s2(FALSE)
-counties_sf <- tigris::counties(cb = TRUE, year = 2020) %>% select(GEOID, geometry)
-adj <- sf::st_touches(counties_sf)
-edge_df <- tibble(from = rep(counties_sf$GEOID, lengths(adj)),
-                  to   = counties_sf$GEOID[unlist(adj)]) %>% filter(from < to)
+counties_sf   <- tigris::counties(cb = TRUE, year = 2020) %>% select(GEOID, geometry)
+counties_proj <- st_transform(counties_sf, crs_proj)
+# use projected geometry for adjacency (avoids planar warning & slivers)
+adj <- sf::st_touches(counties_proj)
+edge_df <- tibble(
+    from = rep(counties_sf$GEOID, lengths(adj)),
+    to   = counties_sf$GEOID[unlist(adj)]
+) %>% filter(from < to)
 g <- graph_from_data_frame(edge_df, directed = FALSE, vertices = counties_sf$GEOID)
 nbrs_list <- setNames(lapply(V(g)$name, function(v) names(neighbors(g, v, mode="all"))), V(g)$name)
 
-counties_proj <- st_transform(counties_sf, crs_proj)
 county_centroids <- st_centroid(counties_proj) %>% mutate(GEOID = counties_sf$GEOID) %>% select(GEOID, geometry)
 coords <- st_coordinates(county_centroids)
 centroid_mat <- coords[, c("X","Y"), drop=FALSE]; rownames(centroid_mat) <- county_centroids$GEOID
@@ -151,150 +152,53 @@ merge_small_clusters_by_distance <- function(clu, death_tbl, centroid_mat, min_d
     clu
 }
 
+# Cause-standardized detail helper (define BEFORE loop)
+compute_cstd_detail <- function(counts_df, std_ucr_df, us_within_df, maxH_global){
+    if (!nrow(counts_df)) return(tibble(period=character(), cluster=character(), detail=numeric()))
+    # cluster within-cause shares
+    w_k <- counts_df %>%
+        group_by(period, cluster, ucr39) %>%
+        mutate(w = n / sum(n)) %>% ungroup() %>%
+        select(period, cluster, ucr39, domain, w)
+    
+    # national within-cause shares (+ cause weights s)
+    base <- us_within_df %>% left_join(std_ucr_df, by=c("period","ucr39"))
+    
+    # ensure every cluster has every (ucr39, domain); fall back to national w_us
+    clusters_all <- distinct(counts_df, cluster) %>% pull(cluster)
+    expanded <- base %>%
+        left_join(w_k, by=c("period","ucr39","domain")) %>%
+        group_by(period, ucr39, domain) %>%
+        tidyr::complete(cluster = clusters_all, fill = list(w = NA_real_)) %>%
+        ungroup() %>%
+        mutate(w_eff = dplyr::coalesce(w, w_us))
+    
+    # p*(domain) = sum_c s(c) * w_eff(domain|c)
+    p_star <- expanded %>%
+        group_by(period, cluster, domain) %>%
+        summarise(p = sum(s * w_eff, na.rm=TRUE), .groups = "drop")
+    
+    # Entropy normalized by global maxH = log K
+    detail <- p_star %>%
+        group_by(period, cluster) %>%
+        summarise(H = {
+            pp <- p / sum(p, na.rm=TRUE)
+            pp <- pp[is.finite(pp) & pp > 0]
+            if (!length(pp)) NA_real_ else -sum(pp * log(pp))
+        }, .groups = "drop") %>%
+        mutate(detail = .clamp100(100 * H / maxH_global)) %>%
+        select(period, cluster, detail)
+    detail
+}
 
-conK4 <- DBI::dbConnect(duckdb::duckdb(), dbdir=":memory:")
-on.exit(try(DBI::dbDisconnect(conK4, shutdown=TRUE), silent=TRUE), add=TRUE)
-DBI::dbExecute(conK4, paste0("PRAGMA threads = ", threads))
-duckdb::duckdb_register(conK4, "garbage", tibble(root3 = garbage_root_set))
-
-DBI::dbExecute(conK4, glue("
-  CREATE TEMP TABLE cert_all AS
-  SELECT row_number() OVER () AS id, ucod, {`UCR39_COL`} AS ucr39,
-         {`county_var`} AS fips
-  FROM parquet_scan('{normalizePath(parquet_dir, winslash = '/') }/*.parquet')
-  WHERE year BETWEEN {years_all[1]} AND {years_all[2]}
-    AND ucod IS NOT NULL
-    AND {`UCR39_COL`} IS NOT NULL
-"))
-
-DBI::dbExecute(conK4, "
-  CREATE TEMP TABLE ucod_valid_all AS
-  SELECT id,
-         SUBSTR(UPPER(regexp_replace(ucod,'[^A-Za-z0-9]','')),1,3) AS ucod_root3,
-         ucr39
-  FROM cert_all
-  WHERE SUBSTR(UPPER(regexp_replace(ucod,'[^A-Za-z0-9]','')),1,3) NOT IN (SELECT root3 FROM garbage)
-")
-
-DBI::dbExecute(conK4, "CREATE TEMP TABLE mcod_codes_all (id BIGINT, icd4 VARCHAR, root3 VARCHAR)")
-DBI::dbExecute(conK4, "
-  INSERT INTO mcod_codes_all
-  SELECT id,
-         SUBSTR(UPPER(regexp_replace(code,'[^A-Za-z0-9]','')),1,4) AS icd4,
-         SUBSTR(UPPER(regexp_replace(code,'[^A-Za-z0-9]','')),1,3) AS root3
-  FROM (
-    SELECT id, UNNEST(LIST_VALUE(record_1,record_2,record_3,record_4,record_5,
-                                 record_6,record_7,record_8,record_9,record_10,
-                                 record_11,record_12,record_13,record_14,record_15,
-                                 record_16,record_17,record_18,record_19,record_20)) AS code
-    FROM (
-      SELECT row_number() OVER () AS id,
-             record_1,record_2,record_3,record_4,record_5,
-             record_6,record_7,record_8,record_9,record_10,
-             record_11,record_12,record_13,record_14,record_15,
-             record_16,record_17,record_18,record_19,record_20
-      FROM parquet_scan('{normalizePath(parquet_dir, winslash = '/') }/*.parquet')
-      WHERE year BETWEEN {years_all[1]} AND {years_all[2]}
-    )
-  )
-  WHERE code IS NOT NULL AND code <> '' AND LENGTH(code) >= 3
-")
-DBI::dbExecute(conK4, "
-  CREATE TEMP TABLE mcod_clean_all AS
-  SELECT DISTINCT id, icd4, root3
-  FROM mcod_codes_all
-  WHERE root3 BETWEEN 'A00' AND 'Z99'
-    AND SUBSTR(root3,2,1) BETWEEN '0' AND '9'
-    AND root3 NOT IN (SELECT root3 FROM garbage)
-")
-DBI::dbExecute(conK4, "
-  CREATE TEMP TABLE mcod_nonunderlying_all AS
-  SELECT m.id, m.icd4
-  FROM mcod_clean_all m
-  LEFT JOIN ucod_valid_all u ON m.id = u.id AND m.root3 = u.ucod_root3
-  WHERE u.ucod_root3 IS NULL
-")
-K_mcod_icd4_global <- DBI::dbGetQuery(conK4, "SELECT COUNT(DISTINCT icd4) AS K FROM mcod_nonunderlying_all")$K
-maxH_mcod_icd4_global <- if (K_mcod_icd4_global > 1) log(K_mcod_icd4_global) else NA_real_
-message("K_global (MCOD icd4, non-underlying) = ", K_mcod_icd4_global)
-DBI::dbDisconnect(conK4, shutdown=TRUE)
-
-
-conK <- DBI::dbConnect(duckdb::duckdb(), dbdir=":memory:")
-on.exit(try(DBI::dbDisconnect(conK, shutdown=TRUE), silent=TRUE), add=TRUE)
-DBI::dbExecute(conK, paste0("PRAGMA threads = ", threads))
-duckdb::duckdb_register(conK, "garbage", tibble(root3 = garbage_root_set))
-
-DBI::dbExecute(conK, glue("
-  CREATE TEMP TABLE cert_all AS
-  SELECT row_number() OVER () AS id,
-         ucod,
-         {`UCR39_COL`} AS ucr39
-  FROM parquet_scan('{normalizePath(parquet_dir, winslash = '/') }/*.parquet')
-  WHERE year BETWEEN {years_all[1]} AND {years_all[2]}
-    AND ucod IS NOT NULL
-    AND {`UCR39_COL`} IS NOT NULL
-"))
-
-DBI::dbExecute(conK, "
-  CREATE TEMP TABLE ucod_valid_all AS
-  SELECT id,
-         SUBSTR(UPPER(regexp_replace(ucod,'[^A-Za-z0-9]','')),1,3) AS ucod_root3,
-         ucr39
-  FROM cert_all
-  WHERE SUBSTR(UPPER(regexp_replace(ucod,'[^A-Za-z0-9]','')),1,3) NOT IN (SELECT root3 FROM garbage)
-")
-
-DBI::dbExecute(conK, "CREATE TEMP TABLE mcod_codes_all (id BIGINT, root3 VARCHAR)")
-DBI::dbExecute(conK, "
-  INSERT INTO mcod_codes_all
-  SELECT id,
-         SUBSTR(UPPER(regexp_replace(code,'[^A-Za-z0-9]','')),1,3) AS root3
-  FROM (
-    SELECT id, UNNEST(LIST_VALUE(record_1,record_2,record_3,record_4,record_5,
-                                 record_6,record_7,record_8,record_9,record_10,
-                                 record_11,record_12,record_13,record_14,record_15,
-                                 record_16,record_17,record_18,record_19,record_20)) AS code
-    FROM (
-      SELECT row_number() OVER () AS id,
-             record_1,record_2,record_3,record_4,record_5,
-             record_6,record_7,record_8,record_9,record_10,
-             record_11,record_12,record_13,record_14,record_15,
-             record_16,record_17,record_18,record_19,record_20
-      FROM parquet_scan('{normalizePath(parquet_dir, winslash = '/') }/*.parquet')
-      WHERE year BETWEEN {years_all[1]} AND {years_all[2]}
-    )
-  )
-  WHERE code IS NOT NULL AND code <> '' AND LENGTH(code) >= 3
-")
-DBI::dbExecute(conK, "
-  CREATE TEMP TABLE mcod_clean_all AS
-  SELECT DISTINCT id, root3
-  FROM mcod_codes_all
-  WHERE root3 BETWEEN 'A00' AND 'Z99'
-    AND SUBSTR(root3,2,1) BETWEEN '0' AND '9'
-    AND root3 NOT IN (SELECT root3 FROM garbage)
-")
-DBI::dbExecute(conK, "
-  CREATE TEMP TABLE mcod_nonunderlying_all AS
-  SELECT m.id, m.root3
-  FROM mcod_clean_all m
-  LEFT JOIN ucod_valid_all u ON m.id = u.id AND m.root3 = u.ucod_root3
-  WHERE u.ucod_root3 IS NULL
-")
-K_mcod_global <- DBI::dbGetQuery(conK, "SELECT COUNT(DISTINCT root3) AS K FROM mcod_nonunderlying_all")$K
-maxH_mcod_global <- if (K_mcod_global > 1) log(K_mcod_global) else NA_real_
-message("K_global (MCOD root3, non-underlying) = ", K_mcod_global)
-DBI::dbDisconnect(conK, shutdown=TRUE)
-
-
+# ----------------------- main -----------------------
 cluster_membership <- list()
 metrics_list       <- list()
 std_ucr_list       <- list()
 us_within_root3    <- list()
 us_within_icd4     <- list()
+K_summary          <- list()
 
-# main loop
 for (pname in names(periods)) {
     log_msg("Processing ", pname)
     yrs <- range(periods[[pname]])
@@ -307,18 +211,31 @@ for (pname in names(periods)) {
     dbExecute(con, paste0("PRAGMA threads = ", threads))
     duckdb::duckdb_register(con, "garbage", tibble(root3 = garbage_root_set))
     
+    # Single base scan for the period
     dbExecute(con, glue("
-    CREATE TEMP TABLE cert AS
+    CREATE TEMP TABLE base AS
     SELECT
       row_number() OVER () AS id,
+      year,
       LPAD(CAST({`county_var`} AS VARCHAR), 5, '0') AS fips,
       ucod,
-      {`UCR39_COL`} AS ucr39
+      {`UCR39_COL`} AS ucr39,
+      record_1,record_2,record_3,record_4,record_5,
+      record_6,record_7,record_8,record_9,record_10,
+      record_11,record_12,record_13,record_14,record_15,
+      record_16,record_17,record_18,record_19,record_20
     FROM parquet_scan('{normalizePath(parquet_dir, winslash = '/') }/*.parquet')
     WHERE year BETWEEN {yrs[1]} AND {yrs[2]}
-      AND ucod IS NOT NULL
       AND {`UCR39_COL`} IS NOT NULL
   "))
+    
+    # UCOD rows & valid UCOD (exclude garbage by root3)
+    dbExecute(con, "
+    CREATE TEMP TABLE cert AS
+    SELECT id, fips, ucod, ucr39
+    FROM base
+    WHERE ucod IS NOT NULL
+  ")
     n_cert <- dbGetQuery(con, "SELECT COUNT(*) n FROM cert")$n
     log_msg("[", pname, "] rows in cert: ", format(n_cert, big.mark=","))
     
@@ -355,13 +272,12 @@ for (pname in names(periods)) {
     dbExecute(con, "CREATE TEMP TABLE map_fips_cluster (fips VARCHAR, cluster VARCHAR)")
     DBI::dbAppendTable(con, "map_fips_cluster", clu_df %>% select(fips, cluster) %>% as.data.frame())
     
+    # UCR39 standard distribution (s) and national within-cause shares
     std_ucr <- dbGetQuery(con, "
     SELECT ucr39, COUNT(*) AS n
     FROM ucod_valid
     GROUP BY 1
-  ") %>%
-        as_tibble() %>%
-        mutate(period = pname, s = n / sum(n))
+  ") %>% as_tibble() %>% mutate(period = pname, s = n / sum(n))
     std_ucr_list[[pname]] <- std_ucr %>% select(period, ucr39, s)
     
     us_r3 <- dbGetQuery(con, "
@@ -379,146 +295,141 @@ for (pname in names(periods)) {
   ") %>% as_tibble() %>%
         group_by(ucr39) %>% mutate(w_us = n / sum(n)) %>% ungroup() %>%
         mutate(period = pname) %>% select(period, ucr39, domain, w_us)
-    DBI::dbExecute(con, "DROP TABLE IF EXISTS mcod_codes_raw")
-    DBI::dbExecute(con, "CREATE TEMP TABLE mcod_codes_raw (id BIGINT, fips VARCHAR, root3 VARCHAR)")
     
-    DBI::dbExecute(con, "
-  INSERT INTO mcod_codes_raw
-  SELECT id, fips,
-         SUBSTR(UPPER(regexp_replace(code,'[^A-Za-z0-9]','')),1,3) AS root3
-  FROM (
-    SELECT id, fips, UNNEST(LIST_VALUE(record_1,record_2,record_3,record_4,record_5,
-                                       record_6,record_7,record_8,record_9,record_10,
-                                       record_11,record_12,record_13,record_14,record_15,
-                                       record_16,record_17,record_18,record_19,record_20)) AS code
+    K_root3_global <- dplyr::n_distinct(us_r3$domain)
+    K_icd4_global  <- dplyr::n_distinct(us_r4$domain)
+    maxH_root3_global <- if (K_root3_global > 1) log(K_root3_global) else NA_real_
+    maxH_icd4_global  <- if (K_icd4_global  > 1) log(K_icd4_global)  else NA_real_
+    
+    # ---------- MCOD (non-underlying) ----------
+    dbExecute(con, "DROP TABLE IF EXISTS mcod_codes_raw")
+    dbExecute(con, "CREATE TEMP TABLE mcod_codes_raw (id BIGINT, fips VARCHAR, root3 VARCHAR)")
+    dbExecute(con, "
+    INSERT INTO mcod_codes_raw
+    SELECT id, fips,
+           SUBSTR(UPPER(regexp_replace(code,'[^A-Za-z0-9]','')),1,3) AS root3
     FROM (
-      SELECT row_number() OVER () AS id,
-             LPAD(CAST({`county_var`} AS VARCHAR), 5, '0') AS fips,
-             record_1,record_2,record_3,record_4,record_5,
-             record_6,record_7,record_8,record_9,record_10,
-             record_11,record_12,record_13,record_14,record_15,
-             record_16,record_17,record_18,record_19,record_20
-      FROM parquet_scan('{normalizePath(parquet_dir, winslash = '/') }/*.parquet')
-      WHERE year BETWEEN {yrs[1]} AND {yrs[2]}
+      SELECT id, fips, UNNEST(LIST_VALUE(
+        record_1,record_2,record_3,record_4,record_5,
+        record_6,record_7,record_8,record_9,record_10,
+        record_11,record_12,record_13,record_14,record_15,
+        record_16,record_17,record_18,record_19,record_20
+      )) AS code
+      FROM base
     )
-  )
-  WHERE code IS NOT NULL AND code <> '' AND LENGTH(code) >= 3
-")
-    DBI::dbExecute(con, "
-  CREATE TEMP TABLE mcod_clean AS
-  SELECT DISTINCT id, fips, root3
-  FROM mcod_codes_raw
-  WHERE root3 BETWEEN 'A00' AND 'Z99'
-    AND SUBSTR(root3,2,1) BETWEEN '0' AND '9'
-    AND root3 NOT IN (SELECT root3 FROM garbage)
-")
+    WHERE code IS NOT NULL AND code <> '' AND LENGTH(code) >= 3
+  ")
     
-    # Drop underlying root if it appears among MCOD for that id
-    DBI::dbExecute(con, "
-  CREATE TEMP TABLE mcod_nonunderlying AS
-  SELECT m.id, m.fips, m.root3
-  FROM mcod_clean m
-  LEFT JOIN ucod_valid u
-    ON m.id = u.id AND m.root3 = u.root3
-  WHERE u.root3 IS NULL
-")
+    dbExecute(con, "
+    CREATE TEMP TABLE mcod_clean AS
+    SELECT DISTINCT id, fips, root3
+    FROM mcod_codes_raw
+    WHERE root3 BETWEEN 'A00' AND 'Z99'
+      AND SUBSTR(root3,2,1) BETWEEN '0' AND '9'
+      AND root3 NOT IN (SELECT root3 FROM garbage)
+  ")
     
-    # 2) Join MCOD to the death's ucr39 via id, then roll up by cluster
-    DBI::dbExecute(con, "
-  CREATE TEMP TABLE mcod_with_cause AS
-  SELECT n.id, n.fips, n.root3, u.ucr39
-  FROM mcod_nonunderlying n
-  JOIN ucod_valid u ON n.id = u.id
-")
+    dbExecute(con, "
+    CREATE TEMP TABLE mcod_nonunderlying AS
+    SELECT m.id, m.fips, m.root3
+    FROM mcod_clean m
+    LEFT JOIN ucod_valid u
+      ON m.id = u.id AND m.root3 = u.root3
+    WHERE u.root3 IS NULL
+  ")
     
-    # Per (cluster, ucr39, root3): deaths with that MCOD present
+    dbExecute(con, "
+    CREATE TEMP TABLE mcod_with_cause AS
+    SELECT n.id, n.fips, n.root3, u.ucr39
+    FROM mcod_nonunderlying n
+    JOIN ucod_valid u USING (id)
+  ")
+    
     mcod_counts <- DBI::dbGetQuery(con, "
-  SELECT m.cluster, w.ucr39, w.root3 AS domain, COUNT(DISTINCT w.id) AS n
-  FROM mcod_with_cause w
-  JOIN map_fips_cluster m ON w.fips = m.fips
-  WHERE m.cluster IS NOT NULL
-  GROUP BY 1,2,3
-") |> tibble::as_tibble() |> dplyr::mutate(period = pname)
+    SELECT m.cluster, w.ucr39, w.root3 AS domain, COUNT(DISTINCT w.id) AS n
+    FROM mcod_with_cause w
+    JOIN map_fips_cluster m ON w.fips = m.fips
+    WHERE m.cluster IS NOT NULL
+    GROUP BY 1,2,3
+  ") |> tibble::as_tibble() |> dplyr::mutate(period = pname)
     
-    # 3) National within-cause MCOD shares (fallback) at root3
     us_mcod_r3 <- DBI::dbGetQuery(con, "
-  SELECT ucr39, root3 AS domain, COUNT(DISTINCT id) AS n
-  FROM mcod_with_cause
-  GROUP BY 1,2
-") |> tibble::as_tibble() |>
+    SELECT ucr39, root3 AS domain, COUNT(DISTINCT id) AS n
+    FROM mcod_with_cause
+    GROUP BY 1,2
+  ") |> tibble::as_tibble() |>
         dplyr::group_by(ucr39) |>
         dplyr::mutate(w_us = n / sum(n)) |>
         dplyr::ungroup() |>
         dplyr::mutate(period = pname) |>
         dplyr::select(period, ucr39, domain, w_us)
     
-    # 4) Cause-standardized MCOD detail (reuse helper)
+    K_mcod_root3_global <- dplyr::n_distinct(us_mcod_r3$domain)
+    maxH_mcod_root3_global <- if (K_mcod_root3_global > 1) log(K_mcod_root3_global) else NA_real_
+    
     det_mcod_r3 <- compute_cstd_detail(
         counts_df    = mcod_counts |> dplyr::select(period, cluster, ucr39, domain, n),
         std_ucr_df   = std_ucr     |> dplyr::select(period, ucr39, s),
         us_within_df = us_mcod_r3,
-        maxH_global  = maxH_mcod_global
+        maxH_global  = maxH_mcod_root3_global
     ) |> dplyr::mutate(metric = "detail_mcod_root3_cstd")
     
-    # 5) Add to metrics
-    metrics_list[[pname]] <- dplyr::bind_rows(metrics_list[[pname]], det_mcod_r3)
-    
-    # Reuse the mcod_nonunderlying already built above, but derive icd4 alongside root3
-    DBI::dbExecute(con, "DROP TABLE IF EXISTS mcod_nonunderlying_icd4")
-    DBI::dbExecute(con, "
-  CREATE TEMP TABLE mcod_nonunderlying_icd4 AS
-  SELECT DISTINCT n.id, n.fips,
-         SUBSTR(UPPER(regexp_replace(code,'[^A-Za-z0-9]','')),1,4) AS icd4,
-         SUBSTR(UPPER(regexp_replace(code,'[^A-Za-z0-9]','')),1,3) AS root3
-  FROM (
-    SELECT id, fips, UNNEST(LIST_VALUE(record_1,record_2,record_3,record_4,record_5,
-                                       record_6,record_7,record_8,record_9,record_10,
-                                       record_11,record_12,record_13,record_14,record_15,
-                                       record_16,record_17,record_18,record_19,record_20)) AS code
-    FROM (
-      SELECT row_number() OVER () AS id,
-             LPAD(CAST({`county_var`} AS VARCHAR), 5, '0') AS fips,
-             record_1,record_2,record_3,record_4,record_5,
-             record_6,record_7,record_8,record_9,record_10,
-             record_11,record_12,record_13,record_14,record_15,
-             record_16,record_17,record_18,record_19,record_20
-      FROM parquet_scan('{normalizePath(parquet_dir, winslash = '/') }/*.parquet')
-      WHERE year BETWEEN {yrs[1]} AND {yrs[2]}
+    # MCOD icd4 (non-underlying), start from mcod_nonunderlying ids
+    dbExecute(con, "
+    CREATE TEMP TABLE mcod_nonunderlying_icd4 AS
+    WITH expanded AS (
+      SELECT
+        nu.id,
+        nu.fips,
+        SUBSTR(UPPER(regexp_replace(code,'[^A-Za-z0-9]','')),1,4) AS icd4,
+        SUBSTR(UPPER(regexp_replace(code,'[^A-Za-z0-9]','')),1,3) AS root3
+      FROM mcod_nonunderlying nu
+      JOIN (
+        SELECT id, fips, UNNEST(LIST_VALUE(
+          record_1,record_2,record_3,record_4,record_5,
+          record_6,record_7,record_8,record_9,record_10,
+          record_11,record_12,record_13,record_14,record_15,
+          record_16,record_17,record_18,record_19,record_20
+        )) AS code
+        FROM base
+      ) z USING (id,fips)
     )
-  ) z
-  JOIN mcod_nonunderlying nu ON z.id = nu.id AND SUBSTR(UPPER(regexp_replace(z.code,'[^A-Za-z0-9]','')),1,3) = nu.root3
-  WHERE z.icd4 IS NOT NULL AND LENGTH(z.icd4) = 4
-    AND z.root3 BETWEEN 'A00' AND 'Z99'
-    AND SUBSTR(z.root3,2,1) BETWEEN '0' AND '9'
-    AND z.root3 NOT IN (SELECT root3 FROM garbage)
-")
+    SELECT DISTINCT id, fips, icd4
+    FROM expanded
+    WHERE icd4 IS NOT NULL AND LENGTH(icd4) = 4
+      AND root3 BETWEEN 'A00' AND 'Z99'
+      AND SUBSTR(root3,2,1) BETWEEN '0' AND '9'
+      AND root3 NOT IN (SELECT root3 FROM garbage)
+  ")
     
-    DBI::dbExecute(con, "DROP TABLE IF EXISTS mcod_with_cause_icd4")
-    DBI::dbExecute(con, "
-  CREATE TEMP TABLE mcod_with_cause_icd4 AS
-  SELECT n.id, n.fips, n.icd4, u.ucr39
-  FROM mcod_nonunderlying_icd4 n
-  JOIN ucod_valid u ON n.id = u.id
-")
+    dbExecute(con, "
+    CREATE TEMP TABLE mcod_with_cause_icd4 AS
+    SELECT n.id, n.fips, n.icd4, u.ucr39
+    FROM mcod_nonunderlying_icd4 n
+    JOIN ucod_valid u USING (id)
+  ")
     
     mcod4_counts <- DBI::dbGetQuery(con, "
-  SELECT m.cluster, w.ucr39, w.icd4 AS domain, COUNT(DISTINCT w.id) AS n
-  FROM mcod_with_cause_icd4 w
-  JOIN map_fips_cluster m ON w.fips = m.fips
-  WHERE m.cluster IS NOT NULL
-  GROUP BY 1,2,3
-") |> tibble::as_tibble() |> dplyr::mutate(period = pname)
+    SELECT m.cluster, w.ucr39, w.icd4 AS domain, COUNT(DISTINCT w.id) AS n
+    FROM mcod_with_cause_icd4 w
+    JOIN map_fips_cluster m ON w.fips = m.fips
+    WHERE m.cluster IS NOT NULL
+    GROUP BY 1,2,3
+  ") |> tibble::as_tibble() |> dplyr::mutate(period = pname)
     
     us_mcod_icd4 <- DBI::dbGetQuery(con, "
-  SELECT ucr39, icd4 AS domain, COUNT(DISTINCT id) AS n
-  FROM mcod_with_cause_icd4
-  GROUP BY 1,2
-") |> tibble::as_tibble() |>
+    SELECT ucr39, icd4 AS domain, COUNT(DISTINCT id) AS n
+    FROM mcod_with_cause_icd4
+    GROUP BY 1,2
+  ") |> tibble::as_tibble() |>
         dplyr::group_by(ucr39) |>
         dplyr::mutate(w_us = n / sum(n)) |>
         dplyr::ungroup() |>
         dplyr::mutate(period = pname) |>
         dplyr::select(period, ucr39, domain, w_us)
+    
+    K_mcod_icd4_global <- dplyr::n_distinct(us_mcod_icd4$domain)
+    maxH_mcod_icd4_global <- if (K_mcod_icd4_global > 1) log(K_mcod_icd4_global) else NA_real_
     
     det_mcod_icd4 <- compute_cstd_detail(
         counts_df    = mcod4_counts |> dplyr::select(period, cluster, ucr39, domain, n),
@@ -527,20 +438,14 @@ for (pname in names(periods)) {
         maxH_global  = maxH_mcod_icd4_global
     ) |> dplyr::mutate(metric = "detail_mcod_icd4_cstd")
     
-    metrics_list[[pname]] <- dplyr::bind_rows(metrics_list[[pname]], det_mcod_icd4)
-    
-    
-    us_within_root3[[pname]] <- us_r3
-    us_within_icd4[[pname]]  <- us_r4
-    
-    # ----- Cluster-level counts by (ucr39, domain) -----
+    # ---------- UCOD cause-standardized detail ----------
     counts_r3 <- dbGetQuery(con, "
     SELECT m.cluster, v.ucr39, v.root3 AS domain, COUNT(*) AS n
     FROM ucod_valid v
     JOIN map_fips_cluster m ON v.fips = m.fips
     WHERE m.cluster IS NOT NULL
     GROUP BY 1,2,3
-  ") %>% as_tibble() %>% mutate(period = pname, domain_type = "root3")
+  ") %>% as_tibble() %>% mutate(period = pname)
     
     counts_r4 <- dbGetQuery(con, "
     SELECT m.cluster, v.ucr39, v.icd4 AS domain, COUNT(*) AS n
@@ -548,45 +453,7 @@ for (pname in names(periods)) {
     JOIN map_fips_cluster m ON v.fips = m.fips
     WHERE m.cluster IS NOT NULL
     GROUP BY 1,2,3
-  ") %>% as_tibble() %>% mutate(period = pname, domain_type = "icd4")
-    
-    compute_cstd_detail <- function(counts_df, std_ucr_df, us_within_df, maxH_global){
-        if (!nrow(counts_df)) return(tibble(period=character(), cluster=character(), detail=numeric()))
-        # cluster within-cause shares
-        w_k <- counts_df %>%
-            group_by(period, cluster, ucr39) %>%
-            mutate(w = n / sum(n)) %>% ungroup() %>%
-            select(period, cluster, ucr39, domain, w)
-        
-        # base: all (ucr39, domain) combos from national within-cause + attach s
-        base <- us_within_df %>% left_join(std_ucr_df, by=c("period","ucr39"))
-        
-        # expand to ensure every cluster has every (ucr39, domain); fallback to national w_us
-        clusters_all <- distinct(counts_df, cluster) %>% pull(cluster)
-        expanded <- base %>%
-            left_join(w_k, by=c("period","ucr39","domain")) %>%
-            group_by(period, ucr39, domain) %>%
-            tidyr::complete(cluster = clusters_all, fill = list(w = NA_real_)) %>%
-            ungroup() %>%
-            mutate(w_eff = dplyr::coalesce(w, w_us))
-        
-        # p*(domain) = sum_c s(c) * w_eff(domain|c)
-        p_star <- expanded %>%
-            group_by(period, cluster, domain) %>%
-            summarise(p = sum(s * w_eff, na.rm=TRUE), .groups = "drop")
-        
-        # Entropy
-        detail <- p_star %>%
-            group_by(period, cluster) %>%
-            summarise(H = {
-                pp <- p / sum(p, na.rm=TRUE)
-                pp <- pp[is.finite(pp) & pp > 0]
-                if (!length(pp)) NA_real_ else -sum(pp * log(pp))
-            }, .groups = "drop") %>%
-            mutate(detail = .clamp100(100 * H / maxH_global)) %>%
-            select(period, cluster, detail)
-        detail
-    }
+  ") %>% as_tibble() %>% mutate(period = pname)
     
     det_r3 <- compute_cstd_detail(
         counts_df    = counts_r3 %>% select(period, cluster, ucr39, domain, n),
@@ -602,12 +469,21 @@ for (pname in names(periods)) {
         maxH_global  = maxH_icd4_global
     ) %>% mutate(metric = "detail_ucod_icd4_cstd")
     
-    metrics_list[[pname]] <- bind_rows(det_r3, det_r4)
+    metrics_list[[pname]] <- bind_rows(det_mcod_r3, det_mcod_icd4, det_r3, det_r4)
+    us_within_root3[[pname]] <- us_r3
+    us_within_icd4[[pname]]  <- us_r4
+    K_summary[[pname]] <- tibble(
+        period = pname,
+        K_ucod_root3 = K_root3_global,
+        K_ucod_icd4  = K_icd4_global,
+        K_mcod_root3 = K_mcod_root3_global,
+        K_mcod_icd4  = K_mcod_icd4_global
+    )
     
     dbDisconnect(con, shutdown=TRUE); gc()
 }
 
-# OUTPUTS
+# ----------------------- outputs -----------------------
 cluster_members <- bind_rows(cluster_membership) %>%
     transmute(period, cluster, fips, cluster_deaths = deaths)
 
@@ -617,23 +493,27 @@ metrics_out <- bind_rows(metrics_list) %>%
 
 std_ucr_all      <- bind_rows(std_ucr_list) %>% arrange(period, ucr39)
 us_within_r3_all <- bind_rows(us_within_root3) %>% arrange(period, ucr39, domain)
-us_within_r4_all <- bind_rows(us_within_icd4) %>% arrange(period, ucr39, domain)
+us_within_r4_all <- bind_rows(us_within_icd4)  %>% arrange(period, ucr39, domain)
+K_summary_all    <- bind_rows(K_summary) %>% arrange(period)
 
 write_csv(metrics_out,      file.path(out_dir, "cluster_metrics_ucr39_cstd.csv.gz"))
 write_csv(cluster_members,  file.path(out_dir, "county_cluster_membership.csv.gz"))
 write_csv(std_ucr_all,      file.path(out_dir, "ucr39_standard_by_period.csv.gz"))
 write_csv(us_within_r3_all, file.path(out_dir, "national_within_cause_shares_root3.csv.gz"))
 write_csv(us_within_r4_all, file.path(out_dir, "national_within_cause_shares_icd4.csv.gz"))
+write_csv(K_summary_all,    file.path(out_dir, "domain_K_counts_by_period.csv.gz"))
 
 if (nrow(metrics_out)) {
     cat("\n— Summary counts by period —\n")
     metrics_out %>%
         summarise(.by = period,
                   n_clusters = n_distinct(cluster),
-                  nonNA_cstd_root3 = sum(!is.na(detail_ucod_root3_cstd)),
-                  nonNA_cstd_icd4  = sum(!is.na(detail_ucod_icd4_cstd))
-        ) %>% print(n=Inf)
-    cat("\nK (global) used: root3 =", K_root3_global, " | icd4 =", K_icd4_global, "\n")
+                  nonNA_ucod_root3 = sum(!is.na(detail_ucod_root3_cstd)),
+                  nonNA_ucod_icd4  = sum(!is.na(detail_ucod_icd4_cstd)),
+                  nonNA_mcod_root3 = sum(!is.na(detail_mcod_root3_cstd)),
+                  nonNA_mcod_icd4  = sum(!is.na(detail_mcod_icd4_cstd))) %>%
+        print(n=Inf)
+    cat("\n— K by period (for maxH = log K) —\n")
+    print(K_summary_all, n=Inf)
 }
 cat("\nDone.\n")
-
