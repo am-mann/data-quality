@@ -20,7 +20,7 @@ options(tigris_use_cache = TRUE, tigris_class = "sf")
 
 # 1) Variables to map (no transformations will be applied)
 vars_to_map <- c(
-  "prop_garbage","prop_light","pct_acc_miss","pct_overd_miss","DQ_overall","proportion_undercounted"
+  "prop_garbage","prop_light","pct_acc_miss","pct_overd_miss","DQ_overall"
 )
 
 # 2) Load your county-year data (as-is); add time windows only
@@ -34,10 +34,7 @@ dq <- readr::read_csv(here::here("data","county_year_quality_metrics.csv.gz"), s
       year >= 2011 & year <= 2017 ~ "2011_2017",
       year >= 2018 & year <= 2022 ~ "2018_2022",
       TRUE ~ NA_character_
-    ),
-    proportion_undercounted = ifelse(sim_k_15p_nofent > 0,
-                                     sim_added_k_15p_nofent / sim_k_15p_nofent,
-                                     NA_real_)
+    )
   )
 
 # Keep only variables that actually exist; no conversions
@@ -359,7 +356,7 @@ dq_all <- dq %>%
 cat("Counties without valid GEOID:", sum(is.na(dq_all$GEOID)), "\n")
 
 # 4 · Get 2022 population estimates ---------------------------------------
-census_api_key("671b64055fc192103cbc199d2dff91b46d9cc781", overwrite = FALSE)
+census_api_key("671b64055fc192103cbc199d2dff91b46d9cc781", overwrite = TRUE, install=TRUE)
 
 pop22 <- get_acs(
   geography = "county",
@@ -1375,6 +1372,1077 @@ imap(shapefile_years, function(yr, win) {
   ggsave(filename = file.path(out_dir_clu, glue("cluster_phillips_{if (VAR=='detail_phillips_refsize') 'refsize' else 'raw'}_{win}.png")),
          plot = pC, width = 8, height = 6, dpi = 320, device = dev_png)
 })
+```
+
+```{r}
+# ──────────────────────────────────────────────────────────────
+# DIAGNOSTICS for early-year blanks
+# ──────────────────────────────────────────────────────────────
+suppressPackageStartupMessages({
+  library(dplyr); library(readr); library(stringr); library(tidyr); library(purrr); library(here)
+})
+
+finance_dir <- here("data_raw", "finance")
+
+# helper readers (same signatures as the builder)
+std_fips <- function(x) stringr::str_pad(as.character(x), 5, pad = "0")
+digits   <- function(x) stringr::str_replace_all(as.character(x), "[^0-9]", "")
+
+read_pid_line_map <- function(path) {
+  ln <- read_lines(path, progress = FALSE); ln <- ln[grepl("^\\d{12}", ln)]
+  if (!length(ln)) return(tibble())
+  tibble(raw = ln) |>
+    mutate(govsid12 = substr(raw, 1, 12),
+           state2 = substr(govsid12, 1, 2),
+           ten_tokens = str_extract_all(raw, "\\d{10}")) |>
+    rowwise() |>
+    mutate(token10 = { toks <- ten_tokens; pick <- toks[substr(toks,1,2)==state2]; if(!length(pick) && length(toks)) pick <- toks[1]; if(!length(pick)) NA_character_ else pick[1]},
+           county_ihme = if (!is.na(token10)) substr(token10,1,5) else NA_character_) |>
+    ungroup() |>
+    transmute(govsid12, county_ihme = std_fips(county_ihme)) |>
+    filter(!is.na(county_ihme), grepl("^\\d{5}$", county_ihme)) |>
+    distinct()
+}
+
+# Fin_GID_* files have a very similar structure to Fin_PID_* for our purpose
+read_gid_line_map <- function(path) {
+  ln <- read_lines(path, progress = FALSE); ln <- ln[grepl("^\\d{12}", ln)]
+  if (!length(ln)) return(tibble())
+  tibble(raw = ln) |>
+    mutate(govsid12 = substr(raw, 1, 12),
+           state2   = substr(govsid12, 1, 2),
+           ten_tokens = str_extract_all(raw, "\\d{10}")) |>
+    rowwise() |>
+    mutate(token10 = { toks <- ten_tokens; pick <- toks[substr(toks,1,2)==state2]; if(!length(pick) && length(toks)) pick <- toks[1]; if(!length(pick)) NA_character_ else pick[1]},
+           county_ihme = if (!is.na(token10)) substr(token10,1,5) else NA_character_) |>
+    ungroup() |>
+    transmute(govsid12, county_ihme = std_fips(county_ihme)) |>
+    filter(!is.na(county_ihme), grepl("^\\d{5}$", county_ihme)) |>
+    distinct()
+}
+
+smart_read_any <- function(path, guess_max = 200000) {
+  for (f in list(
+    function() read_delim(path, delim = "\t", show_col_types = FALSE, guess_max = guess_max, progress = FALSE),
+    function() read_csv(path, show_col_types = FALSE, guess_max = guess_max, progress = FALSE),
+    function() read_table(path, show_col_types = FALSE, guess_max = guess_max, col_names = TRUE, na = c("", "NA"))
+  )) {
+    out <- try(f(), silent = TRUE)
+    if (!inherits(out, "try-error") && is.data.frame(out) && ncol(out) >= 1) return(out)
+  }
+  stop("Could not parse file: ", basename(path))
+}
+
+# very light reader: just enough to see item_code + ids + year
+peek_fin <- function(path) {
+  df <- try(smart_read_any(path), silent = TRUE)
+  if (!inherits(df, "try-error")) {
+    id_col   <- names(df)[grepl("^govs?id$|^id$|^unit(id|_id)$|^govsid$|^lgid$|^pid$", names(df), ignore.case = TRUE)][1]
+    item_col <- names(df)[grepl("^[A-Za-z]?[0-9]{2,3}[A-Za-z]?$|^item(code)?$|^code$|^variable$", names(df), ignore.case = TRUE)][1]
+    amt_col  <- names(df)[grepl("^amount$|^value$|^data$|^amnt$|^val$", names(df), ignore.case = TRUE)][1]
+    yr <- as.integer(stringr::str_match(basename(path), "^(\\d{4})")[,2])
+    tibble(
+      src = basename(path),
+      fin_year = yr,
+      item_code = if (!is.na(item_col)) as.character(df[[item_col]]) else NA_character_,
+      id = if (!is.na(id_col)) as.character(df[[id_col]]) else NA_character_,
+      amount = suppressWarnings(as.numeric(gsub(",", "", if (!is.na(amt_col)) df[[amt_col]] else NA)))
+    )
+  } else {
+    tibble(src = basename(path), fin_year = NA_integer_, item_code = NA_character_, id = NA_character_, amount = NA_real_)
+  }
+}
+
+fin_files <- c(
+  list.files(finance_dir, pattern = "^\\d{4}FinEstDAT_.*_pu\\.txt$", full.names = TRUE),
+  list.files(finance_dir, pattern = "^\\d{4}FinInddiv.*\\.txt$",      full.names = TRUE)
+)
+
+cat("# files found:", length(fin_files), "\n")
+peek <- purrr::map_dfr(fin_files, peek_fin) %>%
+  mutate(code_shape = case_when(
+    grepl("^[0-9]{2}[A-Z]$", item_code) ~ "NNL (e.g., 19T)",
+    grepl("^[A-Z][0-9]{2}$", item_code) ~ "LNN (e.g., T19/E32)",
+    TRUE ~ "other/NA"
+  ))
+
+cat("\n## Item code shapes by year\n")
+print(peek %>% count(fin_year, code_shape, sort = FALSE) %>% arrange(fin_year, code_shape))
+
+# map sources → county
+pid_paths <- list.files(finance_dir, pattern = "^Fin_PID_\\d{4}\\.txt$", full.names = TRUE)
+gid_paths <- list.files(finance_dir, pattern = "^Fin_GID_\\d{4}\\.txt$", full.names = TRUE)
+pid_map <- if (length(pid_paths)) map_dfr(pid_paths, read_pid_line_map) %>% distinct() else tibble()
+gid_map <- if (length(gid_paths)) map_dfr(gid_paths, read_gid_line_map) %>% distinct() else tibble()
+map_all <- bind_rows(pid_map, gid_map) %>% distinct()
+
+cat("\n## GOVSID12 → county mapping rows\n")
+print(tibble(source = c("Fin_PID_*", "Fin_GID_*", "combined"),
+             rows = c(nrow(pid_map), nrow(gid_map), nrow(map_all))))
+
+# coverage of county mapping by year (using ids in the files)
+id_years <- peek %>%
+  mutate(govsid12 = substr(digits(id), 1, 12)) %>%
+  filter(!is.na(fin_year), nchar(govsid12) == 12) %>%
+  distinct(fin_year, govsid12)
+
+cov <- id_years %>%
+  left_join(map_all, by = "govsid12") %>%
+  mutate(status = if_else(is.na(county_ihme), "not_mapped", "mapped")) %>%
+  count(fin_year, status, name = "n") %>%
+  tidyr::pivot_wider(names_from = status, values_from = n, values_fill = 0) %>%
+  { df <- .;                         # ensure both columns exist
+    if (!"mapped" %in% names(df)) df$mapped <- 0L
+    if (!"not_mapped" %in% names(df)) df$not_mapped <- 0L
+    df
+  } %>%
+  arrange(fin_year) %>%
+  select(fin_year, mapped, not_mapped)
+
+print(cov, n = Inf)
+```
+
+
+Validation chunk
+```{r}
+# ──────────────────────────────────────────────────────────────
+# FINANCE → POP → VALIDATION (E32-only, nearest-year snap, cluster PH)
+#   • Reads ALL FinEstDAT/FinInddiv files in data_raw/finance
+#   • Uses ONLY E32 (Public Health Expenditure) → NO Function 19 fallback
+#   • Maps to counties via PID rosters + PID↔GID crosswalk
+#   • Builds fin_all (E32 only) + pop_join + ph_pc_fin
+#   • "Snap to nearest" finance year for each observation year
+#   • Cluster-level PH per-capita (population-weighted) & quintiles by cluster
+#   • Plots:
+#        1) diversity_z_by_reporting_type_timeseries.png     (if rep_lu available)
+#        2) direction_diversity_by_ph_spend_quintile_timeseries.png    (county-year, snapped)
+#        3) codstd_phillips_diversity_by_ph_spend_quintile_timeseries.png (CLUSTER-level)
+#        4) phillips_detail_cstd_by_reporting_type_timeseries.png  (if rep_lu available)
+# ──────────────────────────────────────────────────────────────
+suppressPackageStartupMessages({
+  library(readr);  library(dplyr);  library(stringr); library(tidyr);  library(purrr)
+  library(here);   library(ggplot2); library(scales); library(tidycensus)
+})
+
+finance_dir <- here("data_raw", "finance")
+out_dir     <- here("figures", "phillips_validation")
+dir.create(out_dir, recursive = TRUE, showWarnings = FALSE)
+
+# -------------------- helpers --------------------
+`%||%` <- function(a,b) if (is.null(a) || is.na(a)) b else a
+std_fips   <- function(x) stringr::str_pad(as.character(x), 5, pad = "0")
+std_pid6   <- function(x) stringr::str_pad(stringr::str_replace_all(as.character(x), "[^0-9]", ""), 6, pad = "0")
+digits     <- function(x) stringr::str_replace_all(as.character(x), "[^0-9]", "")
+msg        <- function(...) cat(paste0("[finance] ", sprintf(...), "\n"))
+get_colname <- function(df, patterns) {
+  nm <- names(df)
+  hit <- which(Reduce(`|`, lapply(patterns, \(p) grepl(p, nm, ignore.case = TRUE))))
+  if (length(hit)) nm[hit[1]] else NA_character_
+}
+
+smart_read_any <- function(path, guess_max = 200000) {
+  suppressWarnings({
+    for (f in list(
+      function() readr::read_delim(path, delim = "\t", show_col_types = FALSE, guess_max = guess_max, progress = FALSE),
+      function() readr::read_csv(path, show_col_types = FALSE, guess_max = guess_max, progress = FALSE),
+      function() readr::read_table(path, show_col_types = FALSE, guess_max = guess_max, col_names = TRUE, na = c("", "NA"))
+    )) {
+      out <- try(f(), silent = TRUE)
+      if (!inherits(out, "try-error") && is.data.frame(out) && ncol(out) >= 1) return(out)
+    }
+  })
+  stop("Could not parse file: ", basename(path))
+}
+
+# -------------------- 1) PID↔GID crosswalk + PID rosters → FIPS --------------------
+cw_path <- file.path(finance_dir, "PID_GID_Crosswalk.txt")
+if (!file.exists(cw_path)) stop("Missing crosswalk: ", cw_path)
+
+cw_lines <- readr::read_lines(cw_path, locale = readr::locale(encoding = "Windows-1252"), progress = FALSE)
+cw <- tibble(line = cw_lines) %>%
+  mutate(
+    pid6  = str_extract(line, "^\\s*\\d{6}\\b"),
+    gid14 = str_extract(line, "\\b\\d{14}\\b"),
+    gid12 = dplyr::coalesce(gid14, str_extract(line, "\\b\\d{12}\\b"))
+  ) %>%
+  transmute(pid6 = std_pid6(pid6), govsid12 = substr(gid12, 1, 12)) %>%
+  filter(!is.na(pid6), !is.na(govsid12), nchar(pid6) == 6, nchar(govsid12) == 12) %>%
+  distinct()
+msg("Crosswalk PID→GID12 rows: %d", nrow(cw))
+
+read_pid_line_map <- function(path) {
+  ln <- readr::read_lines(path, progress = FALSE)
+  ln <- ln[grepl("^\\d{12}", ln)]
+  if (!length(ln)) return(tibble())
+  tibble(raw = ln) %>%
+    mutate(
+      govsid12   = substr(raw, 1, 12),
+      state2     = substr(govsid12, 1, 2),
+      ten_tokens = stringr::str_extract_all(raw, "\\d{10}")
+    ) %>%
+    rowwise() %>%
+    mutate(
+      token10 = {
+        toks <- ten_tokens
+        pick <- toks[substr(toks, 1, 2) == state2]
+        if (length(pick) == 0 && length(toks) > 0) pick <- toks[1]
+        if (length(pick) == 0) NA_character_ else pick[1]
+      },
+      county_ihme = if (!is.na(token10)) substr(token10, 1, 5) else NA_character_
+    ) %>%
+    ungroup() %>%
+    transmute(govsid12, county_ihme = std_fips(county_ihme)) %>%
+    filter(!is.na(county_ihme), grepl("^\\d{5}$", county_ihme)) %>%
+    distinct()
+}
+pid_paths <- list.files(finance_dir, pattern = "^Fin_PID_\\d{4}\\.txt$", full.names = TRUE)
+if (!length(pid_paths)) msg("WARNING: No Fin_PID_*.txt files found; county mapping may be incomplete.")
+govsid12_to_county <- if (length(pid_paths)) purrr::map_dfr(pid_paths, read_pid_line_map) %>% distinct() else tibble()
+msg("GOVSID12→county rows (from PID rosters): %d", nrow(govsid12_to_county))
+
+# -------------------- 2) Readers for FinEstDAT / FinInddiv --------------------
+parse_finest_compact <- function(path) {
+  ln <- readr::read_lines(path, progress = FALSE)
+  ln <- ln[nzchar(ln)]
+  if (!length(ln)) return(tibble())
+
+  ln <- sub("\\s+$", "", ln)
+  m_year <- stringr::str_match(ln, "(\\d{4})([A-Z])\\s*$")
+  keep <- which(!is.na(m_year[,1]))
+  if (!length(keep)) stop("Compact parser could not match lines in ", basename(path))
+
+  year <- as.integer(m_year[keep, 2])
+  prefix <- stringr::str_trim(stringr::str_sub(ln[keep], end = -(nchar(m_year[keep, 1]) + 1)), side = "right")
+
+  govsid14 <- stringr::str_sub(prefix, 1, 14)
+  rest     <- stringr::str_trim(stringr::str_sub(prefix, 15))
+
+  is_sep <- grepl("^[0-9]{2}[A-Z]", rest)
+  is_inl <- !is_sep & grepl("^[A-Z]", rest)
+
+  item_num_sep <- ifelse(is_sep, stringr::str_sub(rest, 1, 2), NA_character_)
+  item_let_sep <- ifelse(is_sep, stringr::str_sub(rest, 3, 3), NA_character_)
+  amt_sep_str  <- ifelse(is_sep, stringr::str_trim(stringr::str_sub(rest, 4)), NA_character_)
+
+  item_num_inl <- ifelse(is_inl, stringr::str_sub(govsid14, 13, 14), NA_character_)
+  item_let_inl <- ifelse(is_inl, stringr::str_sub(rest, 1, 1), NA_character_)
+  amt_inl_str  <- ifelse(is_inl, stringr::str_trim(stringr::str_sub(rest, 2)), NA_character_)
+
+  item_num <- dplyr::coalesce(item_num_sep, item_num_inl)
+  item_let <- dplyr::coalesce(item_let_sep, item_let_inl)
+  amt_str  <- dplyr::coalesce(amt_sep_str,  amt_inl_str)
+
+  amount  <- suppressWarnings(as.numeric(gsub("[^0-9\\.-]", "", amt_str)))
+  ok      <- !is.na(item_num) & !is.na(item_let) & !is.na(amount)
+
+  tibble(
+    pid6       = NA_character_,
+    govsid12   = stringr::str_sub(govsid14[ok], 1, 12),
+    item_code  = paste0(item_num[ok], item_let[ok]),   # e.g., "19T"
+    amount     = amount[ok],
+    fin_year   = year[ok],
+    county_ihme = NA_character_
+  )
+}
+
+parse_finest_fixed <- function(path) {
+  lines <- readr::read_lines(path, progress = FALSE)
+  lines <- lines[nzchar(lines)]
+  if (!length(lines)) return(tibble())
+  year  <- as.integer(stringr::str_sub(lines, -5, -2))
+  flag  <- stringr::str_sub(lines, -1, -1)
+  left1 <- stringr::str_sub(lines,  1, -6)
+  m <- regexpr("(\\d+)\\s*$", left1, perl = TRUE)
+  amt_str <- ifelse(m > 0, regmatches(left1, m), NA_character_)
+  amount  <- suppressWarnings(as.numeric(amt_str))
+  left2   <- ifelse(m > 0, substr(left1, 1, m - 1L), left1)
+  left2   <- sub("\\s+$", "", left2)
+  raw_item <- stringr::str_sub(left2, -3, -1)
+  govt_id  <- stringr::str_sub(left2,  1, -4)
+  item_code <- ifelse(grepl("^[A-Z][0-9]{2}$", raw_item, ignore.case = TRUE),
+                      toupper(raw_item),
+               ifelse(grepl("^[0-9]{2}[A-Z]$", raw_item, ignore.case = TRUE),
+                      paste0(toupper(stringr::str_sub(raw_item, -1, -1)), stringr::str_sub(raw_item, 1, 2)),
+                      toupper(raw_item)))
+  tibble(
+    pid6        = NA_character_,
+    govsid12    = substr(govt_id, 1, 12),
+    item_code   = item_code,                        # e.g., "E32"
+    amount      = amount,
+    fin_year    = year,
+    county_ihme = NA_character_
+  ) %>%
+    filter(!is.na(amount), !is.na(fin_year), nchar(govsid12) == 12)
+}
+
+read_fin_one <- function(path) {
+  dd <- try(parse_finest_compact(path), silent = TRUE)
+  if (!inherits(dd, "try-error") && nrow(dd)) return(dd)
+  dd2 <- try(parse_finest_fixed(path), silent = TRUE)
+  if (!inherits(dd2, "try-error") && nrow(dd2)) return(dd2)
+  df <- smart_read_any(path)
+  item_col  <- get_colname(df, c("^item$","^code$","^variable$","^category$","^itemcode$"))
+  amt_col   <- get_colname(df, c("^amount$","^value$","^amnt$","^val$","^data$"))
+  id_col    <- get_colname(df, c("^govs?id$","^id$","^unit(id|_id)$","^govsid$","^lgid$","^pid$"))
+  fips_col  <- get_colname(df, c("county.*fips","^fips$","county.?id","geoid.*5","cnty.*fips"))
+  if (is.na(item_col) || is.na(amt_col)) {
+    wide_candidates <- names(df)[grepl("^[A-Z][0-9]{2,3}[A-Z]?$", names(df))]
+    if (length(wide_candidates)) {
+      df <- df %>% pivot_longer(cols = all_of(wide_candidates), names_to = "item", values_to = "amount")
+      item_col <- "item"; amt_col <- "amount"
+      if (is.na(id_col))   id_col   <- get_colname(df, c("^govs?id$","^id$","^unit(id|_id)$","^pid$"))
+      if (is.na(fips_col)) fips_col <- get_colname(df, c("county.*fips","^fips$","geoid.*5"))
+    }
+  }
+  if (is.na(item_col) || is.na(amt_col)) stop("Cannot detect item/amount columns in: ", basename(path))
+  id_raw    <- if (!is.na(id_col)) as.character(df[[id_col]]) else NA_character_
+  id_digits <- digits(id_raw)
+  pid6  <- ifelse(nchar(id_digits) <= 6 & nchar(id_digits) > 0, std_pid6(id_digits), NA_character_)
+  gid12 <- ifelse(nchar(id_digits) >= 12, substr(id_digits, 1, 12), NA_character_)
+  tibble(
+    pid6        = pid6,
+    govsid12    = gid12,
+    county_ihme = if (!is.na(fips_col)) std_fips(df[[fips_col]]) else NA_character_,
+    item_code   = as.character(df[[item_col]]),
+    amount      = suppressWarnings(as.numeric(gsub(",", "", df[[amt_col]]))),
+    fin_year    = as.integer(str_match(basename(path), "^(\\d{4})")[,2])
+  )
+}
+# ─────────────────────────────────────────────────────────────────────────────
+# Public Health (E32) spending → snap to nearest finance year → cluster averages
+# ─────────────────────────────────────────────────────────────────────────────
+suppressPackageStartupMessages({
+  library(dplyr); library(readr); library(stringr); library(tidyr); library(purrr); library(here)
+})
+
+# ========================= USER CONFIG =======================================
+finance_dir     <- here("data_raw","finance")
+membership_guess <- c(
+  here("output","county_cluster_membership.csv.gz"),
+  here("output","county_cluster_membership.csv")
+)
+USE_PER_CAPITA  <- TRUE   # if FALSE, cluster spending uses *totals*
+# If you already have a 2022 ACS population tibble like:
+#   pop22 <- tibble(GEOID=<chr 5>, pop_2022=<num>)
+# this script can fall back to it when tidycensus isn’t available.
+# ============================================================================
+
+# --------------------------- Small helpers -----------------------------------
+std_fips <- function(x) stringr::str_pad(as.character(x), 5, pad = "0")
+msg <- function(...) message(sprintf(...))
+
+NA_chr <- function(n) rep(NA_character_, n)
+NA_int <- function(n) rep(NA_integer_, n)
+NA_num <- function(n) rep(NA_real_, n)
+
+nearest_year <- function(y, avail) {
+  if (!length(avail) || is.na(y)) return(NA_integer_)
+  avail[ which.min(abs(avail - y)) ]
+}
+
+safe_quintile <- function(x, n = 5, min_unique = 2) {
+  v <- x[is.finite(x)]
+  u <- length(unique(v))
+  if (u < min_unique) return(factor(rep("All", length(x)), levels = "All"))
+  k <- min(n, u)
+  qs <- stats::quantile(v, probs = seq(0, 1, length.out = k + 1), na.rm = TRUE, type = 7)
+  qs[1] <- min(v, na.rm = TRUE) - 1e-9
+  qs[length(qs)] <- max(v, na.rm = TRUE) + 1e-9
+  cut(x, breaks = qs, include_lowest = TRUE, right = FALSE, labels = paste0("Q", seq_len(k)))
+}
+
+normalize_item_code <- function(x) {
+  x <- toupper(trimws(as.character(x)))
+  x <- gsub("[^A-Z0-9]", "", x)
+  # Normalize variants like "E032", "32E", "E32something"
+  x <- ifelse(grepl("^[0-9]{1,3}E$", x), paste0("E", sub("^0*([0-9]{1,3})E$", "\\1", x)), x)
+  x <- gsub("^E0*([0-9]{1,3}).*$", "E\\1", x)
+  x
+}
+
+# --------------------------- Finance reader (typed) ---------------------------
+# Return: county_ihme (chr), fin_year (int), amount (num), item_code_norm (chr),
+#         func_code (chr), trans_code (chr)
+smart_read_fin <- function(path) {
+  # Fixed-width-ish quick parse (best effort)
+  lines <- try(read_lines(path, progress = FALSE), silent = TRUE)
+  if (!inherits(lines, "try-error") && length(lines)) {
+    yrm <- stringr::str_match(lines, "(\\d{4})\\s*[A-Za-z]?$")
+    if (any(!is.na(yrm[,1]))) {
+      keep <- which(!is.na(yrm[,1]))
+      n <- length(keep)
+      year <- suppressWarnings(as.integer(yrm[keep, 2]))
+      pref <- stringr::str_trim(stringr::str_sub(lines[keep], end = -(nchar(yrm[keep,1]) + 1)), side = "right")
+      amount   <- suppressWarnings(as.numeric(gsub(".*?([0-9][0-9,\\.]+)\\s*$", "\\1", pref)))
+      item_raw <- toupper(sub("^\\s*([A-Z0-9]{1,6}).*$", "\\1", pref))
+      out <- tibble::tibble(
+        county_ihme    = NA_chr(n),
+        fin_year       = year,
+        amount         = amount,
+        item_code_norm = normalize_item_code(item_raw),
+        func_code      = NA_chr(n),
+        trans_code     = NA_chr(n)
+      ) |>
+        filter(!is.na(fin_year), is.finite(amount))
+      if (nrow(out)) return(out)
+    }
+  }
+
+  # Delimited: TSV → CSV → whitespace
+  parsers <- list(
+    function() readr::read_delim(path, delim = "\t", show_col_types = FALSE, progress = FALSE),
+    function() readr::read_csv(path, show_col_types = FALSE, progress = FALSE),
+    function() readr::read_table(path, show_col_types = FALSE)
+  )
+  df <- NULL
+  for (f in parsers) {
+    tmp <- try(f(), silent = TRUE)
+    if (!inherits(tmp, "try-error") && is.data.frame(tmp) && ncol(tmp)) { df <- tmp; break }
+  }
+  if (is.null(df)) stop("Could not parse: ", basename(path))
+
+  nm <- names(df); n <- nrow(df)
+  year_col <- nm[grepl("^f(isc|is_)?year$|^year$|^fy$", nm, ignore.case = TRUE)][1]
+  amt_col  <- nm[grepl("^amount$|^value$|^expend", nm, ignore.case = TRUE)][1]
+  item_col <- nm[grepl("^item$|^code$|^object$|^acct|^func.?obj|^function.?object|^objcode", nm, ignore.case = TRUE)][1]
+  func_col <- nm[grepl("^function$|^func(code)?$", nm, ignore.case = TRUE)][1]
+  tran_col <- nm[grepl("^trans|^type$|^object.?type$", nm, ignore.case = TRUE)][1]
+  fips_col <- nm[grepl("county.*fips$|^fips$|geoid|cntyid", nm, ignore.case = TRUE)][1]
+
+  fin_year <- if (!is.na(year_col)) suppressWarnings(as.integer(df[[year_col]])) else NA_int(n)
+  amount   <- if (!is.na(amt_col))  suppressWarnings(as.numeric(gsub(",", "", df[[amt_col]]))) else NA_num(n)
+  item_raw <- if (!is.na(item_col)) toupper(as.character(df[[item_col]])) else NA_chr(n)
+  func_raw <- if (!is.na(func_col)) as.character(df[[func_col]]) else NA_chr(n)
+  tran_raw <- if (!is.na(tran_col)) as.character(df[[tran_col]]) else NA_chr(n)
+  geoid    <- if (!is.na(fips_col)) std_fips(df[[fips_col]]) else NA_chr(n)
+
+  tibble::tibble(
+    county_ihme    = geoid,
+    fin_year       = fin_year,
+    amount         = amount,
+    item_code_norm = normalize_item_code(item_raw),
+    func_code      = func_raw,
+    trans_code     = tran_raw
+  ) |>
+    filter(!is.na(fin_year), is.finite(amount))
+}
+
+# --------------------------- Load finance files -------------------------------
+fin_files <- c(
+  list.files(finance_dir, pattern = "^\\d{4}.*FinEst.*\\.txt$", full.names = TRUE),
+  list.files(finance_dir, pattern = "^\\d{4}.*FinInd.*\\.txt$", full.names = TRUE),
+  list.files(finance_dir, pattern = "\\.csv$", full.names = TRUE),
+  list.files(finance_dir, pattern = "\\.txt$", full.names = TRUE)
+) |> unique()
+
+if (!length(fin_files)) stop("No finance files found in: ", finance_dir)
+
+msg("[finance] Reading %d finance files ...", length(fin_files))
+
+fin_list <- purrr::map(fin_files, \(p) {
+  out <- try(smart_read_fin(p), silent = TRUE)
+  if (inherits(out, "try-error") || is.null(out) || !nrow(out)) return(NULL)
+  out |>
+    mutate(
+      county_ihme    = as.character(county_ihme),
+      fin_year       = as.integer(fin_year),
+      amount         = as.numeric(amount),
+      item_code_norm = as.character(item_code_norm),
+      func_code      = as.character(func_code),
+      trans_code     = as.character(trans_code)
+    )
+})
+fin_list <- fin_list[!vapply(fin_list, is.null, logical(1))]
+if (!length(fin_list)) stop("All finance files failed to parse.")
+
+fin_raw <- dplyr::bind_rows(fin_list)
+
+# --------------------------- Detect E32 (vectorized, no schema mixing) -------
+# Rule:
+#  • If combined item code is present → use it (E32 True if == "E32")
+#  • Else if only FUNC+TRANS schema present → E32 when FUNC==32 & TRANS is expenditure-ish
+#
+# This avoids mixing (we don't cross-confirm or merge schemas on the same row).
+trans_is_exp <- function(x) {
+  xu <- toupper(trimws(as.character(x)))
+  xu %in% c("E","EXP","EXPEND","EXPENDITURE","EXPENDITURES","EXPENSE","EXPENSES")
+}
+func_to_int <- function(x) suppressWarnings(as.integer(gsub("[^0-9]", "", as.character(x))))
+
+fin_raw <- fin_raw |>
+  mutate(
+    has_ic     = !is.na(item_code_norm) & nzchar(item_code_norm),
+    is_e32_ic  = has_ic & (item_code_norm == "E32"),
+    func_i     = func_to_int(func_code),
+    is_e32_ft  = (!has_ic) & !is.na(func_i) & func_i == 32 &
+                 trans_is_exp(trans_code),
+    is_E32     = is_e32_ic | is_e32_ft
+  )
+
+fin_e32 <- fin_raw |>
+  filter(is_E32) |>
+  filter(!is.na(county_ihme), grepl("^\\d{5}$", county_ihme), is.finite(amount)) |>
+  group_by(county_ihme, fin_year) |>
+  summarise(ph_exp_total = sum(amount, na.rm = TRUE), .groups = "drop")
+
+if (!nrow(fin_e32)) {
+  msg("No E32 rows found. Top signals observed (first 20):")
+  print(fin_raw |>
+          transmute(sig = paste0(
+            "item=", ifelse(is.na(item_code_norm), "NA", item_code_norm),
+            "; func=", ifelse(is.na(func_code), "NA", func_code),
+            "; trans=", ifelse(is.na(trans_code), "NA", toupper(trans_code))
+          )) |>
+          count(sig, sort = TRUE) |>
+          head(20))
+  stop("E32 not detected in your finance files.")
+}
+
+fin_all <- fin_e32
+yrs_fin <- sort(unique(fin_all$fin_year))
+msg("[finance] Built fin_all (E32 only): %,d rows across finance years: %s",
+    nrow(fin_all), paste(yrs_fin, collapse = ", "))
+
+# --------------------------- Population for finance years ---------------------
+ph_pc_fin <- NULL
+using_pop22 <- FALSE
+
+if (USE_PER_CAPITA) {
+  can_census <- FALSE
+  if (requireNamespace("tidycensus", quietly = TRUE)) {
+    if (nzchar(Sys.getenv("CENSUS_API_KEY", ""))) {
+      tidycensus::census_api_key(Sys.getenv("CENSUS_API_KEY"), install = FALSE, overwrite = FALSE)
+    }
+    get_fin_pop <- function(y) {
+      pep <- try(
+        tidycensus::get_estimates(geography = "county", product = "population",
+                                  year = y, variables = "POP", cache_table = TRUE),
+        silent = TRUE
+      )
+      if (!inherits(pep, "try-error") && nrow(pep)) {
+        return(pep |> transmute(county_ihme = GEOID, year = y, pop = as.numeric(value)))
+      }
+      acs_year <- pmin(pmax(y, 2009L), 2023L)
+      acs <- try(
+        tidycensus::get_acs(geography = "county", variables = "B01001_001",
+                            year = acs_year, survey = "acs5", cache_table = TRUE, show_call = FALSE),
+        silent = TRUE
+      )
+      if (!inherits(acs, "try-error") && nrow(acs)) {
+        return(acs |> transmute(county_ihme = GEOID, year = y, pop = as.numeric(estimate)))
+      }
+      tibble::tibble()
+    }
+    pop_fin <- purrr::map_dfr(yrs_fin, get_fin_pop) |> distinct()
+    if (nrow(pop_fin)) {
+      can_census <- TRUE
+      ph_pc_fin <- fin_all |>
+        inner_join(pop_fin, by = c("county_ihme","fin_year" = "year")) |>
+        mutate(ph_pc = ph_exp_total / pop) |>
+        select(county_ihme, fin_year, ph_pc)
+      msg("[pop] Using PEP/ACS population for finance years.")
+    }
+  }
+  if (!can_census) {
+    if (exists("pop22") && all(c("GEOID","pop_2022") %in% names(pop22))) {
+      using_pop22 <- TRUE
+      ph_pc_fin <- fin_all |>
+        inner_join(pop22 |> transmute(county_ihme = std_fips(GEOID),
+                                      fin_year = NA_integer_, pop = pop_2022),
+                   by = "county_ihme") |>
+        mutate(ph_pc = ph_exp_total / pop) |>
+        select(county_ihme, fin_year, ph_pc)
+      msg("[pop] No tidycensus. Falling back to your 2022 ACS population (pop22).")
+    } else {
+      msg("[pop] No tidycensus key and no 'pop22' object → using TOTAL dollars (not per-capita).")
+      USE_PER_CAPITA <- FALSE
+    }
+  }
+}
+
+# --------------------------- Direction score (county-year) --------------------
+# Provide either `direction_year` or raw `df` to rebuild it.
+if (!exists("direction_year")) {
+  if (!exists("df"))
+    stop("Provide `direction_year` or a `df` with county_ihme, year and the four inputs to build it.")
+  req <- c("county_ihme","year","DQ_prop_garbage","prop_light","pct_overd_miss","pct_acc_miss")
+  stopifnot(all(req %in% names(df)))
+  df <- df |>
+    mutate(county_ihme = std_fips(county_ihme), year = as.integer(year))
+  gs <- df |>
+    summarise(across(
+      c(DQ_prop_garbage, prop_light, pct_overd_miss, pct_acc_miss),
+      list(mean = ~mean(.x, na.rm = TRUE), sd = ~sd(.x, na.rm = TRUE)),
+      .names = "{.col}_{.fn}"
+    ))
+  z <- function(x, m, s) (x - m) / s
+  direction_year <- df |>
+    mutate(
+      z_DQ_prop_garbage = z(DQ_prop_garbage, gs$DQ_prop_garbage_mean, gs$DQ_prop_garbage_sd),
+      z_prop_light      = z(prop_light,      gs$prop_light_mean,      gs$prop_light_sd),
+      z_pct_overd_miss  = z(pct_overd_miss,  gs$pct_overd_miss_mean,  gs$pct_overd_miss_sd),
+      z_pct_acc_miss    = z(pct_acc_miss,    gs$pct_acc_miss_mean,    gs$pct_acc_miss_sd),
+      direction_score   = (z_prop_light + z_pct_overd_miss + z_pct_acc_miss + z_DQ_prop_garbage) / 4
+    ) |>
+    select(county_ihme, year, direction_score,
+           z_DQ_prop_garbage, z_prop_light, z_pct_overd_miss, z_pct_acc_miss)
+}
+
+# --------------------------- Snap each obs-year to nearest finance year -------
+avail_fin_years <- sort(unique(fin_all$fin_year))
+if (!length(avail_fin_years)) stop("No available finance years in fin_all (after E32 filter).")
+
+if (USE_PER_CAPITA) {
+  dir_spend <- direction_year |>
+    mutate(fin_year = vapply(year, nearest_year, integer(1), avail = avail_fin_years)) |>
+    left_join(ph_pc_fin, by = c("county_ihme","fin_year"))
+} else {
+  dir_spend <- direction_year |>
+    mutate(fin_year = vapply(year, nearest_year, integer(1), avail = avail_fin_years)) |>
+    left_join(fin_all, by = c("county_ihme","fin_year"))
+}
+
+# --------------------------- Membership + year→period map ---------------------
+membership_path <- membership_guess[file.exists(membership_guess)][1]
+if (is.na(membership_path)) stop("Could not find county→cluster membership CSV in output/.")
+
+membership <- readr::read_csv(membership_path, show_col_types = FALSE) |>
+  transmute(
+    county_ihme = std_fips(fips),
+    cluster = as.character(cluster),
+    period  = as.character(period)
+  ) |>
+  distinct()
+
+# Build year→period map from labels like "2015_2022"
+parse_period <- function(lbl) {
+  m <- stringr::str_match(lbl, "^(\\d{4})\\D+(\\d{4})$")
+  if (is.na(m[1,1])) stop("Unparsable period label: ", lbl)
+  c(start = as.integer(m[1,2]), end = as.integer(m[1,3]))
+}
+bounds <- unique(membership$period) |>
+  tibble::tibble(period = _) |>
+  mutate(bounds = map(period, parse_period)) |>
+  tidyr::unnest_wider(bounds)
+year_to_period <- purrr::pmap_dfr(list(bounds$period, bounds$start, bounds$end),
+                                  \(p, s, e) tibble::tibble(year = seq.int(s, e), period = p))
+
+# --------------------------- Observation-year population (weights) ------------
+pop_obs <- NULL
+if (USE_PER_CAPITA && requireNamespace("tidycensus", quietly = TRUE) &&
+    nzchar(Sys.getenv("CENSUS_API_KEY","")) ) {
+  tidycensus::census_api_key(Sys.getenv("CENSUS_API_KEY"), install = FALSE, overwrite = FALSE)
+  get_obs_pop <- function(yy) {
+    pep <- try(
+      tidycensus::get_estimates(geography = "county", product = "population",
+                                year = yy, variables = "POP", cache_table = TRUE),
+      silent = TRUE
+    )
+    if (!inherits(pep, "try-error") && nrow(pep)) {
+      return(pep |> transmute(county_ihme = GEOID, year = yy, pop = as.numeric(value)))
+    }
+    acs_year <- pmin(pmax(yy, 2009L), 2023L)
+    acs <- try(
+      tidycensus::get_acs(geography = "county", variables = "B01001_001",
+                          year = acs_year, survey = "acs5", cache_table = TRUE, show_call = FALSE),
+      silent = TRUE
+    )
+    if (!inherits(acs, "try-error") && nrow(acs)) {
+      return(acs |> transmute(county_ihme = GEOID, year = yy, pop = as.numeric(estimate)))
+    }
+    tibble::tibble()
+  }
+  yrs_obs <- sort(unique(direction_year$year))
+  pop_obs <- purrr::map_dfr(yrs_obs, get_obs_pop) |> distinct()
+  if (!nrow(pop_obs)) pop_obs <- NULL
+}
+
+# --------------------------- Cluster-period averages --------------------------
+if (USE_PER_CAPITA) {
+  if (!is.null(pop_obs)) {
+    # population-weighted mean of snapped per-capita across county-years within period
+    clu_spend <- dir_spend |>
+      left_join(year_to_period, by = "year") |>
+      left_join(pop_obs, by = c("county_ihme","year")) |>
+      filter(is.finite(ph_pc), is.finite(pop), !is.na(period)) |>
+      inner_join(membership, by = c("county_ihme","period")) |>
+      group_by(cluster, period) |>
+      summarise(ph_pc_cluster = sum(ph_pc * pop, na.rm = TRUE)/sum(pop, na.rm = TRUE), .groups = "drop") |>
+      group_by(period) |>
+      mutate(spend_quintile = safe_quintile(ph_pc_cluster, n = 5)) |>
+      ungroup()
+  } else {
+    # unweighted mean across county-years within period
+    clu_spend <- dir_spend |>
+      left_join(year_to_period, by = "year") |>
+      filter(is.finite(ph_pc), !is.na(period)) |>
+      inner_join(membership, by = c("county_ihme","period")) |>
+      group_by(cluster, period) |>
+      summarise(ph_pc_cluster = mean(ph_pc, na.rm = TRUE), .groups = "drop") |>
+      group_by(period) |>
+      mutate(spend_quintile = safe_quintile(ph_pc_cluster, n = 5)) |>
+      ungroup()
+  }
+} else {
+  # Totals (not per-capita): mean of snapped totals across county-years → cluster-period
+  clu_spend <- dir_spend |>
+    left_join(year_to_period, by = "year") |>
+    filter(is.finite(ph_exp_total), !is.na(period)) |>
+    inner_join(membership, by = c("county_ihme","period")) |>
+    group_by(cluster, period) |>
+    summarise(ph_total_avg = mean(ph_exp_total, na.rm = TRUE), .groups = "drop") |>
+    group_by(period) |>
+    mutate(spend_quintile = safe_quintile(ph_total_avg, n = 5)) |>
+    ungroup()
+}
+
+# --------------------------- Save --------------------------------------------
+dir.create(here("output"), showWarnings = FALSE, recursive = TRUE)
+outfile <- here("output","cluster_spending_E32_snapped.csv")
+readr::write_csv(clu_spend, outfile)
+msg("✓ Wrote: %s", outfile)
+# -------------------- 4) Population --------------------
+census_api_key(Sys.getenv("CENSUS_API_KEY"), install = FALSE, overwrite = FALSE)
+
+get_year_pop <- function(y) {
+  pep <- try(
+    tidycensus::get_estimates(geography = "county", product = "population", year = y, variables = "POP"),
+    silent = TRUE
+  )
+  if (!inherits(pep, "try-error") && nrow(pep)) {
+    return(pep %>% transmute(county_ihme = GEOID, year = y, pop = as.numeric(value)))
+  }
+  acs_year <- pmin(pmax(y, 2009L), 2023L)
+  acs <- try(
+    tidycensus::get_acs(geography = "county", variables = "B01001_001", year = acs_year,
+                        survey = "acs5", cache_table = TRUE, show_call = FALSE),
+    silent = TRUE
+  )
+  if (!inherits(acs, "try-error") && nrow(acs)) {
+    return(acs %>% transmute(county_ihme = GEOID, year = y, pop = as.numeric(estimate)))
+  }
+  tibble()
+}
+
+# Pop for FINANCE years (to compute per-capita in finance space)
+yrs_fin <- sort(unique(fin_all$fin_year))
+pop_fin <- map_dfr(yrs_fin, get_year_pop) %>% distinct()
+if (!nrow(pop_fin)) stop("Could not build population series for finance years; check your Census API key.")
+
+# Per-capita for finance years
+ph_pc_fin <- fin_all %>%
+  inner_join(pop_fin, by = c("county_ihme","fin_year" = "year")) %>%
+  transmute(county_ihme, fin_year, ph_pc = ph_exp_total / pop)
+
+# -------------------- 5) Build/ensure direction_year with z-components --------------------
+get_colname2 <- function(df, patterns) {
+  nm <- names(df); hit <- which(Reduce(`|`, lapply(patterns, \(p) grepl(p, nm, ignore.case = TRUE))))
+  if (length(hit)) nm[hit[1]] else NA_character_
+}
+
+ensure_direction_year <- function(direction_year = NULL, df = NULL) {
+  if (!is.null(direction_year)) {
+    need <- c("county_ihme","year","z_DQ_prop_garbage","z_prop_light","z_pct_overd_miss","z_pct_acc_miss","direction_score")
+    has  <- need %in% names(direction_year)
+    if (all(has)) return(direction_year %>% mutate(county_ihme = std_fips(county_ihme), year = as.integer(year)))
+    # re-compute missing pieces if raw present
+  }
+  if (is.null(df)) stop("direction_year not supplied and 'df' is not available to rebuild it.")
+  req <- c("county_ihme","year","DQ_prop_garbage","prop_light","pct_overd_miss","pct_acc_miss")
+  stopifnot(all(req %in% names(df)))
+  df <- df %>% mutate(county_ihme = std_fips(county_ihme), year = as.integer(year))
+  gs <- df %>%
+    summarise(across(
+      c(DQ_prop_garbage, prop_light, pct_overd_miss, pct_acc_miss),
+      list(mean = ~mean(.x, na.rm = TRUE), sd = ~sd(.x, na.rm = TRUE)),
+      .names = "{.col}_{.fn}"
+    ))
+  z <- function(x, m, s) (x - m) / s
+  out <- df %>%
+    mutate(
+      z_DQ_prop_garbage = z(DQ_prop_garbage, gs$DQ_prop_garbage_mean, gs$DQ_prop_garbage_sd),
+      z_prop_light      = z(prop_light,      gs$prop_light_mean,      gs$prop_light_sd),
+      z_pct_overd_miss  = z(pct_overd_miss,  gs$pct_overd_miss_mean,  gs$pct_overd_miss_sd),
+      z_pct_acc_miss    = z(pct_acc_miss,    gs$pct_acc_miss_mean,    gs$pct_acc_miss_sd),
+      direction_score   = (z_prop_light + z_pct_overd_miss + z_pct_acc_miss + z_DQ_prop_garbage) / 4
+    ) %>%
+    select(county_ihme, year, direction_score, z_DQ_prop_garbage, z_prop_light, z_pct_overd_miss, z_pct_acc_miss)
+  out
+}
+
+# Use in-scope 'direction_year' if present, else rebuild from 'df'
+direction_year <- if (exists("direction_year")) {
+  ensure_direction_year(direction_year = get("direction_year"))
+} else if (exists("df")) {
+  ensure_direction_year(direction_year = NULL, df = get("df"))
+} else {
+  stop("Need either 'direction_year' or a raw 'df' with required columns.")
+}
+
+# -------------------- 6) Optional: reporting-type lookup --------------------
+reporting_path_opts <- c(
+  here("data_raw", "County-Death-Investigation-System-2018-1-9-2024.csv"),
+  "/mnt/data/County-Death-Investigation-System-2018-1-9-2024.csv"
+)
+reporting_path <- reporting_path_opts[file.exists(reporting_path_opts)][1]
+rep_lu <- NULL
+if (!is.na(reporting_path)) {
+  rep_raw <- readr::read_csv(reporting_path, show_col_types = FALSE)
+  fips_col <- get_colname2(rep_raw, c("^fips$","^fips_?code$","geoid","county_?fips","countyrs","fips.*5"))
+  type_col <- get_colname2(rep_raw, c("reporting.*type","investigation.*type","death.*investigation.*system","^type$","system"))
+  if (!is.na(fips_col) && !is.na(type_col)) {
+    rep_lu <- rep_raw %>%
+      transmute(county_ihme = std_fips(.data[[fips_col]]),
+                reporting_type = trimws(as.character(.data[[type_col]]))) %>%
+      filter(nchar(county_ihme)==5, reporting_type!="") %>%
+      mutate(reporting_type = dplyr::recode(tolower(reporting_type),
+        "medical examiner"="Medical Examiner","me"="Medical Examiner",
+        "coroner"="Coroner","mixed"="Mixed","hybrid"="Mixed",
+        "sheriff"="Other County Official","justice of the peace"="Other County Official",
+        .default = stringr::str_to_title(reporting_type))) %>%
+      distinct()
+  }
+}
+
+# =====================================================================
+# ===================== VALIDATION PLOTTING ============================
+# =====================================================================
+
+# ---- Common helpers for plotting ----
+safe_bucket <- function(x, n = 5, min_unique = 2) {
+  v <- x[is.finite(x)]; u <- length(unique(v))
+  if (u < min_unique) return(factor(rep("All", length(x)), levels = "All"))
+  k <- min(n, u)
+  qs <- quantile(v, probs = seq(0, 1, length.out = k + 1), na.rm = TRUE, type = 7)
+  qs[1] <- min(v, na.rm = TRUE) - 1e-9
+  qs[length(qs)] <- max(v, na.rm = TRUE) + 1e-9
+  cut(x, breaks = qs, include_lowest = TRUE, right = FALSE, labels = paste0("Q", seq_len(k)))
+}
+pretty_label <- function(x) { x <- gsub("^z_", "", x); x <- gsub("_", " ", x); paste0("z(", x, ")") }
+
+# -------------------- A) diversity by reporting type (unchanged logic) --------------------
+if (!is.null(rep_lu) && nrow(rep_lu)) {
+  div4 <- c("z_DQ_prop_garbage","z_prop_light","z_pct_overd_miss","z_pct_acc_miss")
+  ts_type <- direction_year %>%
+    select(county_ihme, year, all_of(div4)) %>%
+    left_join(rep_lu, by="county_ihme") %>%
+    filter(!is.na(reporting_type)) %>%
+    pivot_longer(cols = all_of(div4), names_to="div_metric", values_to="z_value") %>%
+    mutate(div_metric = recode(div_metric,
+      z_DQ_prop_garbage="z(garbage share)",
+      z_prop_light="z(light-garbage share)",
+      z_pct_overd_miss="z(overdose detail missing)",
+      z_pct_acc_miss="z(accident detail missing)")) %>%
+    group_by(year, reporting_type, div_metric) %>%
+    summarise(avg_z = mean(z_value, na.rm = TRUE), .groups="drop")
+
+  g_type <- ggplot(ts_type, aes(year, avg_z, colour = reporting_type)) +
+    geom_line(linewidth=0.9) + geom_point(size=1.6) +
+    facet_wrap(~ div_metric, ncol=2, scales="free_y") +
+    labs(title="Diversity components (z) by death investigation reporting type",
+         x=NULL, y="Mean z-score", colour="Reporting type") +
+    theme_bw() + theme(axis.text.x = element_text(angle=20, hjust=1))
+  ggsave(here(out_dir, "diversity_z_by_reporting_type_timeseries.png"),
+         g_type, width=10, height=7.5, dpi=300)
+}
+
+# -------------------- B) COUNTY-YEAR (snapped) quintiles by PH spend --------------------
+# Revert to "snap to nearest finance year" per observation year (no global fill)
+nearest_fin_year <- function(y, avail) {
+  if (!length(avail) || is.na(y)) return(NA_integer_)
+  avail[ which.min(abs(avail - y)) ]
+}
+avail_fin_years <- sort(unique(na.omit(ph_pc_fin$fin_year)))
+if (!length(avail_fin_years)) stop("No available finance years after E32 filtering.")
+
+# Attach snapped PH per-capita to each county-year in direction_year
+dir_ph_snap <- direction_year %>%
+  mutate(fin_year = vapply(year, nearest_fin_year, integer(1), avail = avail_fin_years)) %>%
+  left_join(ph_pc_fin, by = c("county_ihme","fin_year"))
+
+# Reverse sign so higher = better (for readability), but do not mutate originals
+dir_ph_snap2 <- dir_ph_snap %>%
+  mutate(
+    z_DQ_prop_garbage_pos = -z_DQ_prop_garbage,
+    z_prop_light_pos      = -z_prop_light,
+    z_pct_overd_miss_pos  = -z_pct_overd_miss,
+    z_pct_acc_miss_pos    = -z_pct_acc_miss
+  )
+
+div_map_pos <- c(
+  z_DQ_prop_garbage_pos = "z(garbage share)  (higher=better)",
+  z_prop_light_pos      = "z(light-garbage)  (higher=better)",
+  z_pct_overd_miss_pos  = "z(overdose detail missing)  (higher=better)",
+  z_pct_acc_miss_pos    = "z(accident detail missing)  (higher=better)"
+)
+
+ts_year <- dir_ph_snap2 %>%
+  group_by(year) %>%
+  mutate(ph_quintile = safe_bucket(ph_pc, n = 5)) %>%
+  ungroup() %>%
+  filter(!is.na(ph_quintile)) %>%
+  pivot_longer(cols = c(z_DQ_prop_garbage_pos, z_prop_light_pos, z_pct_overd_miss_pos, z_pct_acc_miss_pos),
+               names_to = "div_metric", values_to = "z_value") %>%
+  mutate(div_metric = recode(div_metric, !!!div_map_pos)) %>%
+  group_by(year, ph_quintile, div_metric) %>%
+  summarise(avg_z = mean(z_value, na.rm = TRUE), .groups = "drop")
+
+g_year <- ggplot(ts_year, aes(year, avg_z, group = ph_quintile, colour = ph_quintile)) +
+  geom_line(linewidth = 0.9, na.rm = TRUE) +
+  geom_point(size = 1.6, na.rm = TRUE) +
+  facet_wrap(~ div_metric, ncol = 2, scales = "free_y") +
+  labs(
+    title    = "Diversity components (z, higher = better) by PH spend quintile (county-year, snapped)",
+    subtitle = paste0("PH per-capita snapped to nearest finance year: ",
+                      paste(avail_fin_years, collapse = ", ")),
+    x = NULL, y = "Mean z-score", colour = "Spend quintile"
+  ) +
+  theme_bw() + theme(axis.text.x = element_text(angle = 20, hjust = 1))
+
+ggsave(here(out_dir, "direction_diversity_by_ph_spend_quintile_timeseries.png"),
+       g_year, width = 10, height = 7.5, dpi = 300)
+
+# -------------------- C) CLUSTER-LEVEL PH spend (population-weighted) --------------------
+# Load cluster metrics (COD-standardized) and membership
+metrics_file    <- here("output", "cluster_metrics_ucr39_cstd.csv.gz")
+membership_file <- here("output", "county_cluster_membership.csv.gz")
+message("Reading cluster metrics: ", metrics_file)
+metrics <- readr::read_csv(metrics_file, show_col_types = FALSE) %>%
+  mutate(cluster = as.character(cluster), period = as.character(period))
+message("Reading cluster membership: ", membership_file)
+membership <- readr::read_csv(membership_file, show_col_types = FALSE) %>%
+  transmute(county_ihme = std_fips(fips), cluster = as.character(cluster), period = as.character(period)) %>%
+  distinct() %>% filter(!is.na(county_ihme), grepl("^\\d{5}$", county_ihme))
+
+# Choose COD-std diversity columns
+num_cols  <- names(metrics)[vapply(metrics, is.numeric, logical(1))]
+cand_all  <- num_cols[grepl("detail|entropy|shannon|even|rich|eff(num|ective)|phillips", num_cols, ignore.case = TRUE)]
+cand_cstd <- cand_all[grepl("cstd|cod.?std|cause.?standard", cand_all, ignore.case = TRUE)]
+div_cols  <- if (length(cand_cstd)) cand_cstd else cand_all
+stopifnot(length(div_cols) > 0)
+
+# Z the chosen columns
+metrics_z <- metrics
+for (nm in div_cols) metrics_z[[paste0("z_", nm)]] <- as.numeric(scale(metrics[[nm]]))
+div_z_cols <- paste0("z_", div_cols)
+div_label  <- setNames(pretty_label(div_z_cols), div_z_cols)
+
+# Period order + bounds
+canonical4 <- c("1999_2005","2006_2012","2013_2019","2020_2022")
+period_levels <- if (all(canonical4 %in% unique(metrics$period))) canonical4 else sort(unique(metrics$period))
+parse_period_bounds <- function(p) {
+  p2 <- trimws(as.character(p))
+  m2 <- stringr::str_match(p2, "^(\\d{4})\\D+(\\d{4})$"); m1 <- stringr::str_match(p2, "^(\\d{4})$")
+  start <- ifelse(!is.na(m2[,2]), as.integer(m2[,2]), ifelse(!is.na(m1[,2]), as.integer(m1[,2]), NA_integer_))
+  end   <- ifelse(!is.na(m2[,3]), as.integer(m2[,3]), ifelse(!is.na(m1[,1]), as.integer(m1[,1]), NA_integer_))
+  tibble(start = start, end = end)
+}
+bounds <- tibble(period = period_levels) %>%
+  mutate(parsed = map(period, parse_period_bounds)) %>%
+  unnest(parsed) %>%
+  arrange(start, end)
+bad <- bounds$period[is.na(bounds$start) | is.na(bounds$end)]
+if (length(bad)) stop("Unparsable period labels: ", paste(bad, collapse = ", "))
+
+# Map each observation year to a period
+year_to_period <- pmap_dfr(list(bounds$period, bounds$start, bounds$end),
+                           \(p,s,e) tibble(year = seq.int(s, e), period = p))
+
+# Population for OBSERVATION years (for pop-weighted aggregation)
+yrs_obs <- sort(unique(direction_year$year))
+pop_obs <- map_dfr(yrs_obs, get_year_pop) %>% distinct()
+if (!nrow(pop_obs)) stop("Could not build population series for observation years; check your Census API key.")
+
+# Attach snapped per-capita & observation-year pop; convert to "snap expenditure" for that year
+dir_ph_obs <- direction_year %>%
+  mutate(fin_year = vapply(year, nearest_fin_year, integer(1), avail = avail_fin_years)) %>%
+  left_join(ph_pc_fin, by = c("county_ihme","fin_year")) %>%
+  left_join(pop_obs %>% rename(obs_year = year), by = c("county_ihme","year" = "obs_year")) %>%
+  filter(is.finite(ph_pc), is.finite(pop)) %>%
+  mutate(ph_exp_snap = ph_pc * pop) %>%
+  left_join(year_to_period, by = "year") %>%
+  filter(!is.na(period))
+
+# Bring in cluster membership (county×period), then aggregate to cluster×period (pop-weighted)
+clu_snap <- dir_ph_obs %>%
+  inner_join(membership, by = c("county_ihme","period")) %>%
+  group_by(cluster, period) %>%
+  summarise(
+    ph_exp_sum = sum(ph_exp_snap, na.rm = TRUE),
+    pop_sum    = sum(pop, na.rm = TRUE),
+    ph_pc_cluster = ph_exp_sum / pop_sum,
+    .groups = "drop"
+  ) %>%
+  mutate(period = factor(period, levels = period_levels))
+
+# Quintile CLUSTERS (not counties) within each period
+clu_snap <- clu_snap %>%
+  group_by(period) %>%
+  mutate(ph_quintile = safe_bucket(ph_pc_cluster, n = 5)) %>%
+  ungroup()
+
+# Average cluster metrics by cluster PH quintile (equal cluster weight)
+ts_spend <- metrics_z %>%
+  select(cluster, period, all_of(div_z_cols)) %>%
+  inner_join(clu_snap %>% select(cluster, period, ph_quintile), by = c("cluster","period")) %>%
+  pivot_longer(cols = all_of(div_z_cols), names_to = "div_metric", values_to = "z_value") %>%
+  mutate(div_metric = recode(div_metric, !!!div_label)) %>%
+  group_by(period, ph_quintile, div_metric) %>%
+  summarise(avg_z = mean(z_value, na.rm = TRUE), .groups = "drop") %>%
+  mutate(period = factor(period, levels = period_levels)) %>%
+  complete(period, ph_quintile, div_metric)
+
+g_ts <- ggplot(ts_spend, aes(period, avg_z, group = ph_quintile, colour = ph_quintile)) +
+  geom_line(linewidth = 0.9, na.rm = TRUE) +
+  geom_point(size = 1.6, na.rm = TRUE) +
+  facet_wrap(~ div_metric, ncol = 2, scales = "free_y") +
+  scale_x_discrete(drop = FALSE) +
+  labs(title = "COD-standardized Phillips diversity (z) by CLUSTER PH spend quintile",
+       subtitle = "Cluster PH per-capita = sum(E32 $)/sum(pop) over counties & years within each period",
+       x = NULL, y = "Mean z-score", colour = "Cluster spend quintile") +
+  theme_bw() + theme(axis.text.x = element_text(angle = 20, hjust = 1))
+ggsave(here(out_dir, "codstd_phillips_diversity_by_ph_spend_quintile_timeseries.png"),
+       g_ts, width = 10, height = 7.5, dpi = 300)
+
+# -------------------- D) Phillips “detail” (COD-std) by reporting type (optional) --------------------
+if (!is.null(rep_lu) && nrow(rep_lu)) {
+  detail_any  <- num_cols[grepl("detail", num_cols, ignore.case = TRUE)]
+  detail_cstd <- detail_any[grepl("cstd|cod.?std|cause.?standard", detail_any, ignore.case = TRUE)]
+  detail_cols <- if (length(detail_cstd)) detail_cstd else detail_any
+  if (length(detail_cols)) {
+    metrics_z2 <- metrics
+    for (nm in detail_cols) metrics_z2[[paste0("z_", nm)]] <- as.numeric(scale(metrics[[nm]]))
+    detail_z_cols <- paste0("z_", detail_cols)
+    detail_labels <- setNames(pretty_label(detail_z_cols), detail_z_cols)
+
+    rp_data <- membership %>%
+      inner_join(metrics_z2 %>% select(cluster, period, all_of(detail_z_cols)),
+                 by = c("cluster","period")) %>%
+      left_join(rep_lu, by = "county_ihme") %>%  # NOTE: membership didn't carry county_ihme here; optional
+      distinct(cluster, period, .keep_all = TRUE) %>%   # reduce duplicate joins
+      filter(!is.na(period))
+
+    ts_rptype <- rp_data %>%
+      pivot_longer(cols = all_of(detail_z_cols), names_to = "div_metric", values_to = "z_value") %>%
+      mutate(div_metric = recode(div_metric, !!!detail_labels)) %>%
+      group_by(period, div_metric) %>%   # reporting_type is county-level; clusters span mixed counties
+      summarise(avg_z = mean(z_value, na.rm = TRUE), .groups = "drop") %>%
+      mutate(period = factor(period, levels = period_levels))
+
+    if (nrow(ts_rptype)) {
+      g_phillips_type <- ggplot(ts_rptype, aes(period, avg_z, group = div_metric, colour = div_metric)) +
+        geom_line(linewidth = 0.9) + geom_point(size = 1.6) +
+        labs(title = "Phillips 'detail' diversity (z) — cluster averages",
+             x = NULL, y = "Mean z-score", colour = "Metric") +
+        theme_bw() + theme(axis.text.x = element_text(angle = 20, hjust = 1))
+      ggsave(here(out_dir, "phillips_detail_cstd_by_reporting_type_timeseries.png"),
+             g_phillips_type, width = 10, height = 7.5, dpi = 300)
+    }
+  }
+}
+
+message("Done. Figures saved to: ", out_dir)
+
 ```
 Build public health spending
 ```{r}
@@ -2806,26 +3874,26 @@ make_driver_maps("MCOD", "root3")
 COD standardized diversity maps
 ```{r}
 # ──────────────────────────────────────────────────────────────
-# Map ALL cluster-level metrics (using here::here)
+# Cluster metric maps with AK/HI resized like your working code
 # ──────────────────────────────────────────────────────────────
 
 suppressPackageStartupMessages({
-  library(readr); library(dplyr); library(stringr); library(tidyr); library(tibble)
-  library(ggplot2); library(sf); library(tigris); library(scales); library(here)
+  library(readr);  library(dplyr);  library(stringr); library(tidyr);  library(tibble)
+  library(ggplot2); library(sf);     library(tigris);  library(scales); library(here)
 })
 
-options(tigris_use_cache = TRUE, tigris_class = "sf")
+options(tigris_use_cache = TRUE, tigris_class = "sf", sf_use_s2 = TRUE)
 
-# -------- paths (now using here::here) ------------------------
+# ------------------------ paths -------------------------------
 metrics_file    <- here("output", "cluster_metrics_ucr39_cstd.csv.gz")
 membership_file <- here("output", "county_cluster_membership.csv.gz")
-out_dir         <- here("figures", "phillips_maps", "cluster_metrics")
+out_dir         <- here("figures", "phillips_maps", "cluster_metrics_resized")
 dir.create(out_dir, recursive = TRUE, showWarnings = FALSE)
 
-# -------- projection ------------------------------------------
-crs_proj <- 5070  # NAD83 / Conus Albers
+# -------------------- projection ------------------------------
+crs_proj <- 2163  # US National Atlas Equal Area (matches your notebook)
 
-# -------- helpers ---------------------------------------------
+# ------------------------ helpers -----------------------------
 compute_limits <- function(x) {
   x <- x[is.finite(x)]
   if (!length(x)) return(list(lims = c(0, 1), diverging = FALSE))
@@ -2842,83 +3910,119 @@ sanitize <- function(x) {
   x %>% str_replace_all("[^A-Za-z0-9]+", "_") %>% str_replace_all("^_+|_+$", "") %>% tolower()
 }
 
-make_map <- function(sf_data, fill_col, lims, diverging, title) {
-  states <- tigris::states(cb = TRUE, year = 2020, class = "sf") %>%
-    tigris::shift_geometry() %>%
-    sf::st_transform(crs_proj)
+# Same geometry utilities you used
+st_shift <- function(sf_obj, shift = c(0, 0)) {
+  st_geometry(sf_obj) <- st_geometry(sf_obj) + shift
+  sf_obj
+}
+st_scale <- function(sf_obj, scale = 1) {
+  centroid <- st_centroid(st_union(sf_obj))
+  st_geometry(sf_obj) <- (st_geometry(sf_obj) - centroid) * scale + centroid
+  sf_obj
+}
 
-  p <- ggplot() +
+# Build 2020 counties in 2163 and apply the SAME AK/HI transforms you liked
+build_counties_2163_resized <- function() {
+  us_counties <- tigris::counties(year = 2020, cb = TRUE, class = "sf") |>
+    sf::st_transform(crs_proj) |>
+    dplyr::select(GEOID, STATEFP, geometry)
+
+  mainland <- us_counties |> dplyr::filter(!STATEFP %in% c("02","15"))  # exclude AK, HI (PR not included)
+  alaska   <- us_counties |> dplyr::filter(STATEFP == "02") |>
+                st_scale(0.33) |>
+                st_shift(c(1100000, -4700000)) |>
+                sf::st_set_crs(crs_proj)
+  hawaii   <- us_counties |> dplyr::filter(STATEFP == "15") |>
+                st_scale(1)  |>
+                st_shift(c(5000000, -1100000)) |>
+                sf::st_set_crs(crs_proj)
+
+  dplyr::bind_rows(mainland, alaska, hawaii) |>
+    dplyr::rename(fips = GEOID, statefp = STATEFP) |>
+    sf::st_make_valid()
+}
+
+# Do the same to STATES so outlines align perfectly
+build_states_2163_resized <- function() {
+  us_states <- tigris::states(year = 2020, cb = TRUE, class = "sf") |>
+    sf::st_transform(crs_proj) |>
+    dplyr::select(STATEFP, geometry)
+
+  mainland <- us_states |> dplyr::filter(!STATEFP %in% c("02","15"))
+  alaska   <- us_states |> dplyr::filter(STATEFP == "02") |>
+                st_scale(0.33) |>
+                st_shift(c(1100000, -4700000)) |>
+                sf::st_set_crs(crs_proj)
+  hawaii   <- us_states |> dplyr::filter(STATEFP == "15") |>
+                st_scale(1)  |>
+                st_shift(c(5000000, -1100000)) |>
+                sf::st_set_crs(crs_proj)
+
+  dplyr::bind_rows(mainland, alaska, hawaii) |>
+    sf::st_make_valid()
+}
+
+# Build cluster polygons from the transformed counties (join → union)
+build_cluster_sf <- function(period_key, membership_df, counties_sf) {
+  mm <- membership_df %>%
+    dplyr::filter(.data$period == period_key) %>%
+    dplyr::transmute(fips = stringr::str_pad(as.character(fips), 5, pad = "0"),
+                     cluster = as.character(cluster)) %>%
+    dplyr::distinct()
+  if (!nrow(mm)) stop("No membership rows for period: ", period_key)
+
+  counties_sf %>%
+    dplyr::inner_join(mm, by = "fips") %>%
+    dplyr::group_by(cluster) %>%
+    dplyr::summarise(geometry = sf::st_union(geometry), .groups = "drop") %>%
+    sf::st_make_valid()
+}
+
+# Mapping helper (accepts lims/diverging; crops to mainland window you used)
+make_map <- function(sf_data, fill_col, lims = NULL, diverging = NULL,
+                     title = NULL, palette = "RdBu", states_sf) {
+  ggplot() +
     geom_sf(data = sf_data, aes(fill = .data[[fill_col]]), colour = NA) +
-    geom_sf(data = states, fill = NA, colour = "white", linewidth = 0.3) +
-    coord_sf(expand = FALSE) +  # no hard-coded x/ylim → no cropping
-    labs(title = title, fill = NULL) +
+    geom_sf(data = states_sf, fill = NA, colour = "white", linewidth = 0.3) +
+    scale_fill_distiller(
+      palette = "RdBu",     # red ↔ blue diverging
+      direction = 1,       # flip if you want blue = low, red = high
+      na.value = "grey90"
+    ) +
+    coord_sf(
+      xlim = c(-2500000, 2500000),
+      ylim = c(-2200000,  730000),
+      expand = FALSE
+    ) +
+    labs(title = title %||% fill_col, fill = NULL) +
     theme_void() +
     theme(
       plot.title = element_text(size = 16, face = "bold", hjust = 0.5),
       legend.text = element_text(size = 9)
     )
-
-  if (isTRUE(diverging)) {
-    p + scale_fill_distiller(palette = "RdBu", direction = 1,
-                             limits = lims, oob = scales::squish, na.value = "grey90")
-  } else {
-    p + scale_fill_viridis_c(limits = lims, oob = scales::squish, na.value = "grey90")
-  }
 }
 
-make_geoid_if_needed <- function(cnty) {
-  nm <- names(cnty)
-  if (!("GEOID" %in% nm)) {
-    if (all(c("STATEFP", "COUNTYFP") %in% nm)) {
-      cnty <- cnty %>%
-        mutate(GEOID = str_pad(STATEFP, 2, "0") %>% paste0(str_pad(COUNTYFP, 3, "0")))
-    } else {
-      stop("Could not find GEOID or (STATEFP, COUNTYFP) in county shapefile.")
-    }
-  }
-  cnty
-}
-
-# Build cluster polygons for a period (using 2020 counties for all)
-build_cluster_sf <- function(period_key, membership_df) {
-  mm <- membership_df %>%
-    filter(.data$period == period_key) %>%
-    transmute(GEOID = str_pad(as.character(fips), 5, pad = "0"),
-              cluster = as.character(cluster)) %>%
-    distinct()
-  if (!nrow(mm)) stop("No membership rows for period: ", period_key)
-
-  cnty <- tigris::counties(cb = TRUE, year = 2020, class = "sf") %>%
-    make_geoid_if_needed() %>%
-    select(GEOID, geometry) %>%
-    st_transform(crs_proj) %>%
-    st_make_valid()
-
-  cnty %>%
-    inner_join(mm, by = "GEOID") %>%
-    group_by(cluster) %>%
-    summarise(geometry = st_union(geometry), .groups = "drop") %>%
-    st_make_valid()
-}
-
-# -------- load data -------------------------------------------
+# ------------------------- load data --------------------------
 message("Reading metrics: ", metrics_file)
-metrics <- read_csv(metrics_file, show_col_types = FALSE) %>%
-  mutate(cluster = as.character(cluster), period = as.character(period))
+metrics <- readr::read_csv(metrics_file, show_col_types = FALSE) %>%
+  dplyr::mutate(cluster = as.character(cluster), period = as.character(period))
 
 message("Reading membership: ", membership_file)
-membership <- read_csv(membership_file, show_col_types = FALSE) %>%
-  mutate(cluster = as.character(cluster),
-         period  = as.character(period),
-         fips    = str_pad(as.character(fips), 5, pad = "0"))
+membership <- readr::read_csv(membership_file, show_col_types = FALSE) %>%
+  dplyr::mutate(cluster = as.character(cluster),
+                period  = as.character(period),
+                fips    = stringr::str_pad(as.character(fips), 5, pad = "0"))
 
-# numeric metrics
+# Prepare transformed geographies ONCE
+counties_tf <- build_counties_2163_resized()
+states_tf   <- build_states_2163_resized()
+
+# Metric columns & periods
 metric_cols <- names(metrics)[vapply(metrics, is.numeric, logical(1))]
 metric_cols <- setdiff(metric_cols, c("fips", "GEOID", "STATEFP", "COUNTYFP"))
-
 periods <- unique(metrics$period)
 
-# -------- map everything --------------------------------------
+# ----------------------- map everything -----------------------
 for (mcol in metric_cols) {
   subdir <- here(out_dir, sanitize(mcol))
   dir.create(subdir, recursive = TRUE, showWarnings = FALSE)
@@ -2927,12 +4031,13 @@ for (mcol in metric_cols) {
 
   for (win in periods) {
     message(sprintf("Mapping %s — %s", mcol, win))
-    cl_sf <- build_cluster_sf(win, membership)
+
+    cl_sf <- build_cluster_sf(win, membership, counties_tf)
 
     dat <- metrics %>%
-      filter(period == win) %>%
-      select(cluster, !!sym(mcol)) %>%
-      rename(value = !!sym(mcol))
+      dplyr::filter(period == win) %>%
+      dplyr::select(cluster, !!rlang::sym(mcol)) %>%
+      dplyr::rename(value = !!rlang::sym(mcol))
 
     vals <- dat$value[is.finite(dat$value)]
     if (!length(vals) || length(unique(vals)) == 1) {
@@ -2940,12 +4045,14 @@ for (mcol in metric_cols) {
       next
     }
 
-    sf_cl <- cl_sf %>% left_join(dat, by = "cluster")
+    sf_cl <- cl_sf %>% dplyr::left_join(dat, by = "cluster")
     title <- sprintf("%s — %s", mcol, win)
+
     p <- make_map(sf_cl, "value",
                   lims = lims_info$lims,
                   diverging = isTRUE(lims_info$diverging),
-                  title = title)
+                  title = title,
+                  states_sf = states_tf)
 
     fout <- here(subdir, sprintf("%s_%s.png", sanitize(mcol), win))
     ggsave(fout, p, width = 8, height = 6, dpi = 320)
@@ -2954,6 +4061,473 @@ for (mcol in metric_cols) {
 
 message("Done. Maps in: ", out_dir)
 ```
+Scores by reporting type and public health spending for diversity metrics
+```{r}
+# ──────────────────────────────────────────────────────────────
+# Phillips detail metrics vs reporting type & PH spend — FINAL+
+# (period normalization, de-dup membership, robust fin-year snapping)
+# + One time series per metric with 5 lines for PH-spend quintiles
+# ──────────────────────────────────────────────────────────────
+suppressPackageStartupMessages({
+  library(readr); library(dplyr); library(tidyr); library(stringr)
+  library(purrr); library(ggplot2); library(scales); library(here)
+})
+
+dir.create(here("figures","phillips_detail"), recursive = TRUE, showWarnings = FALSE)
+dir.create(here("output"), recursive = TRUE, showWarnings = FALSE)
+
+# ---- helpers --------------------------------------------------
+std_fips <- function(x) stringr::str_pad(as.character(x), 5, pad = "0")
+
+norm_period <- function(x) {
+  # normalize "1999–2005", "1999-2005", "1999 — 2005", etc. → "1999_2005"
+  x <- gsub("\u2013|\u2014|—|-", "_", x)  # en/em dash/hyphen → underscore
+  x <- gsub("\\s+", "", x)                # drop spaces
+  re <- regmatches(x, gregexpr("\\d{4}", x))
+  out <- mapply(function(lbl, yrs) {
+    if (length(yrs) >= 2) {
+      y1 <- min(as.integer(yrs[1]), as.integer(yrs[2]))
+      y2 <- max(as.integer(yrs[1]), as.integer(yrs[2]))
+      paste0(y1, "_", y2)
+    } else lbl
+  }, x, re, USE.NAMES = FALSE)
+  out
+}
+
+get_years <- function(s) as.integer(stringr::str_extract_all(s, "\\d{4}")[[1]])
+parse_period <- function(lbl) {
+  yrs <- get_years(lbl)
+  if (length(yrs) >= 2) {
+    y1 <- min(yrs[1], yrs[2]); y2 <- max(yrs[1], yrs[2]); mid <- floor((y1 + y2)/2)
+    tibble(period = lbl, start = y1, end = y2, mid = mid)
+  } else tibble(period = lbl, start = NA_integer_, end = NA_integer_, mid = NA_integer_)
+}
+nearest_fin_year <- function(y, avail) if (!length(avail) || is.na(y)) NA_integer_ else avail[which.min(abs(avail - y))]
+
+# ---- load cluster metrics + membership -----------------------
+metrics_file_candidates <- c(
+  here("output","cluster_metrics_ucr39_cstd.csv.gz"),
+  here("output","cluster_metrics.csv.gz"),
+  "output/cluster_metrics_ucr39_cstd.csv.gz",
+  "output/cluster_metrics.csv.gz",
+  "cluster_metrics_ucr39_cstd.csv.gz",
+  "cluster_metrics.csv.gz"
+)
+membership_file_candidates <- c(
+  here("output","county_cluster_membership.csv.gz"),
+  "output/county_cluster_membership.csv.gz",
+  "county_cluster_membership.csv.gz"
+)
+metrics_file    <- metrics_file_candidates[file.exists(metrics_file_candidates)][1]
+membership_file <- membership_file_candidates[file.exists(membership_file_candidates)][1]
+stopifnot(!is.na(metrics_file), !is.na(membership_file))
+
+metrics <- readr::read_csv(metrics_file, show_col_types = FALSE) %>%
+  mutate(cluster = as.character(cluster),
+         period  = norm_period(as.character(period)))
+
+membership <- readr::read_csv(membership_file, show_col_types = FALSE) %>%
+  mutate(cluster     = as.character(cluster),
+         period      = norm_period(as.character(period)),
+         county_ihme = std_fips(if ("fips" %in% names(.)) fips else if ("GEOID" %in% names(.)) GEOID else fips)) %>%
+  filter(grepl("^[0-9]{5}$", county_ihme)) %>%
+  distinct(cluster, period, county_ihme, .keep_all = FALSE)    # one row per key
+
+# ---- pick 4 Phillips metrics ---------------------------------
+num_cols <- names(metrics)[vapply(metrics, is.numeric, logical(1))]
+preferred <- c(
+  "detail_mcod_root3_cstd","detail_mcod_icd4_cstd","detail_ucod_root3_cstd","detail_ucod_icd4_cstd",
+  "detail_d95","detail_d2000","detail_2000","detail_ref2000",
+  "cod_diversity_cstd","cod_diversity_std","cod_diversity",
+  "neff_cause","richness_cause","richness_cstd","neff_cstd"
+)
+present_pref <- intersect(preferred, num_cols)
+if (length(present_pref) < 4) {
+  extra <- setdiff(num_cols, present_pref)
+  cand  <- extra[grepl("detail|divers|rich|neff|d95", extra, ignore.case = TRUE)]
+  present_pref <- unique(c(present_pref, cand))
+}
+detail_cols <- unique(present_pref)[1:min(4, length(unique(present_pref)))]
+stopifnot(length(detail_cols) > 0)
+message("Using Phillips detail metrics: ", paste(detail_cols, collapse = " | "))
+
+# ---- diagnostics: period coverage BEFORE expansion -----------
+cat("\n# Period counts (metrics):\n")
+print(metrics %>% count(period, name = "clusters_in_metrics") %>% arrange(period))
+cat("\n# Period counts (membership):\n")
+print(membership %>% count(period, name = "counties_in_membership") %>% arrange(period))
+
+# ---- expand cluster→county -----------------------------------
+detail_long <- metrics %>%
+  select(cluster, period, all_of(detail_cols)) %>%
+  pivot_longer(cols = all_of(detail_cols), names_to = "metric", values_to = "value") %>%
+  inner_join(membership %>% select(cluster, period, county_ihme),
+             by = c("cluster","period"),
+             relationship = "many-to-many") %>%
+  filter(is.finite(value))
+
+cat("\n# After expansion: rows by period & metric\n")
+print(detail_long %>% count(period, metric, name = "rows") %>% arrange(metric, period))
+
+# ---- reporting-type lookup (or build) ------------------------
+if (!exists("rep_lu")) {
+  reporting_path_opts <- c(
+    here("data_raw","County-Death-Investigation-System-2018-1-9-2024.csv"),
+    "/mnt/data/County-Death-Investigation-System-2018-1-9-2024.csv"
+  )
+  reporting_path <- reporting_path_opts[file.exists(reporting_path_opts)][1]
+  stopifnot(!is.na(reporting_path))
+  rep_raw <- readr::read_csv(reporting_path, show_col_types = FALSE)
+  get_colname <- function(df, patterns) {
+    nm <- names(df)
+    hits <- which(Reduce(`|`, lapply(patterns, function(p) grepl(p, nm, ignore.case = TRUE))))
+    if (!length(hits)) return(NA_character_) else nm[hits[1]]
+  }
+  fips_col <- get_colname(rep_raw, c("^fips$","^fips_?code$","geoid","county_?fips","countyrs","fips.*5"))
+  type_col <- get_colname(rep_raw, c("reporting.*type","investigation.*type","death.*investigation.*system","^type$","system"))
+  stopifnot(!is.na(fips_col), !is.na(type_col))
+  rep_lu <- rep_raw %>%
+    mutate(county_ihme = std_fips(.data[[fips_col]]),
+           reporting_type = trimws(as.character(.data[[type_col]]))) %>%
+    filter(grepl("^[0-9]{5}$", county_ihme), !is.na(reporting_type), reporting_type != "") %>%
+    mutate(reporting_type = dplyr::recode(tolower(reporting_type),
+      "medical examiner"="Medical Examiner","me"="Medical Examiner",
+      "coroner"="Coroner","mixed"="Mixed","hybrid"="Mixed",
+      .default = stringr::str_to_title(reporting_type))) %>%
+    select(county_ihme, reporting_type) %>% distinct()
+}
+cat("\n# Reporting-type coverage (distinct counties):\n")
+print(rep_lu %>% count(reporting_type) %>% mutate(total = sum(n)))
+
+# ---- finance-year snapping (+ fallback) — ROBUST --------------
+stopifnot(exists("ph_pc"), exists("direction_year"))
+# Make sure fin_year is integer for joins; be tolerant if fin_all missing
+ph_pc   <- ph_pc   %>% mutate(fin_year = suppressWarnings(as.integer(fin_year)))
+fin_all <- if (exists("fin_all")) fin_all else tibble()
+if (nrow(fin_all)) {
+  year_col <- dplyr::case_when(
+    "fin_year" %in% names(fin_all) ~ "fin_year",
+    "year_fin" %in% names(fin_all) ~ "year_fin",
+    "year"     %in% names(fin_all) ~ "year",
+    TRUE ~ NA_character_
+  )
+  if (!is.na(year_col)) {
+    fin_all <- fin_all %>% mutate(fin_year = suppressWarnings(as.integer(.data[[year_col]])))
+  }
+}
+
+# Derive actual finance years to snap to (prefer fin_all; fallback to ph_pc)
+fin_years_actual <- c(
+  if (nrow(fin_all) && "fin_year" %in% names(fin_all)) fin_all$fin_year,
+  if ("fin_year" %in% names(ph_pc)) ph_pc$fin_year
+) %>%
+  suppressWarnings(as.integer(.)) %>%
+  { .[is.finite(.)] } %>%
+  unique() %>%
+  sort()
+
+if (!length(fin_years_actual)) {
+  stop("No finance years available. Re-run the finance builder to create fin_all/ph_pc with fin_years (e.g., 2017, 2022).")
+}
+fin_years_actual <- unique(fin_years_actual)
+cat("\n# Using finance years for snapping:", paste(fin_years_actual, collapse = ", "), "\n")
+
+# Build period_info from periods present in detail_long
+period_info <- unique(detail_long$period) %>% sort() %>%
+  purrr::map_dfr(parse_period) %>%
+  dplyr::filter(!is.na(start), !is.na(end), !is.na(mid)) %>%
+  dplyr::arrange(start) %>%
+  dplyr::mutate(fin_year = vapply(mid, nearest_fin_year, integer(1), avail = fin_years_actual))
+
+# Main PH-per-period using nearest AVAILABLE finance year
+ph_period_main <- period_info %>%
+  dplyr::select(period, fin_year) %>%
+  dplyr::inner_join(
+    ph_pc %>% dplyr::select(county_ihme, fin_year, ph_pc),
+    by = "fin_year", relationship = "many-to-many"
+  ) %>%
+  dplyr::mutate(log_ph_pc = log10(pmax(ph_pc, 1e-6))) %>%
+  dplyr::select(county_ihme, period, ph_pc, log_ph_pc)
+
+# Fallback (periods without a mapped fin_year row will use county median spend)
+ph_any <- ph_pc %>%
+  dplyr::group_by(county_ihme) %>%
+  dplyr::summarise(ph_pc = median(ph_pc, na.rm = TRUE), .groups = "drop") %>%
+  dplyr::mutate(log_ph_pc = log10(pmax(ph_pc, 1e-6)))
+
+need_fallback <- setdiff(period_info$period, unique(ph_period_main$period))
+ph_period_fb <- if (length(need_fallback)) {
+  tidyr::crossing(county_ihme = unique(membership$county_ihme), period = need_fallback) %>%
+    dplyr::left_join(ph_any, by = "county_ihme")
+} else tibble(county_ihme = character(), period = character(), ph_pc = numeric(), log_ph_pc = numeric())
+
+ph_period <- dplyr::bind_rows(ph_period_main, ph_period_fb)
+
+cat("\n# Period→finance-year map (forced to available years)\n")
+print(period_info %>% dplyr::mutate(fin_year = as.character(fin_year)))
+cat("\n# PH spend rows by period (should be large)\n")
+print(ph_period %>% dplyr::count(period, name = "rows") %>% dplyr::arrange(period))
+cat("\n# ph_pc rows by fin_year\n")
+print(ph_pc %>% dplyr::count(fin_year, name = "rows") %>% dplyr::arrange(fin_year))
+
+# ---- A) Means by reporting type across periods ----------------
+detail_rep <- detail_long %>%
+  left_join(rep_lu, by = "county_ihme") %>%
+  filter(!is.na(reporting_type)) %>%
+  group_by(period, reporting_type, metric) %>%
+  summarise(avg_value = mean(value, na.rm = TRUE),
+            n = dplyr::n(), .groups = "drop") %>%
+  left_join(period_info %>% select(period, start), by = "period") %>%
+  mutate(period_ord = factor(period, levels = period_info$period[order(period_info$start)]))
+
+if (nrow(detail_rep) > 0) {
+  g_detail_rep <- ggplot(detail_rep, aes(period_ord, avg_value, group = reporting_type, colour = reporting_type)) +
+    geom_line(linewidth = 1) +
+    geom_point(size = 2) +
+    facet_wrap(~ metric, scales = "free_y", ncol = 2) +
+    labs(title = "Phillips detail metrics by reporting type (cluster→county, period means)",
+         x = NULL, y = "Mean value", colour = "Reporting type") +
+    theme_bw()
+  ggsave(here("figures","phillips_detail","detail_by_reporting_type_timeseries.png"),
+         g_detail_rep, width = 9, height = 6.5, dpi = 300)
+  print(g_detail_rep)
+} else {
+  message("No rows for reporting-type timeseries — skipping the plot.")
+}
+
+# ---- B) R²: metric ~ reporting_type (per period) --------------
+r2_rep <- detail_long %>%
+  left_join(rep_lu, by = "county_ihme") %>%
+  filter(!is.na(reporting_type)) %>%
+  group_by(period, metric) %>%
+  group_modify(\(d, key) {
+    nn <- nrow(d)
+    if (nn < 50 || n_distinct(d$reporting_type) < 2) return(tibble(r2 = NA_real_, n = nn))
+    tibble(r2 = summary(lm(value ~ reporting_type, data = d))$r.squared, n = nn)
+  }) %>% ungroup()
+
+cat("\nR²: Phillips metric ~ reporting_type (by period)\n")
+print(r2_rep %>% arrange(metric, period))
+
+# ---- C) R²: metric ~ log10(PH spend) (per period) -------------
+r2_spend <- detail_long %>%
+  inner_join(ph_period, by = c("county_ihme","period")) %>%
+  group_by(period, metric) %>%
+  group_modify(\(d, key) {
+    nn <- nrow(d)
+    if (nn < 50 || !any(is.finite(d$log_ph_pc))) return(tibble(r2 = NA_real_, n = nn))
+    tibble(r2 = summary(lm(value ~ log_ph_pc, data = d))$r.squared, n = nn)
+  }) %>% ungroup()
+
+cat("\nR²: Phillips metric ~ log10(PH spend per capita) (by period)\n")
+print(r2_spend %>% arrange(metric, period))
+
+# ---- D) Scatter (guarded) ------------------------------------
+scatter_sample <- detail_long %>%
+  inner_join(ph_period, by = c("county_ihme","period")) %>%
+  left_join(period_info %>% select(period, start), by = "period") %>%
+  mutate(period_ord = factor(period, levels = period_info$period[order(period_info$start)])) %>%
+  filter(is.finite(value), is.finite(log_ph_pc))
+
+if (nrow(scatter_sample) > 0) {
+  g_detail_spend <- ggplot(scatter_sample, aes(log_ph_pc, value)) +
+    geom_point(alpha = 0.35, size = 1) +
+    geom_smooth(method = "lm", se = FALSE, linewidth = 0.8) +
+    facet_grid(metric ~ period_ord, scales = "free_y") +
+    labs(title = "Phillips detail metrics vs log10(PH spend per capita)",
+         x = "log10(PH spend per capita)", y = "Metric value") +
+    theme_bw()
+  ggsave(here("figures","phillips_detail","detail_vs_ph_spend_scatter.png"),
+         g_detail_spend, width = 12, height = 7.5, dpi = 300)
+  print(g_detail_spend)
+} else {
+  message("No rows for spend vs metrics scatter — skipping the plot.")
+}
+
+# ---- E) NEW: Time series with multiple lines for PH-spend quintiles ----
+# Quintiles computed GLOBALLY from each county's median PH spend (ph_any),
+# so periods with sparse PH coverage still get full quintile lines.
+labs_quint <- c("Q1 lowest","Q2","Q3","Q4","Q5 highest")
+
+# Build monotone breaks even if there are ties
+make_quintile_breaks <- function(v) {
+  v <- v[is.finite(v)]
+  stopifnot(length(v) > 0)
+  qs <- quantile(v, probs = seq(0, 1, 0.2), na.rm = TRUE, names = FALSE, type = 7)
+  # enforce strictly increasing breaks
+  for (i in 2:length(qs)) if (qs[i] <= qs[i-1]) qs[i] <- qs[i-1] + .Machine$double.eps
+  qs[1] <- min(v) - 1e-9
+  qs[length(qs)] <- max(v) + 1e-9
+  qs
+}
+
+quint_breaks <- make_quintile_breaks(ph_any$ph_pc)
+
+county_quintile <- ph_any %>%
+  mutate(spend_quintile = cut(ph_pc, breaks = quint_breaks, include.lowest = TRUE,
+                              right = FALSE, labels = labs_quint)) %>%
+  select(county_ihme, spend_quintile)
+
+period_levels <- period_info$period[order(period_info$start)]
+
+detail_with_quint <- detail_long %>%
+  left_join(county_quintile, by = "county_ihme") %>%
+  filter(!is.na(spend_quintile)) %>%
+  mutate(period_ord = factor(period, levels = period_levels))
+
+# Summarize mean metric per period × quintile
+ts_quint <- detail_with_quint %>%
+  group_by(metric, period_ord, spend_quintile) %>%
+  summarise(avg_value = mean(value, na.rm = TRUE), n = dplyr::n(), .groups = "drop")
+
+cat("\n# Rows per period × quintile (any metric):\n")
+print(
+  detail_with_quint %>%
+    count(period_ord, spend_quintile, name = "rows") %>%
+    tidyr::complete(period_ord = period_levels, spend_quintile = labs_quint, fill = list(rows = 0)) %>%
+    arrange(period_ord, spend_quintile)
+)
+
+# Plot (guarded)
+if (nrow(ts_quint) > 0) {
+  g_quint <- ggplot(ts_quint,
+                    aes(x = period_ord, y = avg_value,
+                        group = spend_quintile, colour = spend_quintile)) +
+    geom_line(linewidth = 1) +
+    geom_point(size = 2) +
+    facet_wrap(~ metric, ncol = 2, scales = "free_y") +
+    labs(
+      title = "Phillips detail metrics over time by public-health spend quintile",
+      x = NULL, y = "Mean metric value", colour = "PH spend (per-capita) quintile"
+    ) +
+    theme_bw()
+  ggsave(here("figures","phillips_detail","detail_timeseries_by_spend_quintile.png"),
+         g_quint, width = 10, height = 6.5, dpi = 300)
+  print(g_quint)
+} else {
+  message("No rows for time-series-by-quintile — skipping the plot.")
+}
+
+# ---- F) Correlations with direction score (by period) ---------
+assign_period <- function(y, info) {
+  with(info, {
+    p <- period[y >= start & y <= end]
+    ifelse(length(p) >= 1, p[1], NA_character_)
+  })
+}
+stopifnot(exists("direction_year"))
+direction_period <- direction_year %>%
+  mutate(period = vapply(year, assign_period, character(1), info = period_info)) %>%
+  filter(!is.na(period)) %>%
+  group_by(county_ihme, period) %>%
+  summarise(direction_score = mean(direction_score, na.rm = TRUE), .groups = "drop")
+
+detail_wide <- detail_long %>%
+  select(county_ihme, period, metric, value) %>%
+  distinct() %>%
+  pivot_wider(names_from = metric, values_from = value)
+
+corr_tbl <- direction_period %>%
+  inner_join(detail_wide, by = c("county_ihme","period"))
+
+cols_metrics <- setdiff(names(detail_wide), c("county_ihme","period"))
+corr_out <- map_dfr(split(corr_tbl, corr_tbl$period), function(dd) {
+  tibble(
+    period = unique(dd$period),
+    metric = cols_metrics,
+    pearson_r = map_dbl(cols_metrics, ~ suppressWarnings(
+      cor(dd$direction_score, dd[[.x]], use = "pairwise.complete.obs")
+    )),
+    n = nrow(dd)
+  )
+})
+readr::write_csv(corr_out, here("output","correlation_direction_vs_phillips_by_period.csv"))
+cat("\nSaved correlations to: ", here("output","correlation_direction_vs_phillips_by_period.csv"), "\n")
+print(corr_out %>% arrange(metric, period))
+```
+Check by income
+```{r}
+# ---- G) Time series by INCOME quintiles ------------------------
+safe_quintile <- function(x) {
+  labs <- c("Q1 lowest","Q2","Q3","Q4","Q5 highest")
+  v <- x[is.finite(x)]
+  if (length(v) < 5L || length(unique(v)) < 5L) {
+    return(factor(rep(NA_character_, length(x)), levels = labs))
+  }
+  qs <- quantile(v, probs = seq(0, 1, 0.2), na.rm = TRUE, names = FALSE, type = 7)
+  qs[1] <- min(v) - 1e-9; qs[length(qs)] <- max(v) + 1e-9
+  cut(x, breaks = qs, include.lowest = TRUE, right = FALSE, labels = labs)
+}
+
+period_levels <- period_info$period[order(period_info$start)]
+
+# Join detail with ACS income
+detail_with_income <- detail_long %>%
+  inner_join(income_all %>% rename(fin_year = acs_year), by = "county_ihme") %>%
+  inner_join(period_info %>% select(period, fin_year), by = "period") %>%
+  filter(is.finite(value), is.finite(avg_income)) %>%
+  group_by(period) %>%
+  mutate(income_quintile = safe_quintile(avg_income)) %>%
+  ungroup() %>%
+  filter(!is.na(income_quintile)) %>%
+  mutate(period_ord = factor(period, levels = period_levels))
+
+ts_income <- detail_with_income %>%
+  group_by(metric, period_ord, income_quintile) %>%
+  summarise(avg_value = mean(value, na.rm = TRUE), n = n(), .groups = "drop")
+
+if (nrow(ts_income) > 0) {
+  g_income <- ggplot(ts_income,
+                     aes(x = period_ord, y = avg_value,
+                         group = income_quintile, colour = income_quintile)) +
+    geom_line(linewidth = 1) +
+    geom_point(size = 2) +
+    facet_wrap(~ metric, ncol = 2, scales = "free_y") +
+    labs(title = "Phillips detail metrics over time by INCOME quintile",
+         x = NULL, y = "Mean metric value", colour = "Income quintile") +
+    theme_bw()
+  ggsave(here("figures","phillips_detail","detail_timeseries_by_income_quintile.png"),
+         g_income, width = 10, height = 6.5, dpi = 300)
+  print(g_income)
+} else {
+  message("Income quintile time-series empty after guards — skipping.")
+}
+
+
+# ---- H) Time series by BA+ quintiles ---------------------------
+detail_with_ba <- detail_long %>%
+  inner_join(ba_all %>% rename(fin_year = acs_year), by = "county_ihme") %>%
+  inner_join(period_info %>% select(period, fin_year), by = "period") %>%
+  filter(is.finite(value), is.finite(ba_share)) %>%
+  group_by(period) %>%
+  mutate(ba_quintile = safe_quintile(ba_share)) %>%
+  ungroup() %>%
+  filter(!is.na(ba_quintile)) %>%
+  mutate(period_ord = factor(period, levels = period_levels))
+
+ts_ba <- detail_with_ba %>%
+  group_by(metric, period_ord, ba_quintile) %>%
+  summarise(avg_value = mean(value, na.rm = TRUE), n = n(), .groups = "drop")
+
+if (nrow(ts_ba) > 0) {
+  g_ba <- ggplot(ts_ba,
+                 aes(x = period_ord, y = avg_value,
+                     group = ba_quintile, colour = ba_quintile)) +
+    geom_line(linewidth = 1) +
+    geom_point(size = 2) +
+    facet_wrap(~ metric, ncol = 2, scales = "free_y") +
+    labs(title = "Phillips detail metrics over time by BA+ share quintile",
+         x = NULL, y = "Mean metric value", colour = "BA+ quintile") +
+    theme_bw()
+  ggsave(here("figures","phillips_detail","detail_timeseries_by_ba_quintile.png"),
+         g_ba, width = 10, height = 6.5, dpi = 300)
+  print(g_ba)
+} else {
+  message("BA+ quintile time-series empty after guards — skipping.")
+}
+
+```
+
 
 
 
