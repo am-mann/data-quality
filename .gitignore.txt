@@ -1,1 +1,1 @@
-Hrgrguo
+/data_raw/finance/
