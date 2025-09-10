@@ -20,7 +20,7 @@ options(tigris_use_cache = TRUE, tigris_class = "sf")
 
 # 1) Variables to map (no transformations will be applied)
 vars_to_map <- c(
-  "prop_garbage","prop_light","pct_acc_miss","pct_overd_miss","DQ_overall"
+  "prop_garbage","pct_overd_miss"
 )
 
 # 2) Load your county-year data (as-is); add time windows only
@@ -29,10 +29,10 @@ dq <- readr::read_csv(here::here("data","county_year_quality_metrics.csv.gz"), s
     year        = as.integer(year),
     county_ihme = stringr::str_pad(as.character(county_ihme), 5, pad = "0"),
     time_window = dplyr::case_when(
-      year >= 1999 & year <= 2004 ~ "1999_2004",
-      year >= 2005 & year <= 2010 ~ "2005_2010",
-      year >= 2011 & year <= 2017 ~ "2011_2017",
-      year >= 2018 & year <= 2022 ~ "2018_2022",
+      year >= 1999 & year <= 2005 ~ "1999_2005",
+      year >= 2006 & year <= 2012 ~ "2006_2012",
+      year >= 2013 & year <= 2019 ~ "2013_2019",
+      year >= 2020 & year <= 2022 ~ "2020_2022",
       TRUE ~ NA_character_
     )
   )
@@ -63,7 +63,7 @@ ihme_map <- ihme_fips %>%
 
 # 5) Build shapes per period & join averages
 crs_proj <- 2163
-shapefile_years <- c("1999_2004"=2000, "2005_2010"=2010, "2011_2017"=2015, "2018_2022"=2020)
+shapefile_years <- c("1999_2005"=2000, "2006_2012"=2010, "2013_2017"=2019, "2020_2022"=2020)
 
 st_shift <- function(x, offset) { sf::st_geometry(x) <- sf::st_geometry(x) + offset; x }
 st_scale <- function(x, factor) { ctr <- sf::st_centroid(sf::st_union(x)); sf::st_geometry(x) <- (sf::st_geometry(x) - ctr) * factor + ctr; x }
@@ -331,6 +331,283 @@ purrr::walk(vars_present, function(var) {
 
 message("✓ Done. Maps saved to: ", output_dir)
 ```
+Make map of percentage missing overdoses with clusters
+```{r}
+# ──────────────────────────────────────────────────────────────
+# Map pct_overd_miss with temporally-stable clusters (IHME groups)
+# - Clusters are built on IHME-stable county groups (fixed over time)
+# - Threshold: ≥ 50 overdose deaths in EVERY time window
+# - Uses overd_n from county_year_quality_metrics.csv.gz (no Parquet)
+# - NA pct_overd_miss → 0
+# ──────────────────────────────────────────────────────────────
+
+# 0) Packages & options
+required <- c("sf","tigris","readr","dplyr","stringr","purrr","ggplot2",
+              "here","scales","igraph","tidyr","tibble")
+missing <- setdiff(required, rownames(installed.packages()))
+if (length(missing)) install.packages(missing)
+invisible(lapply(required, library, character.only = TRUE))
+options(tigris_use_cache = TRUE, tigris_class = "sf")
+sf::sf_use_s2(FALSE)
+
+`%||%` <- function(a, b) if (!is.null(a)) a else b
+
+# 1) Windows & inputs
+periods_list <- list(
+  "1999_2005" = 1999:2005,
+  "2006_2012" = 2006:2012,
+  "2013_2019" = 2013:2019,
+  "2020_2022" = 2020:2022
+)
+periods_vec <- names(periods_list)
+
+dq <- readr::read_csv(here::here("data","county_year_quality_metrics.csv.gz"),
+                      show_col_types = FALSE) %>%
+  dplyr::mutate(
+    year        = as.integer(year),
+    county_ihme = stringr::str_pad(as.character(county_ihme), 5, pad = "0"),
+    time_window = dplyr::case_when(
+      year >= 1999 & year <= 2005 ~ "1999_2005",
+      year >= 2006 & year <= 2012 ~ "2006_2012",
+      year >= 2013 & year <= 2019 ~ "2013_2019",
+      year >= 2020 & year <= 2022 ~ "2020_2022",
+      TRUE ~ NA_character_
+    )
+  )
+
+stopifnot(all(c("overd_n","pct_overd_miss") %in% names(dq)))
+
+# 2) IHME crosswalk (temporality-stable groups)
+load(here::here("data_raw","ihme_fips.rda"))  # -> ihme_fips
+ihme_map <- ihme_fips %>%
+  dplyr::transmute(
+    GEOID       = stringr::str_pad(as.character(orig_fips), 5, pad = "0"),
+    county_ihme = stringr::str_pad(as.character(ihme_fips), 5, pad = "0")
+  ) %>%
+  dplyr::distinct()
+
+# 3) Compute robust overdose totals per IHME group
+overd_by_window <- dq %>%
+  dplyr::filter(!is.na(time_window)) %>%
+  dplyr::group_by(county_ihme, time_window) %>%
+  dplyr::summarise(overd = sum(overd_n, na.rm = TRUE), .groups = "drop")
+
+overd_wide <- overd_by_window %>%
+  tidyr::pivot_wider(names_from = time_window, values_from = overd, values_fill = 0)
+
+for (w in periods_vec) if (!w %in% names(overd_wide)) overd_wide[[w]] <- 0
+
+robust_tbl <- overd_wide %>%
+  dplyr::mutate(
+    robust_overd = pmin(`1999_2005`,`2006_2012`,`2013_2019`,`2020_2022`, na.rm = TRUE)
+  ) %>%
+  dplyr::transmute(county_ihme, robust_overd = as.numeric(robust_overd))
+
+# 4) Helpers for shapefiles (same style as your IHME-stable code)
+crs_proj <- 2163
+shapefile_years <- c("1999_2005"=2000, "2006_2012"=2010, "2013_2019"=2019, "2020_2022"=2020)
+
+normalize_geoid <- function(sf, year) {
+  nms <- names(sf)
+  geoid_col <- grep("^GEOID", nms, value = TRUE)[1]
+  if (!is.na(geoid_col)) {
+    sf <- dplyr::rename(sf, GEOID = !!rlang::sym(geoid_col))
+    sf$GEOID <- stringr::str_pad(as.character(sf$GEOID), 5, pad = "0")
+    return(sf)
+  }
+  state_col  <- grep("^STATE.*FP$", nms, value = TRUE)[1]
+  county_col <- grep("^COUNTY.*FP$", nms, value = TRUE)[1]
+  if (!is.na(state_col) && !is.na(county_col)) {
+    sf$GEOID <- paste0(
+      stringr::str_pad(as.character(sf[[state_col]]),  2, pad = "0"),
+      stringr::str_pad(as.character(sf[[county_col]]), 3, pad = "0")
+    )
+    return(sf)
+  }
+  combo_col <- grep("^CNTYIDFP$", nms, value = TRUE)[1]
+  if (!is.na(combo_col)) {
+    sf <- dplyr::rename(sf, GEOID = !!rlang::sym(combo_col))
+    sf$GEOID <- stringr::str_pad(as.character(sf$GEOID), 5, pad = "0")
+    return(sf)
+  }
+  stop("No GEOID-compatible columns found in shapefile for year ", year)
+}
+
+# Build IHME-stable county geoms for a given year
+build_ihme_groups_sf <- function(year) {
+  counties_raw <- tigris::counties(year = year, cb = TRUE, class = "sf") %>%
+    sf::st_zm(drop = TRUE, what = "ZM")
+  counties_norm <- normalize_geoid(counties_raw, year) %>% sf::st_transform(crs_proj)
+  groups_sf <- counties_norm %>%
+    dplyr::left_join(ihme_map, by = "GEOID") %>%
+    dplyr::mutate(county_ihme = dplyr::coalesce(county_ihme, GEOID)) %>%
+    dplyr::group_by(county_ihme) %>%
+    dplyr::summarise(.groups = "drop")
+  groups_sf
+}
+
+# 5) Build adjacency on IHME-stable geoms (use 2020 as base)
+ihme2020 <- build_ihme_groups_sf(2020) %>% sf::st_transform(5070)
+adj_list <- sf::st_touches(ihme2020)
+neighbors_of <- setNames(
+  lapply(seq_len(nrow(ihme2020)), function(i) ihme2020$county_ihme[adj_list[[i]]]),
+  ihme2020$county_ihme
+)
+
+# 6) Greedy clustering on IHME-stable nodes using robust_overd
+min_overd <- 50L
+
+nodes_tbl <- ihme2020 %>%
+  sf::st_drop_geometry() %>%
+  dplyr::select(county_ihme) %>%
+  dplyr::left_join(robust_tbl, by = "county_ihme") %>%
+  dplyr::mutate(robust_overd = dplyr::coalesce(robust_overd, 0))
+
+overd_vec <- setNames(nodes_tbl$robust_overd, nodes_tbl$county_ihme)
+to_assign <- names(overd_vec)
+clusters  <- setNames(rep(NA_character_, length(overd_vec)), to_assign)
+cid <- 1L
+
+while (length(to_assign) > 0) {
+  seed  <- to_assign[which.max(overd_vec[to_assign])]
+  cur   <- seed
+  total <- overd_vec[seed]
+  avail <- setdiff(to_assign, seed)
+
+  repeat {
+    nbrs <- unique(unlist(neighbors_of[cur], use.names = FALSE))
+    nbrs <- setdiff(intersect(nbrs, avail), cur)
+    if (!length(nbrs)) break
+    cand_totals <- total + overd_vec[nbrs]
+    best_idx <- if (any(cand_totals < min_overd)) which.max(cand_totals) else which.min(abs(cand_totals - min_overd))
+    best <- nbrs[best_idx]
+    new_total <- total + overd_vec[best]
+    if (is.na(new_total)) break
+    if (new_total <= min_overd * 1.6 || total < min_overd) {
+      cur   <- c(cur, best)
+      total <- new_total
+      avail <- setdiff(avail, best)
+      if (total >= min_overd) break
+    } else break
+  }
+
+  clusters[cur] <- paste0("CL", cid)
+  to_assign <- setdiff(to_assign, cur)
+  cid <- cid + 1L
+}
+
+# Merge any undersized clusters to nearest big cluster (on IHME-stable centroids)
+centroids <- sf::st_centroid(ihme2020) %>% dplyr::mutate(county_ihme = ihme2020$county_ihme)
+xy <- sf::st_coordinates(centroids)[,c("X","Y"), drop=FALSE]; rownames(xy) <- centroids$county_ihme
+
+cluster_sum <- tapply(overd_vec[names(clusters)], clusters, sum, na.rm = TRUE)
+small <- names(cluster_sum)[cluster_sum < min_overd]
+big   <- names(cluster_sum)[cluster_sum >= min_overd]
+
+if (length(small) && length(big)) {
+  get_center <- function(cid) {
+    memb <- names(clusters)[clusters == cid]
+    colMeans(xy[memb,,drop=FALSE])
+  }
+  small_xy <- t(vapply(small, get_center, numeric(2L)))
+  big_xy   <- t(vapply(big,   get_center, numeric(2L)))
+  assign_to <- vapply(seq_len(nrow(small_xy)), function(i) {
+    dif <- t(big_xy) - small_xy[i,]; which.min(colSums(dif*dif))
+  }, integer(1L))
+  for (i in seq_along(small)) {
+    members <- names(clusters)[clusters == small[i]]
+    clusters[members] <- big[assign_to[i]]
+  }
+}
+
+cluster_map <- tibble::tibble(
+  county_ihme = names(clusters),
+  cluster_id  = unname(clusters)
+)
+
+# 7) Sanity: each cluster has ≥ 50 overdoses in EVERY window
+check_df <- overd_by_window %>%
+  dplyr::inner_join(cluster_map, by = "county_ihme") %>%
+  dplyr::group_by(cluster_id, time_window) %>%
+  dplyr::summarise(overdoses = sum(overd, na.rm = TRUE), .groups = "drop")
+if (any(check_df$overdoses < min_overd, na.rm = TRUE)) {
+  warning("Some clusters are still < 50 overdoses in a window. Consider tweaking heuristics.")
+}
+
+# 8) Aggregate pct_overd_miss to cluster×window with NA→0
+dq_cluster <- dq %>%
+  dplyr::filter(!is.na(time_window)) %>%
+  dplyr::inner_join(cluster_map, by = "county_ihme") %>%
+  dplyr::group_by(cluster_id, time_window) %>%
+  dplyr::summarise(
+    pct_overd_miss = mean(replace_na(pct_overd_miss, 0)),
+    n_counties     = dplyr::n_distinct(county_ihme),
+    .groups = "drop"
+  ) %>%
+  tidyr::complete(cluster_id, time_window = periods_vec,
+                  fill = list(pct_overd_miss = 0, n_counties = 0L))
+
+# 9) Shapes per period: IHME-stable dissolve → cluster dissolve
+build_clusters_sf <- function(year) {
+  base <- build_ihme_groups_sf(year)  # county_ihme geometry for that year
+  base %>%
+    dplyr::left_join(cluster_map, by = "county_ihme") %>%
+    dplyr::filter(!is.na(cluster_id)) %>%
+    dplyr::group_by(cluster_id) %>%
+    dplyr::summarise(.groups = "drop") %>%
+    sf::st_transform(crs_proj)
+}
+
+joined_by_period <- purrr::imap(shapefile_years, function(year, window) {
+  shape_all <- build_clusters_sf(year)
+  dplyr::left_join(shape_all,
+                   dplyr::filter(dq_cluster, time_window == window),
+                   by = "cluster_id")
+})
+
+# 10) Map helper (unchanged except limits tuned for pct_overd_miss)
+make_map <- function(sf_data, var = "pct_overd_miss", title = NULL, palette = "RdBu") {
+  states <- tigris::states(cb = TRUE, class = "sf") |> sf::st_transform(crs_proj)
+  fill_scale <- scale_fill_distiller(
+    palette = palette,
+    limits = if (var == "pct_overd_miss") c(0, 0.75) else NULL,
+    oob = scales::squish,
+    direction = -1,
+    na.value = "grey90"
+  )
+  ggplot() +
+    geom_sf(data = sf_data, aes(fill = .data[[var]]), colour = NA) +
+    geom_sf(data = states, fill = NA, colour = "white", linewidth = 0.3) +
+    fill_scale +
+    coord_sf(xlim = c(-2500000, 2500000),
+             ylim = c(-2200000, 730000),
+             expand = FALSE) +
+    labs(title = title %||% var, fill = NULL) +
+    theme_void() +
+    theme(
+      plot.title = element_text(size = 16, face = "bold", hjust = 0.5),
+      legend.text = element_text(size = 9)
+    )
+}
+
+# 11) Save maps
+output_dir <- here::here("figures","5yr_avg_IHMEstable_clusters50_overd")
+dir.create(output_dir, showWarnings = FALSE, recursive = TRUE)
+
+purrr::walk(c("pct_overd_miss"), function(var) {
+  purrr::walk(names(shapefile_years), function(win) {
+    sf_dat  <- joined_by_period[[win]]
+    if (!var %in% names(sf_dat)) return(invisible(NULL))
+    map_plot <- make_map(sf_dat, var, paste0(var, "  ", win))
+    ggsave(filename = file.path(output_dir, paste0(var, "_", win, ".png")),
+           plot = map_plot, width = 8, height = 6, dpi = 320)
+  })
+})
+
+message("✓ Done. Maps saved to: ", output_dir)
+
+```
+
 Relationship between rural and garbage
 ```{r}
 # 0 · Load packages -------------------------------------------------------
