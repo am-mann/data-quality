@@ -36,7 +36,8 @@ PARALLELIZE <- TRUE
 #  load things + dictionaries + helpers
 # ————————————————————————————————————————————————————————————————
 source(here("code/helpers", "dq_entropy_helper.R"))   # loads compute_entropy_county_foreman()
-parquet_dir    <- here("data_private", "mcod_sample")
+# parquet_dir    <- here("data_private", "mcod_sample")
+parquet_dir    <- here("data_private", "mcod")
 dictionary_dir <- here("data_raw", "cause-codes")
 out_csv        <- here("data", "county_year_quality_metrics.csv.gz")
 
