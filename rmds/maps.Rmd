@@ -20,7 +20,7 @@ options(tigris_use_cache = TRUE, tigris_class = "sf")
 
 # 1) Variables to map (no transformations will be applied)
 vars_to_map <- c(
-  "prop_garbage","pct_overd_miss", "DQ_rec_ig_frac_mean_garbage", "DQ_overall", "DQ_rec_ig_abs_mean", "foreman_garbage"
+  "prop_garbage", "DQ_rec_ig_frac_mean_garbage", "DQ_overall", "DQ_rec_ig_abs_mean", "foreman_garbage"
 )
 
 # 2) Load your county-year data (as-is); add time windows only
@@ -133,7 +133,6 @@ build_groups_sf <- function(year) {
 
   dplyr::bind_rows(mainland, alaska, hawaii)
 }
-
 
 joined_by_period <- purrr::imap(
   shapefile_years,
@@ -263,32 +262,19 @@ make_map <- function(sf_data, var, title = NULL, palette = "RdBu") {
     labs(title = title %||% var, fill = NULL) +
     theme_void() +
     theme(
-      plot.title = element_text(size = 16, face = "bold", hjust = 0.5),
+      plot.title = NULL,
       legend.text = element_text(size = 9)
     )
 }
 
-# 7) Save maps
+# 7) Save ONLY 4-panel maps (one panel per time window)
 output_dir <- here::here("figures","5yr_avg_stable")
 dir.create(output_dir, showWarnings = FALSE, recursive = TRUE)
 
-# (A) Keep original per-period files (unchanged)
 purrr::walk(vars_present, function(var) {
-  purrr::walk(names(shapefile_years), function(win) {
-    sf_dat  <- joined_by_period[[win]]
-    if (!var %in% names(sf_dat)) return(invisible(NULL))
-    map_plot <- make_map(sf_dat, var, paste(var, win))
-    ggsave(filename = file.path(output_dir, paste0(var, "_", win, ".png")),
-           plot = map_plot, width = 8, height = 6, dpi = 320)
-  })
-})
-
-# (B) ALSO save a 4-panel figure per variable (one panel per time window)
-purrr::walk(vars_present, function(var) {
-  # Build the exact same four maps
   p_1999 <- make_map(joined_by_period[["1999_2005"]], var, paste(var, "1999_2005"))
   p_2006 <- make_map(joined_by_period[["2006_2012"]], var, paste(var, "2006_2012"))
-  p_2013 <- make_map(joined_by_period[["2013_2017"]], var, paste(var, "2013_2017"))
+  p_2013 <- make_map(joined_by_period[["2013_2019"]], var, paste(var, "2013_2019"))
   p_2020 <- make_map(joined_by_period[["2020_2022"]], var, paste(var, "2020_2022"))
 
   combined <- (p_1999 | p_2006) / (p_2013 | p_2020)
@@ -297,10 +283,10 @@ purrr::walk(vars_present, function(var) {
          plot = combined, width = 12, height = 9, dpi = 320)
 })
 
-message("✓ Done. Maps saved to: ", output_dir)
+message("✓ Done. 4-panel maps saved to: ", output_dir)
 
 ```
-Make map of percentage missing overdoses with clusters
+Make map of percentage missing overdoses with clusters (four panels)
 ```{r}
 # ──────────────────────────────────────────────────────────────
 # Map pct_overd_miss with temporally-stable clusters (IHME groups)
@@ -539,7 +525,7 @@ make_map <- function(sf_data, var = "pct_overd_miss", title = NULL, palette = "R
   states <- tigris::states(cb = TRUE, class = "sf") |> sf::st_transform(crs_proj)
   fill_scale <- scale_fill_distiller(
     palette = palette,
-    limits = if (var == "pct_overd_miss") c(0, 0.75) else NULL,
+    limits = if (var == "pct_overd_miss") c(0, 0.6) else NULL,
     oob = scales::squish,
     direction = -1,
     na.value = "grey90"
@@ -560,7 +546,7 @@ make_map <- function(sf_data, var = "pct_overd_miss", title = NULL, palette = "R
 }
 
 # 11) Save one combined 2×2 figure (exact same maps, assembled)
-output_dir <- here::here("figures","5yr_avg_IHMEstable_clusters50_overd")
+output_dir <- here::here("figures", "5yr_avg_stable")
 dir.create(output_dir, showWarnings = FALSE, recursive = TRUE)
 
 p_1999 <- make_map(joined_by_period[["1999_2005"]], "pct_overd_miss", "pct_overd_miss  1999_2005")
@@ -575,8 +561,8 @@ ggsave(filename = file.path(output_dir, "pct_overd_miss_4panel.png"),
 
 message("✓ Done. Single 4-panel map saved to: ",
         file.path(output_dir, "pct_overd_miss_4panel.png"))
-```
 
+```
 Relationship between rural and garbage
 ```{r}
 # 0 · Load packages -------------------------------------------------------
@@ -1290,334 +1276,6 @@ ggsave(here("figures", "timeseries_direction_by_income_bucket.png"),
        g_income, width = 7, height = 4, dpi = 300)
 print(g_income)
 
-```
-map diversity
-```{r}
-# ──────────────────────────────────────────────────────────────
-# Map cluster-level diversity (S, Rao's Q) — with NA fill-in
-# ──────────────────────────────────────────────────────────────
-suppressPackageStartupMessages({
-  library(dplyr); library(readr); library(stringr); library(purrr)
-  library(sf); library(tigris); library(ggplot2); library(glue); library(here)
-})
-
-options(tigris_use_cache = TRUE, tigris_class = "sf")
-crs_proj <- 2163
-
-# 0) Inputs -----------------------------------------------------
-div_tbl <- read_csv(here("output", "cluster_cod_diversity.csv"), show_col_types = FALSE)
-stopifnot(all(c("cluster","period","deaths","S","I") %in% names(div_tbl)))
-
-ccm <- read_csv(here("output", "county_cluster_membership_all_periods.csv"),
-                show_col_types = FALSE) %>%
-  mutate(fips = stringr::str_pad(as.character(fips), 5, pad = "0")) %>%
-  select(fips, period, cluster)
-
-# match your analysis/mapping vintages
-shapefile_years <- c("1999_2004" = 2000,
-                     "2005_2010" = 2010,
-                     "2011_2017" = 2015,
-                     "2018_2022" = 2020)
-
-# 1) Helpers ----------------------------------------------------
-.pick_fips <- function(df) {
-  hits <- grep("^GEOID", names(df), value = TRUE)
-  if (length(hits) >= 1) return(df[[hits[1]]])
-  if (all(c("STATEFP","COUNTYFP") %in% names(df))) return(paste0(df$STATEFP, df$COUNTYFP))
-  stop("No GEOID or STATEFP/COUNTYFP in counties() output: ", paste(names(df), collapse = ", "))
-}
-
-build_graph_for_year <- function(year) {
-  sf_raw <- tigris::counties(year = year, cb = TRUE, class = "sf") |>
-    sf::st_zm(drop = TRUE, what = "ZM") |>
-    sf::st_transform(crs_proj)
-
-  # compute FIPS outside mutate (no '.' pronoun issues)
-  fips_vec <- stringr::str_pad(.pick_fips(sf_raw), 5, pad = "0")
-
-  sf <- sf_raw |>
-    dplyr::mutate(fips = fips_vec) |>
-    dplyr::select(fips, geometry)
-
-  adj <- sf::st_touches(sf)
-  edges <- tibble::tibble(
-    from = rep(sf$fips, lengths(adj)),
-    to   = sf$fips[unlist(adj)]
-  ) |>
-    dplyr::filter(from < to)
-
-  g <- igraph::graph_from_data_frame(edges, directed = FALSE, vertices = sf$fips)
-  list(sf = sf, g = g)
-}
-
-# Fill missing cluster labels by assigning each unlabeled county
-# to the modal cluster among its neighboring counties (or the largest cluster overall if isolated).
-fix_na_by_nearest <- function(clu_named_vec, g) {
-  stopifnot(!is.null(names(clu_named_vec)))
-  unlabeled <- names(clu_named_vec)[is.na(clu_named_vec)]
-  if (!length(unlabeled)) return(clu_named_vec)
-
-  for (u in unlabeled) {
-    # neighbors present in the vector
-    neigh <- igraph::neighbors(g, u) |> names()
-    neigh <- neigh[neigh %in% names(clu_named_vec)]
-    nclu  <- clu_named_vec[neigh]
-    nclu  <- nclu[!is.na(nclu)]
-
-    if (length(nclu)) {
-      tab <- sort(table(nclu), decreasing = TRUE)
-      clu_named_vec[u] <- names(tab)[1]
-    } else {
-      # total fallback: largest cluster overall among labeled
-      tab <- sort(table(clu_named_vec[!is.na(clu_named_vec)]), decreasing = TRUE)
-      if (length(tab)) clu_named_vec[u] <- names(tab)[1]
-    }
-  }
-  clu_named_vec
-}
-
-make_cluster_map <- function(sf_data, var, title = NULL) {
-  states <- tigris::states(cb = TRUE, class = "sf") %>% sf::st_transform(crs_proj)
-  vr   <- range(sf_data[[var]], na.rm = TRUE)
-  lims <- c(floor(min(vr)*1000)/1000, ceiling(max(vr)*1000)/1000)
-  plot_title <- if (is.null(title)) var else title
-
-  ggplot() +
-    geom_sf(data = sf_data, aes(fill = .data[[var]]), colour = NA) +
-    geom_sf(data = states, fill = NA, colour = "white", linewidth = 0.3) +
-    scale_fill_distiller(palette = "RdBu", direction = -1,
-                         limits = lims, oob = scales::squish, na.value = "grey90") +
-    coord_sf(xlim = c(-2500000, 2500000),
-             ylim = c(-2200000, 730000),
-             expand = FALSE) +
-    labs(title = plot_title, fill = NULL) +
-    theme_void() +
-    theme(
-      plot.title = element_text(size = 16, face = "bold", hjust = 0.5),
-      legend.text = element_text(size = 9)
-    )
-}
-
-# 2) Build & plot (fills NAs before union) ---------------------
-out_dir <- here("figures", "cluster_diversity_maps")
-dir.create(out_dir, showWarnings = FALSE, recursive = TRUE)
-
-imap(shapefile_years, function(yr, win) {
-  message("Mapping ", win, " …")
-
-  # counties + graph for THIS period's geography
-  geo <- build_graph_for_year(yr)
-  counties_sf <- geo$sf
-  g_period    <- geo$g
-
-  # membership for this period; ensure vector named by fips
-  mem <- ccm %>% filter(period == win) %>% select(fips, cluster)
-
-  # start from all counties in that year — join, then fill missing cluster labels
-  all_cty <- counties_sf %>% left_join(mem, by = "fips")
-  clu_vec <- setNames(all_cty$cluster, all_cty$fips)
-  clu_vec <- fix_na_by_nearest(clu_vec, g_period)
-
-  # attach filled clusters back
-  all_cty$cluster <- unname(clu_vec[all_cty$fips])
-
-  # build cluster polygons
-  clusters_sf <- all_cty %>%
-    group_by(cluster) %>%
-    summarise(geometry = sf::st_union(geometry), .groups = "drop")
-
-  # attach diversity for this period
-  div_p <- div_tbl %>% filter(period == win) %>% select(cluster, S, I, deaths)
-
-  sf_dat <- clusters_sf %>% left_join(div_p, by = "cluster")
-
-  # plot & save
-  pS <- make_cluster_map(sf_dat, "S", glue("Cause-of-death diversity S — {win}"))
-  pI <- make_cluster_map(sf_dat, "I", glue("CoD inequality (Rao’s Q) — {win}"))
-
-  ggsave(filename = file.path(out_dir, glue("cluster_S_{win}.png")), plot = pS, width = 8, height = 6, dpi = 320)
-  ggsave(filename = file.path(out_dir, glue("cluster_I_{win}.png")), plot = pI, width = 8, height = 6, dpi = 320)
-
-  print(pS); print(pI)
-})
-```
-Correlate Phillips detail with age-bucket shares by period
-```{r}
-suppressPackageStartupMessages({
-  library(arrow); library(dplyr); library(stringr); library(readr)
-  library(tidyr); library(here)
-})
-
-parquet_dir <- if (fs::dir_exists(here("data_private","mcod"))) here("data_private","mcod") else here("data_private","mcod_sample")
-county_var  <- "county_ihme"
-
-detail_df <- read_csv(here("output","cluster_phillips_detail.csv"), show_col_types = FALSE) %>%
-  transmute(period, cluster, detail = coalesce(detail_phillips_refsize, detail_phillips_raw)) %>%
-  distinct()
-
-ccm <- read_csv(here("output","county_cluster_membership.csv"), show_col_types = FALSE) %>%
-  mutate(fips = str_pad(as.character(fips), 5, pad = "0")) %>%
-  select(fips, period, cluster)
-
-period_of <- function(y){
-  dplyr::case_when(
-    y >= 1999 & y <= 2006 ~ "1999_2006",
-    y >= 2007 & y <= 2014 ~ "2007_2014",
-    y >= 2015 & y <= 2022 ~ "2015_2022",
-    TRUE ~ NA_character_
-  )
-}
-
-ds <- open_dataset(parquet_dir)
-stopifnot(all(c("year", county_var, "age") %in% names(ds$schema)))
-
-age_levels <- c("0-14","15-24","25-44","45-64","65-74","75-84","85+")
-cuts <- c(-Inf, 14, 24, 44, 64, 74, 84, Inf)
-
-# --- ONE row per (period, cluster, age_bucket) ---
-ages_clu <- ds %>%
-  filter(!is.na(year), !is.na(!!sym(county_var)), !is.na(age)) %>%
-  select(year, !!sym(county_var), age) %>%
-  collect() %>%
-  mutate(fips = str_pad(as.character(.data[[county_var]]), 5, pad = "0"),
-         period = period_of(year)) %>%
-  filter(!is.na(period), is.finite(age), age >= 0, age <= 110) %>%
-  inner_join(ccm, by = c("fips","period")) %>%
-  mutate(age_bucket = cut(age, breaks = cuts, labels = age_levels, right = TRUE)) %>%
-  count(period, cluster, age_bucket, name = "n") %>%
-  group_by(period, cluster) %>%
-  mutate(share = n / sum(n)) %>%
-  ungroup() %>%
-  distinct(period, cluster, age_bucket, share)   # <- dedupe
-
-ages_det <- ages_clu %>% inner_join(detail_df, by = c("period","cluster"))
-
-# sanity: cluster counts should match detail_df
-ages_det %>% distinct(period, cluster) %>% count(period, name = "n_clusters_actual")
-# compare to:
-detail_df %>% count(period, name = "n_clusters_expected")
-
-# --- Cross-cluster correlations (per period × bucket) ---
-age_corr <- ages_det %>%
-  group_by(period, age_bucket) %>%
-  summarise(
-    n_clusters = n_distinct(cluster[is.finite(share) & is.finite(detail)]),
-    cor_pearson  = {x<-share; y<-detail; if (sd(x,na.rm=TRUE)==0 || sd(y,na.rm=TRUE)==0) NA_real_
-                    else suppressWarnings(cor(x,y,use="complete.obs"))},
-    cor_spearman = {x<-share; y<-detail; if (sd(x,na.rm=TRUE)==0 || sd(y,na.rm=TRUE)==0) NA_real_
-                    else suppressWarnings(cor(x,y,use="complete.obs",method="spearman"))},
-    .groups = "drop"
-  ) %>% arrange(age_bucket, period)
-
-write_csv(age_corr, here("output","corr_detail_by_agebucket_timeseries_FIXED.csv"))
-age_corr
-```
-maps phillips detail metric
-```{r}
-
-
-# ──────────────────────────────────────────────────────────────
-# Map Phillips detail — CLUSTERS ONLY (by period)
-# ──────────────────────────────────────────────────────────────
-suppressPackageStartupMessages({
-  library(dplyr); library(readr); library(stringr); library(purrr)
-  library(sf); library(tigris); library(ggplot2); library(glue); library(here)
-})
-
-options(tigris_use_cache = TRUE, tigris_class = "sf")
-crs_proj <- 2163
-
-# ◼ Choose which metric to plot: "detail_phillips_refsize" or "detail_phillips_raw"
-VAR <- "detail_phillips_refsize"
-
-# ‣ Inputs -----------------------------------------------------
-clu_det <- read_csv(here("output", "cluster_phillips_detail.csv"), show_col_types = FALSE)
-stopifnot(all(c("cluster","period") %in% names(clu_det)))
-
-# if refsize column isn’t present (older runs), fall back to raw
-if (!VAR %in% names(clu_det)) {
-  message("Requested VAR '", VAR, "' not found. Falling back to 'detail_phillips_raw'.")
-  VAR <- "detail_phillips_raw"
-  stopifnot(VAR %in% names(clu_det))
-}
-
-ccm <- read_csv(here("output", "county_cluster_membership.csv"), show_col_types = FALSE) %>%
-  mutate(fips = str_pad(as.character(fips), 5, pad = "0")) %>%
-  select(fips, period, cluster)
-
-# ‣ Period → shapefile year (UPDATED periods) ------------------
-shapefile_years <- c("1999_2006" = 2000,
-                     "2007_2014" = 2010,
-                     "2015_2022" = 2020)
-
-# ‣ Helpers ----------------------------------------------------
-.pick_fips <- function(df) {
-  hits <- grep("^GEOID", names(df), value = TRUE)
-  if (length(hits) >= 1) return(df[[hits[1]]])
-  if (all(c("STATEFP","COUNTYFP") %in% names(df))) return(paste0(df$STATEFP, df$COUNTYFP))
-  stop("No GEOID or STATEFP/COUNTYFP columns found in counties() output. Names: ",
-       paste(names(df), collapse = ", "))
-}
-
-build_cluster_sf <- function(period_name, shp_year, ccm_df) {
-  counties_raw <- tigris::counties(year = shp_year, cb = TRUE, class = "sf") %>%
-    sf::st_zm(drop = TRUE, what = "ZM") %>%
-    sf::st_transform(crs_proj)
-
-  counties_sf <- counties_raw %>%
-    mutate(fips = str_pad(.pick_fips(counties_raw), 5, pad = "0")) %>%
-    select(fips, geometry)
-
-  m <- ccm_df %>% filter(period == period_name)
-  if (nrow(m) == 0) stop("No county→cluster rows for period ", period_name)
-
-  j <- counties_sf %>% left_join(m, by = "fips") %>% filter(!is.na(cluster))
-
-  clusters_sf <- j %>%
-    group_by(cluster) %>%
-    summarise(geometry = sf::st_union(geometry), .groups = "drop") %>%
-    suppressWarnings()
-  clusters_sf
-}
-
-make_map <- function(sf_data, var, title = NULL) {
-  states <- tigris::states(cb = TRUE, class = "sf") %>% sf::st_transform(crs_proj)
-  lims <- c(50, 70)  # fixed scale range
-  plot_title <- if (is.null(title)) var else title
-
-  ggplot() +
-    geom_sf(data = sf_data, aes(fill = .data[[var]]), colour = NA) +
-    geom_sf(data = states, fill = NA, colour = "white", linewidth = 0.3) +
-    scale_fill_distiller(palette = "RdBu", direction = 1,
-                         limits = lims, oob = scales::squish, na.value = "grey90") +
-    coord_sf(xlim = c(-2500000, 2500000),
-             ylim = c(-2200000, 730000),
-             expand = FALSE) +
-    labs(title = plot_title, fill = NULL) +
-    theme_void() +
-    theme(
-      plot.title = element_text(size = 16, face = "bold", hjust = 0.5),
-      legend.text = element_text(size = 9)
-    )
-}
-# ‣ Output dir -------------------------------------------------
-out_dir_clu <- here("figures","phillips_maps",
-                    paste0("cluster_", if (VAR=="detail_phillips_refsize") "refsize" else "raw"))
-dir.create(out_dir_clu, recursive = TRUE, showWarnings = FALSE)
-dev_png <- "png"  # switch to ragg if you like
-
-# ‣ Build + save (cluster‑only) --------------------------------
-imap(shapefile_years, function(yr, win) {
-  message("Mapping clusters — ", win, "…")
-
-  cl_sf  <- build_cluster_sf(win, yr, ccm)
-  dat_cl <- clu_det %>% filter(period == win) %>% select(cluster, !!VAR)
-  sf_cl  <- cl_sf %>% left_join(dat_cl, by = "cluster")
-
-  pC <- make_map(sf_cl, VAR, glue("Phillips detail — {if (VAR=='detail_phillips_refsize') 'm=2000' else 'raw'} — {win}"))
-  ggsave(filename = file.path(out_dir_clu, glue("cluster_phillips_{if (VAR=='detail_phillips_refsize') 'refsize' else 'raw'}_{win}.png")),
-         plot = pC, width = 8, height = 6, dpi = 320, device = dev_png)
-})
 ```
 
 ```{r}
