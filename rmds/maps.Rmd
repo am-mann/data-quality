@@ -10,7 +10,7 @@ Temporality stable groupings
 # ──────────────────────────────────────────────────────────────
 
 # 0) Packages & options
-required <- c("sf","tigris","readr","dplyr","stringr","purrr","ggplot2","here","scales")
+required <- c("sf","tigris","readr","dplyr","stringr","purrr","ggplot2","here","scales","patchwork")
 missing <- setdiff(required, rownames(installed.packages()))
 if (length(missing)) install.packages(missing)
 invisible(lapply(required, library, character.only = TRUE))
@@ -63,12 +63,12 @@ ihme_map <- ihme_fips %>%
 
 # 5) Build shapes per period & join averages
 crs_proj <- 2163
-shapefile_years <- c("1999_2005"=2000, "2006_2012"=2010, "2013_2017"=2019, "2020_2022"=2020)
+shapefile_years <- c("1999_2005"=2000, "2006_2012"=2010, "2013_2019"=2019, "2020_2022"=2020)
 
 st_shift <- function(x, offset) { sf::st_geometry(x) <- sf::st_geometry(x) + offset; x }
 st_scale <- function(x, factor) { ctr <- sf::st_centroid(sf::st_union(x)); sf::st_geometry(x) <- (sf::st_geometry(x) - ctr) * factor + ctr; x }
 
-# ——— Normalizer: ensure a 5‑digit GEOID exists, with robust fallbacks ———
+# ——— Normalizer: ensure a 5-digit GEOID exists, with robust fallbacks ———
 normalize_geoid <- function(sf, year) {
   nms <- names(sf)
 
@@ -272,6 +272,7 @@ make_map <- function(sf_data, var, title = NULL, palette = "RdBu") {
 output_dir <- here::here("figures","5yr_avg_stable")
 dir.create(output_dir, showWarnings = FALSE, recursive = TRUE)
 
+# (A) Keep original per-period files (unchanged)
 purrr::walk(vars_present, function(var) {
   purrr::walk(names(shapefile_years), function(win) {
     sf_dat  <- joined_by_period[[win]]
@@ -282,7 +283,22 @@ purrr::walk(vars_present, function(var) {
   })
 })
 
+# (B) ALSO save a 4-panel figure per variable (one panel per time window)
+purrr::walk(vars_present, function(var) {
+  # Build the exact same four maps
+  p_1999 <- make_map(joined_by_period[["1999_2005"]], var, paste(var, "1999_2005"))
+  p_2006 <- make_map(joined_by_period[["2006_2012"]], var, paste(var, "2006_2012"))
+  p_2013 <- make_map(joined_by_period[["2013_2017"]], var, paste(var, "2013_2017"))
+  p_2020 <- make_map(joined_by_period[["2020_2022"]], var, paste(var, "2020_2022"))
+
+  combined <- (p_1999 | p_2006) / (p_2013 | p_2020)
+
+  ggsave(filename = file.path(output_dir, paste0(var, "_4panel.png")),
+         plot = combined, width = 12, height = 9, dpi = 320)
+})
+
 message("✓ Done. Maps saved to: ", output_dir)
+
 ```
 Make map of percentage missing overdoses with clusters
 ```{r}
