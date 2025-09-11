@@ -10,14 +10,185 @@
 # - overdose-detail-codes-v3.csv containing the required contributing cause codes for overdose deaths
 # - light_garbage_codes.csv containing list of contributing cause codes that lack detail
 # - accident-detail-codes-v3.csv containing the required contributing cause codes for accident deaths
-# - gbd_garbage_codes_without_overdose.csv containing the IHME list of garbage codes
-# - dq_entropy_helper.R which returns a table of DQ values (Foreman 24-bin)
+# - gbd_garbage_codes_without_overdose.csv# ───────────────── dq_entropy_helper.R — Foreman 24/25-bin DQ (county×year) ─────────────────
+# Inputs:
+#   - ds: data frame with 'ucod', county key, optional 'age_years' or 'ager27',
+#         and contributing causes in record_1..record_20 (or record1..record20)
+#   - county_var: name of the county column in ds (e.g., "county_ihme")
+#   - dict_dir: directory containing:
+#       * foreman-icd10-mapping.csv  (ICD → USCOD *codes*, NOT names, e.g. A_5, B_3_1, G_1)
+#       * foreman-table2-map.csv     (wide: target_cause + G_1..G_9 TRUE/FALSE)
 #
-# All these files can be found on Github: https://github.com/am-mann/data-quality/
-#
-# Output: county_year_quality_metrics.csv
-# ————————————————————————————————————————————————————————————————
-library(arrow)
+# Output columns (joined by county×year):
+#   total, DQ_entropy, DQ_K, DQ_overall, DQ_expH_over_K,
+#   DQ_rec_entropy_mean, DQ_rec_expH_over_K_mean, DQ_rec_ig_abs_mean,
+#   DQ_rec_ig_frac_mean_garbage, foreman_garbage, foreman_garbage_adj
+# ─────────────────────────────────────────────────────────────────────────────────────────────
+
+suppressPackageStartupMessages({
+    library(dplyr); library(tidyr); library(readr); library(stringr); library(purrr)
+    library(Matrix)
+})
+
+.has_glmnet <- function() requireNamespace("glmnet", quietly = TRUE)
+
+# ---------- tiny helpers ----------
+canonical_icd <- function(x) stringr::str_remove_all(stringr::str_to_upper(x), "[^A-Z0-9]")
+clean_icd     <- function(x) stringr::str_remove_all(stringr::str_to_upper(x), "[^A-Z0-9\\.]")
+icd3          <- function(x) substr(canonical_icd(x), 1, 3)
+icd4          <- function(x) substr(canonical_icd(x), 1, 4)
+# keep letters+digits; drop punctuation/underscores. "B_3_1"→"b31", "G_1"→"g1"
+norm_code     <- function(x) tolower(gsub("[^A-Za-z0-9]+", "", as.character(x)))
+
+# Accept record1..record20 or record_1..record_20
+.rename_record_cols <- function(df) {
+    if (!any(grepl("^record_", names(df))) && any(grepl("^record[0-9]+$", names(df)))) {
+        dplyr::rename_with(df, ~ sub("^record([0-9]+)$","record_\\1", .x), .cols = dplyr::matches("^record[0-9]+$"))
+    } else df
+}
+
+# ---------- robust readers (force character types so USCOD never becomes numeric) ----------
+.read_icd_map <- function(path) {
+    df <- readr::read_csv(
+        path, show_col_types = FALSE,
+        col_types = readr::cols(.default = readr::col_character(),
+                                ICD10 = readr::col_character(),
+                                USCOD = readr::col_character())
+    )
+    if (!all(c("ICD10","USCOD") %in% names(df))) {
+        stop("foreman-icd10-mapping.csv must have columns ICD10 and USCOD (codes like A_5, B_3_1, G_1).")
+    }
+    out <- df %>%
+        transmute(
+            icd = canonical_icd(ICD10),
+            bin = norm_code(USCOD)   # preserve letters, squash punctuation
+        ) %>%
+        filter(icd != "", bin != "") %>%
+        distinct(icd, .keep_all = TRUE)
+    
+    # Guard: bins must not be digits-only (would indicate numeric parsing)
+    if (any(grepl("^\\d+$", out$bin))) {
+        bad <- unique(out$bin[grepl("^\\d+$", out$bin)])
+        stop("USCOD normalized to digits-only bins (e.g. ", paste(head(bad, 8), collapse=", "),
+             "). Ensure USCOD column is alphanumeric codes like A_5, B_3_1, G_1.")
+    }
+    out
+}
+
+.read_table2_map <- function(path) {
+    df <- readr::read_csv(path, show_col_types = FALSE,
+                          col_types = readr::cols(.default = readr::col_character()))
+    if (!"target_cause" %in% names(df)) {
+        stop("foreman-table2-map.csv must contain column 'target_cause'.")
+    }
+    g_cols <- grep("^G_[0-9]+$", names(df), value = TRUE)
+    if (!length(g_cols)) stop("foreman-table2-map.csv must contain columns G_1..G_9.")
+    
+    # Coerce truthy flags to logical
+    df[g_cols] <- lapply(df[g_cols], function(x){
+        y <- tolower(as.character(x))
+        y %in% c("1","true","t","y","yes","x","✓","check","checked")
+    })
+    
+    t2_long <- df %>%
+        mutate(target = norm_code(target_cause)) %>%
+        tidyr::pivot_longer(all_of(g_cols), names_to = "garbage_raw", values_to = "flag") %>%
+        filter(flag) %>%
+        transmute(
+            garbage = norm_code(garbage_raw),  # "G_1" -> "g1"
+            target  = norm_code(target)
+        ) %>%
+        filter(garbage != "", target != "") %>%
+        distinct(garbage, target)
+    
+    need <- paste0("g", 1:9)
+    miss <- setdiff(need, unique(t2_long$garbage))
+    if (length(miss)) stop("Missing garbage bins in Table 2 after normalization: ", paste(miss, collapse=", "))
+    t2_long
+}
+
+# Lookup tables for 4-char then 3-char ICD matching
+.make_icd_lookup <- function(icd_map) {
+    list(
+        map4 = icd_map %>% filter(nchar(icd) == 4) %>% select(icd4 = icd, bin4 = bin),
+        map3 = icd_map %>% filter(nchar(icd) == 3) %>% select(icd3 = icd, bin3 = bin)
+    )
+}
+map_icd_to_bin <- function(x, lu) {
+    x4 <- icd4(x); x3 <- icd3(x)
+    out <- rep(NA_character_, length(x))
+    m4 <- match(x4, lu$map4$icd4); ok4 <- !is.na(m4); out[ok4] <- lu$map4$bin4[m4[ok4]]
+    m3 <- match(x3, lu$map3$icd3); ok3 <- !is.na(m3) & !ok4; out[ok3] <- lu$map3$bin3[m3[ok3]]
+    out
+}
+
+# Entropy
+.shannon_H <- function(p) { p <- p[p > 0]; if (!length(p)) 0 else -sum(p * log(p)) }
+
+# Robust glmnet prediction: fixes dim/labels/row-mismatch
+.safe_multinomial_probs <- function(fit, X_te, classes, s = "lambda.1se") {
+    arr <- tryCatch(predict(fit, newx = X_te, type = "response", s = s), error = function(e) NULL)
+    if (is.null(arr)) return(NULL)
+    probs <- if (length(dim(arr)) == 3L) arr[, , 1, drop = FALSE] else arr
+    probs <- as.matrix(probs)
+    
+    if (is.null(colnames(probs)) || anyNA(colnames(probs)) || ncol(probs) == 0L) {
+        dn <- dimnames(arr)
+        if (!is.null(dn) && length(dn) >= 2L && !is.null(dn[[2]]) && length(dn[[2]]) == ncol(probs)) {
+            colnames(probs) <- dn[[2]]
+        } else if (!is.null(fit$glmnet.fit$classnames) && length(fit$glmnet.fit$classnames) == ncol(probs)) {
+            colnames(probs) <- fit$glmnet.fit$classnames
+        } else {
+            colnames(probs) <- paste0("cls", seq_len(max(1L, ncol(probs))))
+        }
+    }
+    
+    n_te <- nrow(X_te)
+    if (nrow(probs) != n_te) {                # align rows if glmnet returns fewer/more
+        k <- max(1L, ncol(probs))
+        vals <- as.numeric(probs)
+        if (length(vals) != n_te * k) vals <- rep_len(vals, n_te * k)
+        probs <- matrix(vals, nrow = n_te, ncol = k, byrow = TRUE, dimnames = list(NULL, colnames(probs)))
+    }
+    
+    present <- intersect(classes, colnames(probs))
+    base <- if (length(present)) probs[, present, drop = FALSE] else matrix(0, nrow = n_te, ncol = 0)
+    missing <- setdiff(classes, colnames(probs))
+    if (length(missing)) base <- cbind(base, matrix(0, nrow = n_te, ncol = length(missing), dimnames = list(NULL, missing)))
+    base <- base[, classes, drop = FALSE]
+    
+    rs <- rowSums(base); rs[rs == 0] <- 1
+    base / rs
+}
+
+# =============== MAIN (memory-safe, streaming) ===============
+compute_entropy_county_foreman <- function(
+        ds,
+        county_var,
+        dict_dir      = NULL,
+        icd_map_path  = if (!is.null(dict_dir)) file.path(dict_dir, "foreman-icd10-mapping.csv") else NULL,
+        code_map_path = if (!is.null(dict_dir)) file.path(dict_dir, "foreman-table2-map.csv") else NULL,
+        age_breaks    = c(-Inf, 1, 5, seq(10, 85, by = 5), Inf)
+) # ————————————————————————————————————————————————————————————————
+    # Date: July 18, 2025
+    # Code to calculate averages for various data quality metrics by county.
+    #
+    # Assumes mortality files in format mortXXXX.parquet and variable names
+    # "year", "marstat", "placdth", "educ2003", "mandeath", "age", "sex", "race",  "ucod", "record1", ..., "record20"
+    #
+    # Requires the following files to run:
+    # - mortality data files from 1999-2023 (called mortXXX.parquet)
+    # - overdose-detail-codes-v3.csv containing the required contributing cause codes for overdose deaths
+    # - light_garbage_codes.csv containing list of contributing cause codes that lack detail
+    # - accident-detail-codes-v3.csv containing the required contributing cause codes for accident deaths
+    # - gbd_garbage_codes_without_overdose.csv containing the IHME list of garbage codes
+    # - dq_entropy_helper.R which returns a table of DQ values (Foreman 24-bin)
+    #
+    # All these files can be found on Github: https://github.com/am-mann/data-quality/
+    #
+    # Output: county_year_quality_metrics.csv
+    # ————————————————————————————————————————————————————————————————
+    library(arrow)
 library(dplyr)
 library(purrr)
 library(stringr)
@@ -36,10 +207,16 @@ PARALLELIZE <- TRUE
 #  load things + dictionaries + helpers
 # ————————————————————————————————————————————————————————————————
 source(here("code/helpers", "dq_entropy_helper.R"))   # loads compute_entropy_county_foreman()
-# parquet_dir    <- here("data_private", "mcod_sample")
-parquet_dir    <- here("data_private", "mcod")
+parquet_dir <- if (dir.exists(here::here("data_private", "mcod"))) {
+    here::here("data_private", "mcod")
+} else if (dir.exists(here::here("data_private", "mcod_sample"))) {
+    here::here("data_private", "mcod_sample")
+} else {
+    stop("Neither data_private/mcod nor data_private/mcod_sample exists.")
+}
+
 dictionary_dir <- here("data_raw", "cause-codes")
-out_csv        <- here("data", "county_year_quality_metrics.csv.gz")
+out_csv        <- here("data", "county_year_quality_metrics.csv")
 
 county_var     <- "county_ihme" 
 years_wanted   <- NULL
@@ -388,4 +565,3 @@ message("County-year quality metrics written")
 
 
 #read_parquet(here("data_private/mcod_sample/mcod_1999.parquet"))
-
