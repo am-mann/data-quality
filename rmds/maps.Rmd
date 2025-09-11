@@ -20,7 +20,7 @@ options(tigris_use_cache = TRUE, tigris_class = "sf")
 
 # 1) Variables to map (no transformations will be applied)
 vars_to_map <- c(
-  "prop_garbage","pct_overd_miss"
+  "prop_garbage","pct_overd_miss", "DQ_rec_ig_frac_mean_garbage", "DQ_overall", "DQ_rec_ig_abs_mean", "foreman_garbage"
 )
 
 # 2) Load your county-year data (as-is); add time windows only
@@ -182,7 +182,7 @@ make_map <- function(sf_data, var, title = NULL, palette = "RdBu") {
 } else if (var == "DQ_overall") {
   scale_fill_distiller(
     palette = palette,
-    limits = c(0.90,1),
+    limits = c(0,0.9),
     oob = scales::squish,
     direction = 1,
     na.value = "grey90"
@@ -203,60 +203,13 @@ make_map <- function(sf_data, var, title = NULL, palette = "RdBu") {
     direction = 1,
     na.value = "grey90"
   )
-} else if (var == "pct_placdth_comp_k") {
-  scale_fill_distiller(
-    palette = palette,
-    limits = c(98, 100),
-    oob = scales::squish,
-    direction = 1,
-    na.value = "grey90"
-  )
-} else if (var == "pct_educ_comp_k") {
-  scale_fill_distiller(
-    palette = palette,
-    limits = c(0, 100),
-    oob = scales::squish,
-    direction = 1,
-    na.value = "grey90"
-  )
-} else if (var == "pct_marstat_comp_k") {
-  scale_fill_distiller(
-    palette = palette,
-    limits = c(97, 100),
-    oob = scales::squish,
-    direction = 1,
-    na.value = "grey90"
-  )
+
 } else if (var %in% c("pct_age_comp_k", "pct_sex_comp_k", "pct_race_comp_k")) {
   scale_fill_distiller(
     palette = palette,
     limits = c(99.5, 100),
     oob = scales::squish,
     direction = 1,
-    na.value = "grey90"
-  )
-} else if (var == "pct_gc_I64") {
-  scale_fill_distiller(
-    palette = palette,
-    limits = c(0.01, 0.05),
-    oob = scales::squish,
-    direction = -1,
-    na.value = "grey90"
-  )
-} else if (var == "pct_gc_C_misc") {
-  scale_fill_distiller(
-    palette = palette,
-    limits = c(0.005, 0.03),
-    oob = scales::squish,
-    direction = -1,
-    na.value = "grey90"
-  )
-} else if (var == "pct_gc_I10") {
-  scale_fill_distiller(
-    palette = palette,
-    limits = c(0, 0.02),
-    oob = scales::squish,
-    direction = -1,
     na.value = "grey90"
   )
 } else if (var == "pct_gc_R_misc") {
@@ -343,7 +296,7 @@ Make map of percentage missing overdoses with clusters
 
 # 0) Packages & options
 required <- c("sf","tigris","readr","dplyr","stringr","purrr","ggplot2",
-              "here","scales","igraph","tidyr","tibble")
+              "here","scales","igraph","tidyr","tibble","patchwork")
 missing <- setdiff(required, rownames(installed.packages()))
 if (length(missing)) install.packages(missing)
 invisible(lapply(required, library, character.only = TRUE))
@@ -590,22 +543,22 @@ make_map <- function(sf_data, var = "pct_overd_miss", title = NULL, palette = "R
     )
 }
 
-# 11) Save maps
+# 11) Save one combined 2×2 figure (exact same maps, assembled)
 output_dir <- here::here("figures","5yr_avg_IHMEstable_clusters50_overd")
 dir.create(output_dir, showWarnings = FALSE, recursive = TRUE)
 
-purrr::walk(c("pct_overd_miss"), function(var) {
-  purrr::walk(names(shapefile_years), function(win) {
-    sf_dat  <- joined_by_period[[win]]
-    if (!var %in% names(sf_dat)) return(invisible(NULL))
-    map_plot <- make_map(sf_dat, var, paste0(var, "  ", win))
-    ggsave(filename = file.path(output_dir, paste0(var, "_", win, ".png")),
-           plot = map_plot, width = 8, height = 6, dpi = 320)
-  })
-})
+p_1999 <- make_map(joined_by_period[["1999_2005"]], "pct_overd_miss", "pct_overd_miss  1999_2005")
+p_2006 <- make_map(joined_by_period[["2006_2012"]], "pct_overd_miss", "pct_overd_miss  2006_2012")
+p_2013 <- make_map(joined_by_period[["2013_2019"]], "pct_overd_miss", "pct_overd_miss  2013_2019")
+p_2020 <- make_map(joined_by_period[["2020_2022"]], "pct_overd_miss", "pct_overd_miss  2020_2022")
 
-message("✓ Done. Maps saved to: ", output_dir)
+combined <- (p_1999 | p_2006) / (p_2013 | p_2020)
 
+ggsave(filename = file.path(output_dir, "pct_overd_miss_4panel.png"),
+       plot = combined, width = 12, height = 9, dpi = 320)
+
+message("✓ Done. Single 4-panel map saved to: ",
+        file.path(output_dir, "pct_overd_miss_4panel.png"))
 ```
 
 Relationship between rural and garbage
