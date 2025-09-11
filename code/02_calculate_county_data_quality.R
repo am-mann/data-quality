@@ -161,45 +161,6 @@ map_icd_to_bin <- function(x, lu) {
     base / rs
 }
 
-# =============== MAIN (memory-safe, streaming) ===============
-compute_entropy_county_foreman <- function(
-        ds,
-        county_var,
-        dict_dir      = NULL,
-        icd_map_path  = if (!is.null(dict_dir)) file.path(dict_dir, "foreman-icd10-mapping.csv") else NULL,
-        code_map_path = if (!is.null(dict_dir)) file.path(dict_dir, "foreman-table2-map.csv") else NULL,
-        age_breaks    = c(-Inf, 1, 5, seq(10, 85, by = 5), Inf)
-) # ————————————————————————————————————————————————————————————————
-    # Date: July 18, 2025
-    # Code to calculate averages for various data quality metrics by county.
-    #
-    # Assumes mortality files in format mortXXXX.parquet and variable names
-    # "year", "marstat", "placdth", "educ2003", "mandeath", "age", "sex", "race",  "ucod", "record1", ..., "record20"
-    #
-    # Requires the following files to run:
-    # - mortality data files from 1999-2023 (called mortXXX.parquet)
-    # - overdose-detail-codes-v3.csv containing the required contributing cause codes for overdose deaths
-    # - light_garbage_codes.csv containing list of contributing cause codes that lack detail
-    # - accident-detail-codes-v3.csv containing the required contributing cause codes for accident deaths
-    # - gbd_garbage_codes_without_overdose.csv containing the IHME list of garbage codes
-    # - dq_entropy_helper.R which returns a table of DQ values (Foreman 24-bin)
-    #
-    # All these files can be found on Github: https://github.com/am-mann/data-quality/
-    #
-    # Output: county_year_quality_metrics.csv
-    # ————————————————————————————————————————————————————————————————
-    library(arrow)
-library(dplyr)
-library(purrr)
-library(stringr)
-library(binom)
-library(readr)
-library(tidyr)
-library(future)
-library(furrr)
-library(here)
-library(readxl)   
-
 ## CONSTANTS ----
 PARALLELIZE <- TRUE
 
@@ -216,7 +177,7 @@ parquet_dir <- if (dir.exists(here::here("data_private", "mcod"))) {
 }
 
 dictionary_dir <- here("data_raw", "cause-codes")
-out_csv        <- here("data", "county_year_quality_metrics.csv")
+out_csv        <- here("data", "county_year_quality_metrics.csv.gz")
 
 county_var     <- "county_ihme" 
 years_wanted   <- NULL
