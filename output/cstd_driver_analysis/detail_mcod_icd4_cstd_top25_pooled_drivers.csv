@@ -1,0 +1,4 @@
+rank,term,estimate,direction
+3,detail_mcod_root3_cstd,0.6929467488491615,↑ increases diversity
+4,detail_ucod_icd4_cstd,0.5932954707917305,↑ increases diversity
+6,detail_ucod_root3_cstd,-0.3982285001947453,↓ decreases diversity

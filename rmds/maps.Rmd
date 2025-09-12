@@ -29,10 +29,10 @@ dq <- readr::read_csv(here::here("data","county_year_quality_metrics.csv.gz"), s
     year        = as.integer(year),
     county_ihme = stringr::str_pad(as.character(county_ihme), 5, pad = "0"),
     time_window = dplyr::case_when(
-      year >= 1999 & year <= 2005 ~ "1999_2005",
-      year >= 2006 & year <= 2012 ~ "2006_2012",
-      year >= 2013 & year <= 2019 ~ "2013_2019",
-      year >= 2020 & year <= 2022 ~ "2020_2022",
+      year >= 1999 & year <= 2005 ~ "1999–2005",
+      year >= 2006 & year <= 2012 ~ "2006–2012",
+      year >= 2013 & year <= 2019 ~ "2013–2019",
+      year >= 2020 & year <= 2022 ~ "2020–2022",
       TRUE ~ NA_character_
     )
   )
@@ -63,7 +63,7 @@ ihme_map <- ihme_fips %>%
 
 # 5) Build shapes per period & join averages
 crs_proj <- 2163
-shapefile_years <- c("1999_2005"=2000, "2006_2012"=2010, "2013_2019"=2019, "2020_2022"=2020)
+shapefile_years <- c("1999–2005"=2000, "2006–2012"=2010, "2013–2019"=2019, "2020–2022"=2020)
 
 st_shift <- function(x, offset) { sf::st_geometry(x) <- sf::st_geometry(x) + offset; x }
 st_scale <- function(x, factor) { ctr <- sf::st_centroid(sf::st_union(x)); sf::st_geometry(x) <- (sf::st_geometry(x) - ctr) * factor + ctr; x }
@@ -72,7 +72,6 @@ st_scale <- function(x, factor) { ctr <- sf::st_centroid(sf::st_union(x)); sf::s
 normalize_geoid <- function(sf, year) {
   nms <- names(sf)
 
-  # A) If any column starts with GEOID (GEOID, GEOID10, GEOID20…), use it.
   geoid_col <- grep("^GEOID", nms, value = TRUE)[1]
   if (!is.na(geoid_col)) {
     message("[", year, "] Using GEOID column: ", geoid_col)
@@ -81,7 +80,6 @@ normalize_geoid <- function(sf, year) {
     return(sf)
   }
 
-  # B) Else build from STATEFP + COUNTYFP (present in 2000 & 2010)
   state_col  <- grep("^STATE.*FP$", nms, value = TRUE)[1]
   county_col <- grep("^COUNTY.*FP$", nms, value = TRUE)[1]
   if (!is.na(state_col) && !is.na(county_col)) {
@@ -93,7 +91,6 @@ normalize_geoid <- function(sf, year) {
     return(sf)
   }
 
-  # C) Last resort: legacy combined id
   combo_col <- grep("^CNTYIDFP$", nms, value = TRUE)[1]
   if (!is.na(combo_col)) {
     message("[", year, "] Using combined ID column: ", combo_col, " as GEOID")
@@ -142,115 +139,37 @@ joined_by_period <- purrr::imap(
   }
 )
 
-# 6) Your original make_map (unchanged)
+# 6) make_map — now shows titles; we pass ONLY period strings when calling
 make_map <- function(sf_data, var, title = NULL, palette = "RdBu") {
   states <- tigris::states(cb = TRUE, class = "sf") |> st_transform(2163)
 
   fill_scale <- if (var == "prop_garbage") {
-  scale_fill_distiller(
-    palette = palette,
-    limits = c(0.15, 0.4),
-    oob = scales::squish,
-    direction = -1,
-    na.value = "grey90"
-  )
-} else if (var == "prop_light") {
-  scale_fill_distiller(
-    palette = palette,
-    limits = c(0.20, 0.40),
-    oob = scales::squish,
-    direction = -1,
-    na.value = "grey90"
-  )
-} else if (var == "pct_overd_miss") {
-  scale_fill_distiller(
-    palette = palette,
-    limits = c(0, 0.75),
-    oob = scales::squish,
-    direction = -1,
-    na.value = "grey90"
-  )
-} else if (var == "direction_score") {
-  scale_fill_distiller(
-    palette = palette,
-    limits = c(-1,1.5),
-    oob = scales::squish,
-    direction = -1,
-    na.value = "grey90"
-  )
-} else if (var == "DQ_overall") {
-  scale_fill_distiller(
-    palette = palette,
-    limits = c(0,0.9),
-    oob = scales::squish,
-    direction = 1,
-    na.value = "grey90"
-  )
-} else if (var == "pct_acc_miss") {
-  scale_fill_distiller(
-    palette = palette,
-    limits = c(0, 0.75),
-    oob = scales::squish,
-    direction = -1,
-    na.value = "grey90"
-  )
-} else if (var == "pct_mandeath_comp_k") {
-  scale_fill_distiller(
-    palette = palette,
-    limits = c(5, 20),
-    oob = scales::squish,
-    direction = 1,
-    na.value = "grey90"
-  )
-
-} else if (var %in% c("pct_age_comp_k", "pct_sex_comp_k", "pct_race_comp_k")) {
-  scale_fill_distiller(
-    palette = palette,
-    limits = c(99.5, 100),
-    oob = scales::squish,
-    direction = 1,
-    na.value = "grey90"
-  )
-} else if (var == "pct_gc_R_misc") {
-  scale_fill_distiller(
-    palette = palette,
-    limits = c(0, 0.03),
-    oob = scales::squish,
-    direction = -1,
-    na.value = "grey90"
-  )
-} else if (var == "pct_gc_N19") {
-  scale_fill_distiller(
-    palette = palette,
-    limits = c(0, 0.025),
-    oob = scales::squish,
-    direction = -1,
-    na.value = "grey90"
-  )
-} else if (var == "pct_gc_J80") {
-  scale_fill_distiller(
-    palette = palette,
-    limits = c(0, 0.005),
-    oob = scales::squish,
-    direction = -1,
-    na.value = "grey90"
-  )
-} else if (startsWith(var, "pct_") || var == "overall_completeness_pct") {
-  scale_fill_distiller(
-    palette = palette,
-    limits = c(0, 100),
-    oob = scales::squish,
-    direction = 1,
-    na.value = "grey90"
-  )
-} else {
-  scale_fill_distiller(
-    palette = palette,
-    oob = scales::squish,
-    na.value = "grey90",
-    direction = -1
-  )
-}
+    scale_fill_distiller(palette = palette, limits = c(0.15, 0.4), oob = scales::squish, direction = -1, na.value = "grey90")
+  } else if (var == "prop_light") {
+    scale_fill_distiller(palette = palette, limits = c(0.20, 0.40), oob = scales::squish, direction = -1, na.value = "grey90")
+  } else if (var == "pct_overd_miss") {
+    scale_fill_distiller(palette = palette, limits = c(0, 0.75), oob = scales::squish, direction = -1, na.value = "grey90")
+  } else if (var == "direction_score") {
+    scale_fill_distiller(palette = palette, limits = c(-1,1.5), oob = scales::squish, direction = -1, na.value = "grey90")
+  } else if (var == "DQ_overall") {
+    scale_fill_distiller(palette = palette, limits = c(0,0.9), oob = scales::squish, direction = 1, na.value = "grey90")
+  } else if (var == "pct_acc_miss") {
+    scale_fill_distiller(palette = palette, limits = c(0, 0.75), oob = scales::squish, direction = -1, na.value = "grey90")
+  } else if (var == "pct_mandeath_comp_k") {
+    scale_fill_distiller(palette = palette, limits = c(5, 20), oob = scales::squish, direction = 1, na.value = "grey90")
+  } else if (var %in% c("pct_age_comp_k", "pct_sex_comp_k", "pct_race_comp_k")) {
+    scale_fill_distiller(palette = palette, limits = c(99.5, 100), oob = scales::squish, direction = 1, na.value = "grey90")
+  } else if (var == "pct_gc_R_misc") {
+    scale_fill_distiller(palette = palette, limits = c(0, 0.03), oob = scales::squish, direction = -1, na.value = "grey90")
+  } else if (var == "pct_gc_N19") {
+    scale_fill_distiller(palette = palette, limits = c(0, 0.025), oob = scales::squish, direction = -1, na.value = "grey90")
+  } else if (var == "pct_gc_J80") {
+    scale_fill_distiller(palette = palette, limits = c(0, 0.005), oob = scales::squish, direction = -1, na.value = "grey90")
+  } else if (startsWith(var, "pct_") || var == "overall_completeness_pct") {
+    scale_fill_distiller(palette = palette, limits = c(0, 100), oob = scales::squish, direction = 1, na.value = "grey90")
+  } else {
+    scale_fill_distiller(palette = palette, oob = scales::squish, na.value = "grey90", direction = -1)
+  }
 
   ggplot() +
     geom_sf(data = sf_data, aes(fill = .data[[var]]), colour = NA) +
@@ -259,10 +178,10 @@ make_map <- function(sf_data, var, title = NULL, palette = "RdBu") {
     coord_sf(xlim = c(-2500000, 2500000),
              ylim = c(-2200000, 730000),
              expand = FALSE) +
-    labs(title = title %||% var, fill = NULL) +
+    labs(title = title %||% "", fill = NULL) +
     theme_void() +
     theme(
-      plot.title = NULL,
+      plot.title = element_text(size = 14, face = "bold", hjust = 0.5),  # ← SHOW titles
       legend.text = element_text(size = 9)
     )
 }
@@ -272,10 +191,10 @@ output_dir <- here::here("figures","5yr_avg_stable")
 dir.create(output_dir, showWarnings = FALSE, recursive = TRUE)
 
 purrr::walk(vars_present, function(var) {
-  p_1999 <- make_map(joined_by_period[["1999_2005"]], var, paste(var, "1999_2005"))
-  p_2006 <- make_map(joined_by_period[["2006_2012"]], var, paste(var, "2006_2012"))
-  p_2013 <- make_map(joined_by_period[["2013_2019"]], var, paste(var, "2013_2019"))
-  p_2020 <- make_map(joined_by_period[["2020_2022"]], var, paste(var, "2020_2022"))
+  p_1999 <- make_map(joined_by_period[["1999–2005"]], var, "1999–2005")
+  p_2006 <- make_map(joined_by_period[["2006–2012"]], var, "2006–2012")
+  p_2013 <- make_map(joined_by_period[["2013–2019"]], var, "2013–2019")
+  p_2020 <- make_map(joined_by_period[["2020–2022"]], var, "2020–2022")
 
   combined <- (p_1999 | p_2006) / (p_2013 | p_2020)
 
@@ -290,10 +209,6 @@ Make map of percentage missing overdoses with clusters (four panels)
 ```{r}
 # ──────────────────────────────────────────────────────────────
 # Map pct_overd_miss with temporally-stable clusters (IHME groups)
-# - Clusters are built on IHME-stable county groups (fixed over time)
-# - Threshold: ≥ 50 overdose deaths in EVERY time window
-# - Uses overd_n from county_year_quality_metrics.csv.gz (no Parquet)
-# - NA pct_overd_miss → 0
 # ──────────────────────────────────────────────────────────────
 
 # 0) Packages & options
@@ -341,7 +256,7 @@ ihme_map <- ihme_fips %>%
   ) %>%
   dplyr::distinct()
 
-# 3) Compute robust overdose totals per IHME group
+# 3) Robust overdose totals per IHME group
 overd_by_window <- dq %>%
   dplyr::filter(!is.na(time_window)) %>%
   dplyr::group_by(county_ihme, time_window) %>%
@@ -358,7 +273,7 @@ robust_tbl <- overd_wide %>%
   ) %>%
   dplyr::transmute(county_ihme, robust_overd = as.numeric(robust_overd))
 
-# 4) Helpers for shapefiles (same style as your IHME-stable code)
+# 4) Shapefile helpers
 crs_proj <- 2163
 shapefile_years <- c("1999_2005"=2000, "2006_2012"=2010, "2013_2019"=2019, "2020_2022"=2020)
 
@@ -388,20 +303,18 @@ normalize_geoid <- function(sf, year) {
   stop("No GEOID-compatible columns found in shapefile for year ", year)
 }
 
-# Build IHME-stable county geoms for a given year
 build_ihme_groups_sf <- function(year) {
   counties_raw <- tigris::counties(year = year, cb = TRUE, class = "sf") %>%
     sf::st_zm(drop = TRUE, what = "ZM")
   counties_norm <- normalize_geoid(counties_raw, year) %>% sf::st_transform(crs_proj)
-  groups_sf <- counties_norm %>%
+  counties_norm %>%
     dplyr::left_join(ihme_map, by = "GEOID") %>%
     dplyr::mutate(county_ihme = dplyr::coalesce(county_ihme, GEOID)) %>%
     dplyr::group_by(county_ihme) %>%
     dplyr::summarise(.groups = "drop")
-  groups_sf
 }
 
-# 5) Build adjacency on IHME-stable geoms (use 2020 as base)
+# 5) Adjacency & greedy clustering
 ihme2020 <- build_ihme_groups_sf(2020) %>% sf::st_transform(5070)
 adj_list <- sf::st_touches(ihme2020)
 neighbors_of <- setNames(
@@ -409,9 +322,7 @@ neighbors_of <- setNames(
   ihme2020$county_ihme
 )
 
-# 6) Greedy clustering on IHME-stable nodes using robust_overd
 min_overd <- 50L
-
 nodes_tbl <- ihme2020 %>%
   sf::st_drop_geometry() %>%
   dplyr::select(county_ihme) %>%
@@ -451,7 +362,6 @@ while (length(to_assign) > 0) {
   cid <- cid + 1L
 }
 
-# Merge any undersized clusters to nearest big cluster (on IHME-stable centroids)
 centroids <- sf::st_centroid(ihme2020) %>% dplyr::mutate(county_ihme = ihme2020$county_ihme)
 xy <- sf::st_coordinates(centroids)[,c("X","Y"), drop=FALSE]; rownames(xy) <- centroids$county_ihme
 
@@ -480,7 +390,8 @@ cluster_map <- tibble::tibble(
   cluster_id  = unname(clusters)
 )
 
-# 7) Sanity: each cluster has ≥ 50 overdoses in EVERY window
+# 7) Check threshold per window
+overd_by_window <- overd_by_window  # already computed
 check_df <- overd_by_window %>%
   dplyr::inner_join(cluster_map, by = "county_ihme") %>%
   dplyr::group_by(cluster_id, time_window) %>%
@@ -502,9 +413,9 @@ dq_cluster <- dq %>%
   tidyr::complete(cluster_id, time_window = periods_vec,
                   fill = list(pct_overd_miss = 0, n_counties = 0L))
 
-# 9) Shapes per period: IHME-stable dissolve → cluster dissolve
+# 9) Shapes per period
 build_clusters_sf <- function(year) {
-  base <- build_ihme_groups_sf(year)  # county_ihme geometry for that year
+  base <- build_ihme_groups_sf(year)
   base %>%
     dplyr::left_join(cluster_map, by = "county_ihme") %>%
     dplyr::filter(!is.na(cluster_id)) %>%
@@ -520,7 +431,7 @@ joined_by_period <- purrr::imap(shapefile_years, function(year, window) {
                    by = "cluster_id")
 })
 
-# 10) Map helper (unchanged except limits tuned for pct_overd_miss)
+# 10) Map helper — keeps your “pretty” title style
 make_map <- function(sf_data, var = "pct_overd_miss", title = NULL, palette = "RdBu") {
   states <- tigris::states(cb = TRUE, class = "sf") |> sf::st_transform(crs_proj)
   fill_scale <- scale_fill_distiller(
@@ -537,22 +448,22 @@ make_map <- function(sf_data, var = "pct_overd_miss", title = NULL, palette = "R
     coord_sf(xlim = c(-2500000, 2500000),
              ylim = c(-2200000, 730000),
              expand = FALSE) +
-    labs(title = title %||% var, fill = NULL) +
+    labs(title = title %||% "", fill = NULL) +
     theme_void() +
     theme(
-      plot.title = element_text(size = 16, face = "bold", hjust = 0.5),
+      plot.title = element_text(size = 16, face = "bold", hjust = 0.5),  # old pretty title
       legend.text = element_text(size = 9)
     )
 }
 
-# 11) Save one combined 2×2 figure (exact same maps, assembled)
+# 11) Save combined 2×2 with PERIOD-ONLY panel titles
 output_dir <- here::here("figures", "5yr_avg_stable")
 dir.create(output_dir, showWarnings = FALSE, recursive = TRUE)
 
-p_1999 <- make_map(joined_by_period[["1999_2005"]], "pct_overd_miss", "pct_overd_miss  1999_2005")
-p_2006 <- make_map(joined_by_period[["2006_2012"]], "pct_overd_miss", "pct_overd_miss  2006_2012")
-p_2013 <- make_map(joined_by_period[["2013_2019"]], "pct_overd_miss", "pct_overd_miss  2013_2019")
-p_2020 <- make_map(joined_by_period[["2020_2022"]], "pct_overd_miss", "pct_overd_miss  2020_2022")
+p_1999 <- make_map(joined_by_period[["1999_2005"]], "pct_overd_miss", "1999_2005")
+p_2006 <- make_map(joined_by_period[["2006_2012"]], "pct_overd_miss", "2006_2012")
+p_2013 <- make_map(joined_by_period[["2013_2019"]], "pct_overd_miss", "2013_2019")
+p_2020 <- make_map(joined_by_period[["2020_2022"]], "pct_overd_miss", "2020_2022")
 
 combined <- (p_1999 | p_2006) / (p_2013 | p_2020)
 
@@ -2979,395 +2890,6 @@ print(round(cor_pearson, 3))
 cat("\nSpearman correlations:\n")
 print(round(cor_spearman, 3))
 ```
-New diversity metrics
-```{r}
-# ──────────────────────────────────────────────────────────────
-# Map age-bucket detail (UCOD & MCOD) — CLUSTERS ONLY
-#   • Handles *_wide.csv (e.g., ucod_age_0-44) and long (age_bucket + value)
-#   • Adds optional weighted "ALL" using age_weights_skew4_global.csv
-#   • Builds cluster polygons from county_cluster_membership.csv
-#   • Saves per-period × age-bucket PNGs for UCOD and MCOD
-# ──────────────────────────────────────────────────────────────
-
-suppressPackageStartupMessages({
-  library(dplyr); library(readr); library(stringr); library(purrr)
-  library(sf); library(tigris); library(ggplot2); library(glue); library(here)
-  library(tidyr)
-})
-
-options(tigris_use_cache = TRUE, tigris_class = "sf")
-crs_proj <- 2163
-
-# ── CONFIG ─────────────────────────────────────────────────────
-# Period → shapefile year
-shapefile_years <- c(
-  "1999_2006" = 2000,
-  "2007_2014" = 2010,
-  "2015_2022" = 2020
-)
-
-# Color scale limits for age-bucket detail maps
-lims_age <- c(50, 70)
-
-# Output base directory
-out_dir_age <- here("figures","phillips_maps","cluster_age_detail")
-
-# If you want to limit to a subset while testing, set e.g.:
-# ONLY_BUCKETS <- c("0-44", "ALL-weighted")
-ONLY_BUCKETS <- NULL  # NULL = map all available buckets
-
-# ── Helpers: IO & parsing ─────────────────────────────────────
-.read_csv_flex <- function(fname_options) {
-  # Try output/, then project root, then /mnt/data
-  opts  <- as.character(fname_options)
-  paths <- c(file.path(here("output"), opts),
-             here(opts),
-             file.path("/mnt/data", basename(opts)))
-  hit <- paths[file.exists(paths)][1]
-  if (is.na(hit)) stop("File not found among: ", paste(paths, collapse=" | "))
-  readr::read_csv(hit, show_col_types = FALSE)
-}
-
-# Recognize age buckets anywhere in a name, e.g. "ucod_age_0-44", "80+"
-# (ASCII only; no lookarounds; robust to "_", space, or "-" as separator)
-.is_age_col <- function(nm) {
-  grepl("\\d{1,2}([-_ ]\\d{1,2}|\\+)", nm)
-}
-
-# Normalize UCOD/MCOD age detail to LONG: cluster, period, age_bucket, detail
-.normalize_age_detail <- function(df) {
-  nm <- names(df)
-
-  # Harmonize id columns
-  if (!"cluster" %in% nm && "clu" %in% nm) df <- dplyr::rename(df, cluster = clu)
-  if (!"period"  %in% names(df)) stop("Expected a 'period' column.")
-  if (!"cluster" %in% names(df)) stop("Expected a 'cluster' column.")
-
-  if ("age_bucket" %in% names(df)) {
-    # LONG input: guess value column if not named 'detail'
-    val_cols <- setdiff(names(df), c("cluster","period","age_bucket"))
-    if (!"detail" %in% names(df)) {
-      numeric_candidates <- val_cols[vapply(df[val_cols], is.numeric, logical(1))]
-      chosen <- if (length(numeric_candidates) >= 1) numeric_candidates[1] else val_cols[1]
-      df <- dplyr::rename(df, detail = dplyr::all_of(chosen))
-    }
-    out <- df %>% dplyr::select(cluster, period, age_bucket, detail)
-  } else {
-    # WIDE input: gather any columns that contain an age bucket
-    age_cols <- names(df)[vapply(names(df), .is_age_col, logical(1))]
-    if (length(age_cols) == 0) stop("Wide input has no recognizable age-bucket columns.")
-
-    out <- df %>%
-      tidyr::pivot_longer(dplyr::all_of(age_cols),
-                          names_to = "age_bucket", values_to = "detail") %>%
-      dplyr::mutate(
-        # Extract just the bucket piece (e.g., "0-44" from "ucod_age_0-44")
-        age_bucket = stringr::str_extract(age_bucket, "\\d{1,2}([-_ ]\\d{1,2}|\\+)"),
-        age_bucket = gsub("[-_ ]", "-", age_bucket)
-      ) %>%
-      dplyr::select(cluster, period, age_bucket, detail)
-  }
-
-  out %>%
-    dplyr::mutate(
-      cluster = as.character(cluster),
-      period  = as.character(period),
-      age_bucket = as.character(age_bucket),
-      detail  = as.numeric(detail)
-    )
-}
-
-# Load optional age weights (expects columns: age_bucket + weight/prop/w)
-.load_age_weights <- function() {
-  w <- tryCatch(
-    .read_csv_flex(c("age_weights_skew4_global.csv", "age_weights.csv")),
-    error = function(e) NULL
-  )
-  if (is.null(w)) return(NULL)
-
-  # Harmonize names
-  if (!"age_bucket" %in% names(w)) {
-    cand <- names(w)[vapply(names(w), .is_age_col, logical(1))]
-    if (length(cand)) {
-      w <- w %>% tidyr::pivot_longer(dplyr::all_of(cand), names_to="age_bucket", values_to="weight")
-      w <- w %>% dplyr::mutate(age_bucket = gsub("[-_ ]", "-", age_bucket))
-    } else {
-      stop("Weights file lacks 'age_bucket' column and no age-like columns found.")
-    }
-  }
-  if (!"weight" %in% names(w)) {
-    guess <- intersect(names(w), c("w","prop","weight","share","Weight","W"))
-    if (length(guess)==0) stop("Weights file found but no weight column (w/prop/weight/share).")
-    w <- dplyr::rename(w, weight = dplyr::all_of(guess[1]))
-  }
-
-  w %>%
-    dplyr::select(age_bucket, weight) %>%
-    dplyr::mutate(weight = as.numeric(weight)) %>%
-    dplyr::filter(!is.na(weight)) %>%
-    dplyr::mutate(weight = weight / sum(weight))
-}
-
-# Add weighted "ALL" bucket (if weights supplied)
-.prepare_for_mapping <- function(df_age_long, weights = NULL, include_weighted_all = TRUE) {
-  out <- df_age_long
-  if (include_weighted_all && !is.null(weights)) {
-    w_all <- out %>%
-      dplyr::inner_join(weights, by = "age_bucket") %>%
-      dplyr::group_by(cluster, period) %>%
-      dplyr::summarise(detail = stats::weighted.mean(detail, weight, na.rm = TRUE), .groups = "drop") %>%
-      dplyr::mutate(age_bucket = "ALL-weighted")
-    out <- dplyr::bind_rows(out, w_all)
-  }
-  out
-}
-
-# Filename-safe conversion of labels like "80+"
-.sanitize <- function(x) {
-  x %>% gsub("\\+", "plus", ., perl = TRUE) %>% gsub("[^0-9A-Za-z]+", "_", ., perl = TRUE)
-}
-
-# ── Geospatial helpers ────────────────────────────────────────
-.pick_fips <- function(df) {
-  hits <- grep("^GEOID", names(df), value = TRUE)
-  if (length(hits) >= 1) return(df[[hits[1]]])
-  if (all(c("STATEFP","COUNTYFP") %in% names(df))) return(paste0(df$STATEFP, df$COUNTYFP))
-  stop("No GEOID or STATEFP/COUNTYFP columns found in tigris::counties() output.")
-}
-
-build_cluster_sf <- function(period_name, shp_year, ccm_df) {
-  counties_raw <- tigris::counties(year = shp_year, cb = TRUE, class = "sf") %>%
-    sf::st_zm(drop = TRUE, what = "ZM") %>%
-    sf::st_transform(crs_proj)
-
-  counties_sf <- counties_raw %>%
-    mutate(fips = stringr::str_pad(.pick_fips(counties_raw), 5, pad = "0")) %>%
-    select(fips, geometry)
-
-  m <- ccm_df %>% filter(period == period_name)
-  if (nrow(m) == 0) stop("No county→cluster rows for period ", period_name)
-
-  j <- counties_sf %>% left_join(m, by = "fips") %>% filter(!is.na(cluster))
-
-  clusters_sf <- j %>%
-    group_by(cluster) %>%
-    summarise(geometry = sf::st_union(geometry), .groups = "drop")
-  suppressWarnings(clusters_sf)
-}
-
-make_map_age <- function(sf_data, var, title = NULL) {
-  states <- tigris::states(cb = TRUE, class = "sf") %>% sf::st_transform(crs_proj)
-  plot_title <- if (is.null(title)) var else title
-
-  ggplot() +
-    geom_sf(data = sf_data, aes(fill = .data[[var]]), colour = NA) +
-    geom_sf(data = states, fill = NA, colour = "white", linewidth = 0.3) +
-    scale_fill_distiller(palette = "RdBu", direction = 1,
-                         limits = lims_age, oob = scales::squish, na.value = "grey90") +
-    coord_sf(xlim = c(-2500000, 2500000),
-             ylim = c(-2200000, 730000),
-             expand = FALSE) +
-    labs(title = plot_title, fill = NULL) +
-    theme_void() +
-    theme(
-      plot.title = element_text(size = 16, face = "bold", hjust = 0.5),
-      legend.text = element_text(size = 9)
-    )
-}
-
-# ── Read inputs ───────────────────────────────────────────────
-# County→cluster membership
-ccm <- {
-  df <- .read_csv_flex(c("county_cluster_membership.csv"))
-  if (!all(c("fips","period","cluster") %in% names(df))) {
-    stop("county_cluster_membership.csv must have columns: fips, period, cluster")
-  }
-  df %>%
-    mutate(fips = stringr::str_pad(as.character(fips), 5, pad = "0")) %>%
-    select(fips, period, cluster)
-}
-
-# UCOD / MCOD age detail (wide or long)
-ucod_df <- .read_csv_flex(c("ucod_detail_by_age_bucket_wide.csv",
-                            "ucod_detail_by_age_bucket.csv"))
-mcod_df <- .read_csv_flex(c("mcod_detail_by_age_bucket_wide.csv",
-                            "mcod_detail_by_age_bucket.csv"))
-
-ucod_long <- .normalize_age_detail(ucod_df)
-mcod_long <- .normalize_age_detail(mcod_df)
-
-# Optional weights
-age_w <- .load_age_weights()
-
-ucod_map <- .prepare_for_mapping(ucod_long, age_w, include_weighted_all = TRUE)
-mcod_map <- .prepare_for_mapping(mcod_long, age_w, include_weighted_all = TRUE)
-
-stopifnot(all(c("cluster","period","age_bucket","detail") %in% names(ucod_map)))
-stopifnot(all(c("cluster","period","age_bucket","detail") %in% names(mcod_map)))
-
-message("UCOD buckets: ", paste(sort(unique(ucod_map$age_bucket)), collapse=", "))
-message("MCOD buckets: ", paste(sort(unique(mcod_map$age_bucket)), collapse=", "))
-
-# ── Mapping engine ────────────────────────────────────────────
-dir.create(out_dir_age, recursive = TRUE, showWarnings = FALSE)
-
-.do_maps <- function(dat_long, flavor = c("UCOD","MCOD")) {
-  flavor <- match.arg(flavor)
-  base_dir <- file.path(out_dir_age, tolower(flavor))
-  dir.create(base_dir, recursive = TRUE, showWarnings = FALSE)
-
-  # Periods present in data that we have shapefiles for
-  periods <- intersect(names(shapefile_years), unique(dat_long$period))
-
-  # Age buckets to draw
-  buckets <- sort(unique(dat_long$age_bucket))
-  if (!is.null(ONLY_BUCKETS)) {
-    buckets <- intersect(buckets, ONLY_BUCKETS)
-  }
-
-  walk(buckets, function(ab) {
-    for (win in periods) {
-      message("Mapping ", flavor, " — ", ab, " — ", win, "…")
-      yr <- shapefile_years[[win]]
-
-      cl_sf  <- build_cluster_sf(win, yr, ccm)
-      dat_ab <- dat_long %>%
-        filter(period == win, age_bucket == ab) %>%
-        select(cluster, detail)
-
-      sf_cl  <- cl_sf %>% left_join(dat_ab, by = "cluster")
-
-      ttl <- glue("{flavor} detail — {ab} — {win}")
-      p   <- make_map_age(sf_cl, "detail", ttl)
-
-      fout <- file.path(base_dir,
-                        glue("{tolower(flavor)}_detail_{.sanitize(ab)}_{win}.png"))
-      ggsave(filename = fout, plot = p, width = 8, height = 6, dpi = 320, device = "png")
-    }
-  })
-}
-
-# ── Run ───────────────────────────────────────────────────────
-.do_maps(ucod_map, "UCOD")
-.do_maps(mcod_map, "MCOD")
-
-message("Done. Maps saved to: ", out_dir_age)
-```
-Map every metric
-```{r}
-# ──────────────────────────────────────────────────────────────
-# Map ALL cluster-level metrics from cluster_metrics.csv
-# ──────────────────────────────────────────────────────────────
-
-# 1) Read metrics
-cluster_metrics <- .read_csv_flex("cluster_metrics.csv") %>%
-  dplyr::mutate(cluster = as.character(cluster),
-                period  = as.character(period))
-
-stopifnot(all(c("cluster","period") %in% names(cluster_metrics)))
-
-# 2) Which columns to map? → all numeric (excluding obvious non-metrics)
-metric_cols <- names(cluster_metrics)[vapply(cluster_metrics, is.numeric, logical(1))]
-metric_cols <- setdiff(metric_cols, c("fips", "GEOID", "STATEFP", "COUNTYFP"))
-
-if (length(metric_cols) == 0) stop("No numeric metric columns found in cluster_metrics.csv.")
-
-message("Will map metrics: ", paste(metric_cols, collapse = ", "))
-
-# 3) Optional: per-metric overrides for limits/palette
-#    Add entries here if you want fixed ranges for specific metrics.
-metric_overrides <- list(
-  detail_phillips_refsize = list(lims = c(50, 70), diverging = FALSE),
-  detail_phillips_raw     = list(lims = c(50, 70), diverging = FALSE)
-)
-
-# 4) Helpers for scale selection
-.compute_limits <- function(x) {
-  x <- x[is.finite(x)]
-  if (!length(x)) return(list(lims = c(0, 1), diverging = FALSE))
-  q <- stats::quantile(x, c(0.02, 0.98), na.rm = TRUE, names = FALSE)
-  if (q[1] < 0 && q[2] > 0) {
-    L <- max(abs(q))
-    list(lims = c(-L, L), diverging = TRUE)
-  } else {
-    list(lims = c(q[1], q[2]), diverging = FALSE)
-  }
-}
-
-make_map_metric <- function(sf_data, var, lims, diverging, title = NULL) {
-  states <- tigris::states(cb = TRUE, class = "sf") %>% sf::st_transform(crs_proj)
-  plot_title <- if (is.null(title)) var else title
-
-  p <- ggplot() +
-    geom_sf(data = sf_data, aes(fill = .data[[var]]), colour = NA) +
-    geom_sf(data = states, fill = NA, colour = "white", linewidth = 0.3) +
-    coord_sf(xlim = c(-2500000, 2500000),
-             ylim = c(-2200000, 730000),
-             expand = FALSE) +
-    labs(title = plot_title, fill = NULL) +
-    theme_void() +
-    theme(
-      plot.title = element_text(size = 16, face = "bold", hjust = 0.5),
-      legend.text = element_text(size = 9)
-    )
-
-  if (diverging) {
-    p + scale_fill_distiller(palette = "RdBu", direction = 1,
-                             limits = lims, oob = scales::squish, na.value = "grey90")
-  } else {
-    p + scale_fill_viridis_c(limits = lims, oob = scales::squish, na.value = "grey90")
-  }
-}
-
-# 5) Output dir
-out_dir_metrics <- here("figures", "phillips_maps", "cluster_metrics")
-dir.create(out_dir_metrics, recursive = TRUE, showWarnings = FALSE)
-
-# 6) Iterate: metric × period
-purrr::walk(metric_cols, function(mcol) {
-  # Determine limits & palette (override → else robust auto)
-  if (!is.null(metric_overrides[[mcol]])) {
-    lims_info <- metric_overrides[[mcol]]
-  } else {
-    lims_info <- .compute_limits(cluster_metrics[[mcol]])
-  }
-
-  # Ensure per-metric subdir
-  subdir <- file.path(out_dir_metrics, .sanitize(mcol))
-  dir.create(subdir, recursive = TRUE, showWarnings = FALSE)
-
-  # Restrict to periods we have shapefiles for
-  periods_here <- intersect(names(shapefile_years), unique(cluster_metrics$period))
-  purrr::walk(periods_here, function(win) {
-    message("Mapping metric ", mcol, " — ", win, "…")
-    yr <- shapefile_years[[win]]
-    cl_sf <- build_cluster_sf(win, yr, ccm)
-
-    dat <- cluster_metrics %>%
-      dplyr::filter(period == win) %>%
-      dplyr::select(cluster, !!rlang::sym(mcol)) %>%
-      dplyr::rename(value = !!rlang::sym(mcol))
-
-    # Skip if all NA/constant
-    vals <- dat$value[is.finite(dat$value)]
-    if (!length(vals) || (length(unique(vals)) == 1)) {
-      message("  Skipping ", mcol, " (no finite variance in ", win, ").")
-      return(invisible(NULL))
-    }
-
-    sf_cl <- cl_sf %>% dplyr::left_join(dat, by = "cluster")
-
-    ttl <- glue::glue("{mcol} — {win}")
-    p <- make_map_metric(sf_cl, "value", lims = lims_info$lims,
-                         diverging = isTRUE(lims_info$diverging), title = ttl)
-
-    fout <- file.path(subdir, glue::glue("{.sanitize(mcol)}_{win}.png"))
-    ggsave(filename = fout, plot = p, width = 8, height = 6, dpi = 320, device = "png")
-  })
-})
-
-message("Done. Metric maps saved to: ", out_dir_metrics)
-```
 Find drivers of diversity metric
 ```{r}
 # ──────────────────────────────────────────────────────────────
@@ -3778,12 +3300,17 @@ make_driver_maps("MCOD", "root3")
 COD standardized diversity maps
 ```{r}
 # ──────────────────────────────────────────────────────────────
-# Cluster metric maps with AK/HI resized like your working code
+# COD standardized diversity — clusters (ONE 4-panel per metric)
+#   • Panels: 1999–2004, 2005–2010, 2011–2017, 2018–2022
+#   • AK/HI resized & shifted
+#   • No top title; facet strips show period
+#   • Outputs → figures/5yr_avg_stable/<metric>_4panel.png
 # ──────────────────────────────────────────────────────────────
 
 suppressPackageStartupMessages({
   library(readr);  library(dplyr);  library(stringr); library(tidyr);  library(tibble)
   library(ggplot2); library(sf);     library(tigris);  library(scales); library(here)
+  library(purrr)
 })
 
 options(tigris_use_cache = TRUE, tigris_class = "sf", sf_use_s2 = TRUE)
@@ -3791,11 +3318,14 @@ options(tigris_use_cache = TRUE, tigris_class = "sf", sf_use_s2 = TRUE)
 # ------------------------ paths -------------------------------
 metrics_file    <- here("output", "cluster_metrics_ucr39_cstd.csv.gz")
 membership_file <- here("output", "county_cluster_membership.csv.gz")
-out_dir         <- here("figures", "phillips_maps", "cluster_metrics_resized")
-dir.create(out_dir, recursive = TRUE, showWarnings = FALSE)
+out_dir_base    <- here("figures", "5yr_avg_stable")  # <-- flat output here
+dir.create(out_dir_base, recursive = TRUE, showWarnings = FALSE)
 
 # -------------------- projection ------------------------------
-crs_proj <- 2163  # US National Atlas Equal Area (matches your notebook)
+crs_proj <- 2163
+
+# --------------------- stable periods -------------------------
+period_levels <- c("1999_2005","2006_2012","2013_2019","2020_2022")
 
 # ------------------------ helpers -----------------------------
 compute_limits <- function(x) {
@@ -3814,24 +3344,19 @@ sanitize <- function(x) {
   x %>% str_replace_all("[^A-Za-z0-9]+", "_") %>% str_replace_all("^_+|_+$", "") %>% tolower()
 }
 
-# Same geometry utilities you used
-st_shift <- function(sf_obj, shift = c(0, 0)) {
-  st_geometry(sf_obj) <- st_geometry(sf_obj) + shift
-  sf_obj
-}
+st_shift <- function(sf_obj, shift = c(0, 0)) { st_geometry(sf_obj) <- st_geometry(sf_obj) + shift; sf_obj }
 st_scale <- function(sf_obj, scale = 1) {
   centroid <- st_centroid(st_union(sf_obj))
   st_geometry(sf_obj) <- (st_geometry(sf_obj) - centroid) * scale + centroid
   sf_obj
 }
 
-# Build 2020 counties in 2163 and apply the SAME AK/HI transforms you liked
 build_counties_2163_resized <- function() {
   us_counties <- tigris::counties(year = 2020, cb = TRUE, class = "sf") |>
     sf::st_transform(crs_proj) |>
     dplyr::select(GEOID, STATEFP, geometry)
 
-  mainland <- us_counties |> dplyr::filter(!STATEFP %in% c("02","15"))  # exclude AK, HI (PR not included)
+  mainland <- us_counties |> dplyr::filter(!STATEFP %in% c("02","15"))
   alaska   <- us_counties |> dplyr::filter(STATEFP == "02") |>
                 st_scale(0.33) |>
                 st_shift(c(1100000, -4700000)) |>
@@ -3846,7 +3371,6 @@ build_counties_2163_resized <- function() {
     sf::st_make_valid()
 }
 
-# Do the same to STATES so outlines align perfectly
 build_states_2163_resized <- function() {
   us_states <- tigris::states(year = 2020, cb = TRUE, class = "sf") |>
     sf::st_transform(crs_proj) |>
@@ -3866,7 +3390,6 @@ build_states_2163_resized <- function() {
     sf::st_make_valid()
 }
 
-# Build cluster polygons from the transformed counties (join → union)
 build_cluster_sf <- function(period_key, membership_df, counties_sf) {
   mm <- membership_df %>%
     dplyr::filter(.data$period == period_key) %>%
@@ -3880,30 +3403,6 @@ build_cluster_sf <- function(period_key, membership_df, counties_sf) {
     dplyr::group_by(cluster) %>%
     dplyr::summarise(geometry = sf::st_union(geometry), .groups = "drop") %>%
     sf::st_make_valid()
-}
-
-# Mapping helper (accepts lims/diverging; crops to mainland window you used)
-make_map <- function(sf_data, fill_col, lims = NULL, diverging = NULL,
-                     title = NULL, palette = "RdBu", states_sf) {
-  ggplot() +
-    geom_sf(data = sf_data, aes(fill = .data[[fill_col]]), colour = NA) +
-    geom_sf(data = states_sf, fill = NA, colour = "white", linewidth = 0.3) +
-    scale_fill_distiller(
-      palette = "RdBu",     # red ↔ blue diverging
-      direction = 1,       # flip if you want blue = low, red = high
-      na.value = "grey90"
-    ) +
-    coord_sf(
-      xlim = c(-2500000, 2500000),
-      ylim = c(-2200000,  730000),
-      expand = FALSE
-    ) +
-    labs(title = title %||% fill_col, fill = NULL) +
-    theme_void() +
-    theme(
-      plot.title = element_text(size = 16, face = "bold", hjust = 0.5),
-      legend.text = element_text(size = 9)
-    )
 }
 
 # ------------------------- load data --------------------------
@@ -3921,21 +3420,46 @@ membership <- readr::read_csv(membership_file, show_col_types = FALSE) %>%
 counties_tf <- build_counties_2163_resized()
 states_tf   <- build_states_2163_resized()
 
-# Metric columns & periods
+# Metric columns & usable periods
 metric_cols <- names(metrics)[vapply(metrics, is.numeric, logical(1))]
 metric_cols <- setdiff(metric_cols, c("fips", "GEOID", "STATEFP", "COUNTYFP"))
-periods <- unique(metrics$period)
+periods_all <- intersect(period_levels, unique(metrics$period))
 
-# ----------------------- map everything -----------------------
+# ----------------------- faceted maps -------------------------
+make_faceted_map <- function(stacked_sf, fill_col, lims, diverging, states_sf) {
+  ggplot() +
+    geom_sf(data = stacked_sf, aes(fill = .data[[fill_col]]), colour = NA) +
+    geom_sf(data = states_sf, fill = NA, colour = "white", linewidth = 0.3) +
+    scale_fill_distiller(
+      palette = "RdBu",
+      direction = 1,
+      limits = lims,
+      oob = scales::squish,
+      na.value = "grey90"
+    ) +
+    coord_sf(
+      xlim = c(-2500000, 2500000),
+      ylim = c(-2200000,  730000),
+      expand = FALSE
+    ) +
+    labs(fill = NULL) +                # no legend title
+    facet_wrap(~ period, ncol = 2) +   # 4 panels labeled by period
+    theme_void() +
+    theme(
+      strip.text = element_text(size = 12, face = "bold"),
+      legend.text = element_text(size = 9),
+      plot.title = element_blank()     # <-- ensure no top title
+    )
+}
+
+# For each metric: stack 4 periods → one 4-panel PNG
 for (mcol in metric_cols) {
-  subdir <- here(out_dir, sanitize(mcol))
-  dir.create(subdir, recursive = TRUE, showWarnings = FALSE)
+  message("Assembling 4-panel for metric: ", mcol)
 
   lims_info <- compute_limits(metrics[[mcol]])
 
-  for (win in periods) {
-    message(sprintf("Mapping %s — %s", mcol, win))
-
+  # Build cluster polygons per period, join metric, and stack
+  stacked_sf <- map_dfr(periods_all, function(win) {
     cl_sf <- build_cluster_sf(win, membership, counties_tf)
 
     dat <- metrics %>%
@@ -3943,27 +3467,33 @@ for (mcol in metric_cols) {
       dplyr::select(cluster, !!rlang::sym(mcol)) %>%
       dplyr::rename(value = !!rlang::sym(mcol))
 
-    vals <- dat$value[is.finite(dat$value)]
-    if (!length(vals) || length(unique(vals)) == 1) {
-      message(sprintf("  Skipping %s (%s): no finite variance.", mcol, win))
-      next
-    }
-
     sf_cl <- cl_sf %>% dplyr::left_join(dat, by = "cluster")
-    title <- sprintf("%s — %s", mcol, win)
+    sf_cl$period <- win
+    sf_cl
+  }) %>%
+    dplyr::mutate(period = factor(period, levels = period_levels))
 
-    p <- make_map(sf_cl, "value",
-                  lims = lims_info$lims,
-                  diverging = isTRUE(lims_info$diverging),
-                  title = title,
-                  states_sf = states_tf)
-
-    fout <- here(subdir, sprintf("%s_%s.png", sanitize(mcol), win))
-    ggsave(fout, p, width = 8, height = 6, dpi = 320)
+  vals <- stacked_sf$value[is.finite(stacked_sf$value)]
+  if (!length(vals) || length(unique(vals)) == 1) {
+    message("  Skipping ", mcol, ": no finite variance across periods.")
+    next
   }
+
+  p <- make_faceted_map(
+    stacked_sf = stacked_sf,
+    fill_col   = "value",
+    lims       = lims_info$lims,
+    diverging  = lims_info$diverging,
+    states_sf  = states_tf
+  )
+
+  fout <- file.path(out_dir_base, paste0(sanitize(mcol), "_4panel.png"))
+  ggsave(fout, p, width = 10, height = 7.5, dpi = 320)
+  message("  Saved: ", fout)
 }
 
-message("Done. Maps in: ", out_dir)
+message("Done. 4-panel maps in: ", out_dir_base)
+
 ```
 Scores by reporting type and public health spending for diversity metrics
 ```{r}
@@ -4431,6 +3961,645 @@ if (nrow(ts_ba) > 0) {
 }
 
 ```
+Diagnostics of COD standardized diversity maps
+```{r}
+# ──────────────────────────────────────────────────────────────
+# COD standardized diversity ~ Age composition (county → cluster)
+#   • Builds county age shares from MCOD parquet (death-weighted)
+#   • Aggregates to temporally-stable clusters by period windows
+#   • Joins to cluster_metrics_ucr39_cstd.csv.gz (your CSTD metrics)
+#   • Outputs:
+#       - figures/cstd_age/scatter_<metric>_vs_age65_4panel.png
+#       - figures/cstd_age/scatter_<metric>_vs_age0_14_4panel.png
+#       - output/cstd_age/regression_<metric>.csv  (period-FE OLS)
+#       - (optional) figures/cstd_age/maps/<metric>_by_age65_quartile_4panel.png
+# ──────────────────────────────────────────────────────────────
+
+suppressPackageStartupMessages({
+  library(readr);  library(dplyr);  library(stringr);  library(tidyr);  library(tibble)
+  library(purrr);   library(ggplot2); library(scales); library(here);   library(arrow)
+  library(sf);      library(tigris);  library(broom)
+})
+
+options(tigris_use_cache = TRUE, tigris_class = "sf", sf_use_s2 = TRUE)
+
+# ---------------------- configurable paths --------------------
+mcod_dir        <- here("data_private", "mcod_sample")            # parquet files: mcod_YYYY.parquet
+metrics_file    <- here("output", "cluster_metrics_ucr39_cstd.csv.gz")
+membership_file <- here("output", "county_cluster_membership.csv.gz")
+out_dir_fig     <- here("figures", "cstd_age")
+out_dir_reg     <- here("output", "cstd_age")
+dir.create(out_dir_fig, recursive = TRUE, showWarnings = FALSE)
+dir.create(out_dir_reg, recursive = TRUE, showWarnings = FALSE)
+
+# ---------------------- period windows ------------------------
+# Use same levels/labels as your mapping script
+period_levels <- c("1999_2005","2006_2012","2013_2019","2020_2022")
+
+assign_period <- function(y) {
+  dplyr::case_when(
+    y >= 1999 & y <= 2005 ~ "1999_2005",
+    y >= 2006 & y <= 2012 ~ "2006_2012",
+    y >= 2013 & y <= 2019 ~ "2013_2019",
+    y >= 2020 & y <= 2022 ~ "2020_2022",
+    TRUE ~ NA_character_
+  )
+}
+
+# ---------------------- helpers -------------------------------
+sanitize <- function(x) x %>% str_replace_all("[^A-Za-z0-9]+","_") %>% str_replace_all("^_+|_+$","") %>% tolower()
+
+age_bucket <- function(age_years) {
+  # Edit boundaries if you prefer different bins
+  cut(
+    pmax(pmin(age_years, 120), 0),  # clamp 0..120
+    breaks = c(-Inf, 14, 44, 64, 84, Inf),
+    labels = c("age0_14","age15_44","age45_64","age65_84","age85p"),
+    right = TRUE
+  )
+}
+
+# Map helpers reused for optional stratified maps
+crs_proj <- 2163
+st_shift <- function(sf_obj, shift=c(0,0)) { st_geometry(sf_obj) <- st_geometry(sf_obj)+shift; sf_obj }
+st_scale <- function(sf_obj, scale=1) {
+  centroid <- st_centroid(st_union(sf_obj))
+  st_geometry(sf_obj) <- (st_geometry(sf_obj)-centroid)*scale+centroid
+  sf_obj
+}
+build_counties_2163_resized <- function() {
+  us_counties <- tigris::counties(year=2020, cb=TRUE, class="sf") |>
+    sf::st_transform(crs_proj) |>
+    dplyr::select(GEOID, STATEFP, geometry)
+  mainland <- us_counties |> dplyr::filter(!STATEFP %in% c("02","15"))
+  alaska   <- us_counties |> dplyr::filter(STATEFP=="02") |> st_scale(0.33) |> st_shift(c(1100000,-4700000)) |> sf::st_set_crs(crs_proj)
+  hawaii   <- us_counties |> dplyr::filter(STATEFP=="15") |> st_scale(1)     |> st_shift(c(5000000,-1100000)) |> sf::st_set_crs(crs_proj)
+  dplyr::bind_rows(mainland, alaska, hawaii) |>
+    dplyr::rename(fips=GEOID, statefp=STATEFP) |>
+    sf::st_make_valid()
+}
+build_states_2163_resized <- function() {
+  us_states <- tigris::states(year=2020, cb=TRUE, class="sf") |>
+    sf::st_transform(crs_proj) |>
+    dplyr::select(STATEFP, geometry)
+  mainland <- us_states |> dplyr::filter(!STATEFP %in% c("02","15"))
+  alaska   <- us_states |> dplyr::filter(STATEFP=="02") |> st_scale(0.33) |> st_shift(c(1100000,-4700000)) |> sf::st_set_crs(crs_proj)
+  hawaii   <- us_states |> dplyr::filter(STATEFP=="15") |> st_scale(1)     |> st_shift(c(5000000,-1100000)) |> sf::st_set_crs(crs_proj)
+  dplyr::bind_rows(mainland, alaska, hawaii) |> sf::st_make_valid()
+}
+
+# ---------------------- load inputs ---------------------------
+message("Reading metrics: ", metrics_file)
+metrics <- readr::read_csv(metrics_file, show_col_types = FALSE) |>
+  mutate(cluster = as.character(cluster),
+         period  = factor(as.character(period), levels = period_levels))
+
+message("Reading membership: ", membership_file)
+membership <- readr::read_csv(membership_file, show_col_types = FALSE) |>
+  mutate(cluster = as.character(cluster),
+         period  = factor(as.character(period), levels = period_levels),
+         fips    = stringr::str_pad(as.character(fips), 5, pad = "0"))
+
+# Which metric columns? (keep it flexible; drop keys)
+metric_cols <- names(metrics)[vapply(metrics, is.numeric, logical(1))]
+metric_cols <- setdiff(metric_cols, c("fips","GEOID","STATEFP","COUNTYFP"))
+
+# ---------------- build county-year age shares from MCOD -------
+# Reads only needed cols; expects files named like mcod_YYYY.parquet in mcod_dir
+years <- 1999:2022
+mcod_paths <- file.path(mcod_dir, paste0("mcod_", years, ".parquet"))
+mcod_paths <- mcod_paths[file.exists(mcod_paths)]
+stopifnot(length(mcod_paths) > 0)
+
+message("Computing county-year age shares from MCOD (", length(mcod_paths), " files)")
+age_cy <- map_dfr(mcod_paths, function(pth) {
+  yr <- as.integer(stringr::str_extract(basename(pth), "\\d{4}"))
+  ds <- arrow::read_parquet(pth, as_data_frame = TRUE,
+                            col_select = c("age_years","county_ihme","year")) %>%
+    rename(fips_raw = county_ihme) %>%
+    mutate(year = coalesce(as.integer(year), yr),
+           fips  = stringr::str_pad(as.character(fips_raw), 5, pad="0"),
+           abuck = age_bucket(as.numeric(age_years))) %>%
+    filter(!is.na(fips), !is.na(year), !is.na(abuck))
+
+  ds %>%
+    count(fips, year, abuck, name = "deaths") %>%
+    group_by(fips, year) %>%
+    mutate(total = sum(deaths), share = deaths / total) %>%
+    ungroup() %>%
+    select(fips, year, abuck, share, total)
+})
+
+# Wide shares per county-year
+age_cy_wide <- age_cy %>%
+  select(fips, year, abuck, share) %>%
+  tidyr::pivot_wider(names_from = abuck, values_from = share, values_fill = 0) %>%
+  # for convenience, add combined 65+ and child share
+  mutate(age65p = coalesce(age65_84,0) + coalesce(age85p,0),
+         age0_14 = coalesce(age0_14,0))
+
+# ---------------- county-year → cluster-period -----------------
+# Attach period & cluster (via membership for that period)
+age_cp <- age_cy %>%
+  distinct(fips, year) %>%
+  mutate(period = factor(assign_period(year), levels = period_levels)) %>%
+  left_join(age_cy_wide, by = c("fips","year")) %>%
+  left_join(membership, by = c("fips","period")) %>%
+  filter(!is.na(period), !is.na(cluster))
+
+# Aggregate to cluster-period (death-weighted by county-year totals)
+age_clper <- age_cy %>%
+  left_join(age_cy_wide, by = c("fips","year")) %>%
+  mutate(period = factor(assign_period(year), levels = period_levels)) %>%
+  left_join(membership, by = c("fips","period")) %>%
+  filter(!is.na(period), !is.na(cluster)) %>%
+  group_by(cluster, period, fips, year) %>%
+  summarise(w = max(total, na.rm = TRUE),
+            age0_14 = max(age0_14, na.rm = TRUE),
+            age15_44 = max(coalesce(age15_44,0), na.rm = TRUE),
+            age45_64 = max(coalesce(age45_64,0), na.rm = TRUE),
+            age65_84 = max(coalesce(age65_84,0), na.rm = TRUE),
+            age85p   = max(coalesce(age85p,0), na.rm = TRUE),
+            age65p   = age65_84 + age85p,
+            .groups = "drop") %>%
+  group_by(cluster, period) %>%
+  summarise(
+    wsum = sum(w, na.rm = TRUE),
+    age0_14 = weighted.mean(age0_14, w, na.rm = TRUE),
+    age15_44 = weighted.mean(age15_44, w, na.rm = TRUE),
+    age45_64 = weighted.mean(age45_64, w, na.rm = TRUE),
+    age65_84 = weighted.mean(age65_84, w, na.rm = TRUE),
+    age85p   = weighted.mean(age85p,   w, na.rm = TRUE),
+    age65p   = weighted.mean(age65p,   w, na.rm = TRUE),
+    .groups = "drop"
+  )
+
+# ---------------- join age with CSTD metrics -------------------
+dat <- metrics %>%
+  select(cluster, period, all_of(metric_cols)) %>%
+  left_join(age_clper, by = c("cluster","period"))
+
+# ---------------- quick diagnostics: scatter + GAM -------------
+dir.create(file.path(out_dir_fig, "scatter"), showWarnings = FALSE)
+plot_scatter <- function(df, metric, xvar, xlab, fname_suffix) {
+  df_plot <- df %>% select(cluster, period, value = all_of(metric), x = all_of(xvar)) %>% filter(is.finite(value), is.finite(x))
+  if (!nrow(df_plot)) return(invisible(NULL))
+  p <- ggplot(df_plot, aes(x = x, y = value)) +
+    geom_point(alpha = 0.35, size = 1) +
+    geom_smooth(method = "gam", formula = y ~ s(x, k = 4), se = TRUE) +
+    facet_wrap(~ period, ncol = 2) +
+    scale_x_continuous(labels = percent_format(accuracy = 1)) +
+    labs(x = xlab, y = metric) +
+    theme_minimal(base_size = 12) +
+    theme(strip.text = element_text(face = "bold"))
+  fout <- file.path(out_dir_fig, "scatter", paste0("scatter_", sanitize(metric), "_vs_", fname_suffix, "_4panel.png"))
+  ggsave(fout, p, width = 10, height = 7.2, dpi = 320)
+  message("Saved: ", fout)
+}
+
+# Choose a small set if you have many metrics; else loop all
+metrics_to_check <- metric_cols
+for (m in metrics_to_check) {
+  plot_scatter(dat, metric = m, xvar = "age65p", xlab = "Share aged 65+", fname_suffix = "age65p")
+  plot_scatter(dat, metric = m, xvar = "age0_14", xlab = "Share aged 0–14", fname_suffix = "age0_14")
+}
+
+# ---------------- regressions: metric ~ age shares + period FE --
+# Saves tidy tables per metric
+run_reg <- function(df, metric) {
+  dd <- df %>%
+    select(period, value = all_of(metric), age0_14, age15_44, age45_64, age65p) %>%
+    filter(is.finite(value), across(c(age0_14,age15_44,age45_64,age65p), is.finite)) %>%
+    mutate(period = factor(period, levels = period_levels))
+  if (!nrow(dd)) return(invisible(NULL))
+  # Drop one age share to avoid perfect collinearity; keep age65p + age0_14 + age15_44, omit age45_64
+  fit <- lm(value ~ age65p + age0_14 + age15_44 + period, data = dd)
+  tib <- broom::tidy(fit, conf.int = TRUE)
+  tib$metric <- metric
+  fout <- file.path(out_dir_reg, paste0("regression_", sanitize(metric), ".csv"))
+  readr::write_csv(tib, fout)
+  message("Saved: ", fout)
+}
+invisible(lapply(metrics_to_check, function(m) run_reg(dat, m)))
+
+# --------------- OPTIONAL: stratified maps by age quartiles ----
+make_stratified_maps <- FALSE   # ← set TRUE to produce maps
+age_var_for_map      <- "age65p"
+metric_for_map       <- if (length(metrics_to_check)) metrics_to_check[1] else NA_character_
+
+if (make_stratified_maps && !is.na(metric_for_map)) {
+  counties_tf <- build_counties_2163_resized()
+  states_tf   <- build_states_2163_resized()
+
+  # County-period age quantiles, then cluster polygons colored by metric within age strata
+  age_q <- age_cp %>%
+    group_by(period) %>%
+    mutate(age_q = ntile(.data[[age_var_for_map]], 4)) %>%
+    ungroup() %>%
+    select(fips, period, age_q)
+
+  # Build cluster polygons per period
+  build_cluster_sf <- function(period_key, membership_df, counties_sf) {
+    mm <- membership_df %>%
+      filter(.data$period == period_key) %>%
+      transmute(fips = str_pad(as.character(fips), 5, pad = "0"),
+                cluster = as.character(cluster)) %>%
+      distinct()
+    counties_sf %>%
+      inner_join(mm, by = "fips") %>%
+      group_by(cluster) %>%
+      summarise(geometry = sf::st_union(geometry), .groups = "drop") %>%
+      sf::st_make_valid()
+  }
+
+  # Stack 4 periods; facet by period, color by metric; small multiples for age quartiles
+  for (aq in 1:4) {
+    stacked_sf <- map_dfr(period_levels, function(win) {
+      cl_sf <- build_cluster_sf(win, membership, counties_tf)
+      met   <- metrics %>% filter(period == win) %>% select(cluster, !!sym(metric_for_map)) %>% rename(value = !!sym(metric_for_map))
+      sf_cl <- cl_sf %>% left_join(met, by = "cluster")
+      sf_cl$period <- win
+      sf_cl
+    }) %>% mutate(period = factor(period, levels = period_levels))
+
+    # Keep clusters whose member counties fall in this age quartile (majority rule)
+    cl_age_q <- age_q %>%
+      left_join(membership, by = c("fips","period")) %>%
+      group_by(cluster, period) %>%
+      summarise(age_q_mode = as.integer(names(which.max(table(age_q)))), .groups = "drop")
+
+    stacked_sf <- stacked_sf %>%
+      left_join(cl_age_q, by = c("cluster","period")) %>%
+      filter(age_q_mode == aq)
+
+    vals <- stacked_sf$value[is.finite(stacked_sf$value)]
+    if (!length(vals) || length(unique(vals)) == 1) next
+    q <- quantile(vals, c(0.02, 0.98), na.rm = TRUE)
+    lims <- c(q[1], q[2])
+
+    p <- ggplot() +
+      geom_sf(data = stacked_sf, aes(fill = value), colour = NA) +
+      geom_sf(data = states_tf, fill = NA, colour = "white", linewidth = 0.3) +
+      scale_fill_distiller(palette = "RdBu", direction = 1, limits = lims, oob = squish, na.value = "grey90") +
+      coord_sf(xlim = c(-2500000, 2500000), ylim = c(-2200000, 730000), expand = FALSE) +
+      facet_wrap(~ period, ncol = 2) +
+      labs(fill = NULL, title = paste0(metric_for_map, " — quartile ", aq, " of ", age_var_for_map)) +
+      theme_void() + theme(strip.text = element_text(size = 12, face = "bold"),
+                           legend.text = element_text(size = 9))
+    fout <- file.path(out_dir_fig, "maps",
+                      paste0(sanitize(metric_for_map), "_by_", sanitize(age_var_for_map), "_q", aq, "_4panel.png"))
+    dir.create(dirname(fout), recursive = TRUE, showWarnings = FALSE)
+    ggsave(fout, p, width = 10, height = 7.5, dpi = 320)
+    message("Saved: ", fout)
+  }
+}
+
+message("Done. See figures/cstd_age/* and output/cstd_age/*.csv")
+```
+Validation: 4 metrics by public health spending
+```{r}
+# ──────────────────────────────────────────────────────────────
+# 3 line plots: Metric vs PH-spend quintile, 5 lines = Income quintiles
+# Metrics: prop_garbage | overdoses unspecified | Phillips detail (UCOD, ICD-4)
+# Output: figures/ph_spend_relationship/{prop_garbage,overd_unspec,detail_icd4}_lines.png
+# ──────────────────────────────────────────────────────────────
+suppressPackageStartupMessages({
+  library(dplyr); library(tidyr); library(ggplot2); library(scales); library(here)
+})
+
+dir.create(here("figures","ph_spend_relationship"), recursive = TRUE, showWarnings = FALSE)
+
+# ---------- helpers ----------
+weighted_mean_na <- function(x, w) {
+  if (missing(w) || is.null(w) || !is.numeric(w)) return(mean(x, na.rm = TRUE))
+  ww <- ifelse(is.na(w), 0, w); xx <- ifelse(is.na(x), NA, x)
+  if (sum(ww[is.finite(xx)], na.rm = TRUE) == 0) return(mean(xx, na.rm = TRUE))
+  sum(xx * ww, na.rm = TRUE) / sum(ww[is.finite(xx)], na.rm = TRUE)
+}
+make_quintile_breaks <- function(v) {
+  v <- v[is.finite(v)]; stopifnot(length(v) > 0)
+  qs <- quantile(v, probs = seq(0,1,0.2), na.rm = TRUE, names = FALSE, type = 7)
+  # enforce strictly increasing
+  for (i in 2:length(qs)) if (qs[i] <= qs[i-1]) qs[i] <- qs[i-1] + .Machine$double.eps
+  qs[1] <- min(v) - 1e-9; qs[length(qs)] <- max(v) + 1e-9; qs
+}
+labs_quint <- c("Q1 lowest","Q2","Q3","Q4","Q5 highest")
+
+# ---------- prerequisites ----------
+stopifnot(exists("cy"), exists("ph_pc"), exists("detail_long"))
+stopifnot(!is.na(prop_garbage_col), !is.na(overd_col))
+stopifnot("detail_icd4_ucod" %in% names(detail_long))
+
+# Population weighting (optional)
+pop_col_ok <- exists("pop_col") && !is.na(pop_col) && pop_col %in% names(cy)
+message(if (pop_col_ok) paste0("Population weighting ON (", pop_col, ").")
+        else "Population weighting OFF.")
+
+# ---------- income (for 5 colored lines) ----------
+get_income_quintiles <- function(cy_df) {
+  # 1) try to find an income column in cy
+  income_candidates <- c("median_household_income","median_income","mhi","hh_income",
+                         "income_pc","per_capita_income","pc_income","income")
+  inc_col <- income_candidates[income_candidates %in% names(cy_df)][1]
+  if (!is.na(inc_col)) {
+    message("Income source: cy$", inc_col)
+    inc_any <- cy_df %>%
+      transmute(county_ihme, income_val = suppressWarnings(as.numeric(.data[[inc_col]]))) %>%
+      group_by(county_ihme) %>%
+      summarise(income = median(income_val, na.rm = TRUE), .groups = "drop") %>%
+      filter(is.finite(income))
+    qb_inc <- make_quintile_breaks(inc_any$income)
+    return(inc_any %>%
+      mutate(income_q = cut(income, breaks = qb_inc, include.lowest = TRUE,
+                            right = FALSE, labels = labs_quint)) %>%
+      transmute(county_ihme, income_q))
+  }
+
+  # 2) fallback: pull median household income from ACS (B19013_001, ACS5 2022)
+  if (requireNamespace("tidycensus", quietly = TRUE)) {
+    message("Income source: ACS (B19013_001, ACS5 2022). If you see API errors, run:\n",
+            "  tidycensus::census_api_key(\"YOUR_KEY\", install = TRUE)")
+    inc_acs <- tryCatch(
+      tidycensus::get_acs(geography = "county", variables = "B19013_001",
+                          year = 2022, survey = "acs5", cache_table = TRUE, show_call = FALSE),
+      error = function(e) e
+    )
+    if (inherits(inc_acs, "error")) stop("Failed to fetch ACS income: ", inc_acs$message)
+    inc_any <- inc_acs %>%
+      transmute(county_ihme = GEOID, income = as.numeric(estimate)) %>%
+      filter(is.finite(income))
+    qb_inc <- make_quintile_breaks(inc_any$income)
+    return(inc_any %>%
+      mutate(income_q = cut(income, breaks = qb_inc, include.lowest = TRUE,
+                            right = FALSE, labels = labs_quint)) %>%
+      transmute(county_ihme, income_q))
+  }
+
+  stop("No income available in `cy`, and {tidycensus} not installed. ",
+       "Either add an income column to `cy` or install {tidycensus} and set a Census API key.")
+}
+
+income_quint <- get_income_quintiles(cy)
+
+# ---------- per-county metric averages (1999–2022) ----------
+base_sel <- cy %>%
+  mutate(
+    pg  = suppressWarnings(as.numeric(.data[[prop_garbage_col]])),
+    od  = suppressWarnings(as.numeric(.data[[overd_col]])),
+    pop = if (pop_col_ok) suppressWarnings(as.numeric(.data[[pop_col]])) else NA_real_
+  ) %>%
+  filter(year >= 1999, year <= 2022)
+
+county_avg <- base_sel %>%
+  group_by(county_ihme) %>%
+  summarise(
+    prop_garbage = weighted_mean_na(pg,  pop),
+    overd_unspec = weighted_mean_na(od,  pop),
+    pop_wt       = if (pop_col_ok) mean(pop, na.rm = TRUE) else NA_real_,
+    .groups = "drop"
+  )
+
+detail_avg <- detail_long %>%
+  mutate(detail_icd4_ucod = suppressWarnings(as.numeric(detail_icd4_ucod))) %>%
+  group_by(county_ihme) %>%
+  summarise(detail_icd4 = mean(detail_icd4_ucod, na.rm = TRUE), .groups = "drop")
+
+# ---------- per-county PH spend (median across finance years) → x-axis quintiles ----------
+ph_any <- ph_pc %>%
+  group_by(county_ihme) %>%
+  summarise(ph_pc = median(suppressWarnings(as.numeric(ph_pc)), na.rm = TRUE), .groups = "drop") %>%
+  filter(is.finite(ph_pc))
+
+qb_spend <- make_quintile_breaks(ph_any$ph_pc)
+spend_quint <- ph_any %>%
+  mutate(spend_q = cut(ph_pc, breaks = qb_spend, include.lowest = TRUE, right = FALSE, labels = labs_quint)) %>%
+  select(county_ihme, spend_q)
+
+# ---------- combine + summarise: mean metric by spend_q × income_q ----------
+comb <- county_avg %>%
+  left_join(detail_avg,  by = "county_ihme") %>%
+  inner_join(spend_quint, by = "county_ihme") %>%
+  inner_join(income_quint, by = "county_ihme")
+
+wmaybe <- function(x, w) if (pop_col_ok) weighted_mean_na(x, w) else mean(x, na.rm = TRUE)
+
+by_q <- comb %>%
+  pivot_longer(cols = c(prop_garbage, overd_unspec, detail_icd4),
+               names_to = "metric", values_to = "value") %>%
+  group_by(metric, spend_q, income_q) %>%
+  summarise(mean_value = wmaybe(value, pop_wt), n = dplyr::n(), .groups = "drop") %>%
+  mutate(
+    metric = recode(metric,
+      prop_garbage = "Proportion garbage (UCOD)",
+      overd_unspec = "Overdoses unspecified (share)",
+      detail_icd4  = "Phillips detail (UCOD, ICD-4)"),
+    spend_q  = factor(spend_q,  levels = labs_quint),
+    income_q = factor(income_q, levels = labs_quint)
+  )
+
+# ---------- line-plot helper (x = PH-spend quintile; 5 lines = income quintiles) ----------
+plot_lines <- function(df, mname, ylab, file_out) {
+  dd <- df %>% filter(metric == mname)
+  if (!nrow(dd)) stop("No data for metric: ", mname)
+  p <- ggplot(dd, aes(x = spend_q, y = mean_value, group = income_q, colour = income_q)) +
+    geom_line(linewidth = 1.2) +
+    geom_point(size = 2.2) +
+    labs(
+      title = ylab,
+      subtitle = paste0("Y: county mean (1999–2022)",
+                        if (pop_col_ok) ", population-weighted" else ", unweighted",
+                        " · Lines = income quintiles"),
+      x = "Public-health spend per capita (county median across finance years, quintiles)",
+      y = "Mean metric", colour = "Income quintile"
+    ) +
+    theme_bw(base_size = 12)
+  ggsave(here("figures","ph_spend_relationship", file_out), p, width = 8.8, height = 5.4, dpi = 320)
+  p
+}
+
+p_garb  <- plot_lines(by_q, "Proportion garbage (UCOD)",       "Proportion garbage (UCOD)",      "prop_garbage_lines.png")
+p_overd <- plot_lines(by_q, "Overdoses unspecified (share)",   "Overdoses unspecified (share)",  "overd_unspec_lines.png")
+p_det   <- plot_lines(by_q, "Phillips detail (UCOD, ICD-4)",   "Phillips detail (UCOD, ICD-4)",  "detail_icd4_lines.png")
+
+# Optional combined 3-panel
+suppressPackageStartupMessages(library(patchwork))
+combined <- (p_garb / p_overd / p_det) + plot_layout(heights = c(1,1,1))
+ggsave(here("figures","ph_spend_relationship","metrics_vs_phspend_lines_3panel.png"),
+       combined, width = 9.5, height = 12, dpi = 320)
+
+# Show in Viewer
+p_garb; p_overd; p_det
+
+```
+Validation: 4 metrics by reporting type
+```{r}
+# ──────────────────────────────────────────────────────────────
+# Time series by REPORTING TYPE (3 plots)
+#   • Metrics: prop_garbage | overdoses unspecified | Phillips detail (UCOD, ICD-4)
+#   • X = year (1999–2022), lines = reporting type
+#   • Population-weighted means if population is available in `cy`
+# Saves: figures/reporting_type_timeseries/*.png + combined 3-panel
+# ──────────────────────────────────────────────────────────────
+suppressPackageStartupMessages({
+  library(dplyr); library(tidyr); library(ggplot2); library(scales)
+  library(readr); library(stringr); library(here)
+})
+
+dir.create(here("figures","reporting_type_timeseries"), recursive = TRUE, showWarnings = FALSE)
+
+# ---------- helpers ----------
+weighted_mean_na <- function(x, w) {
+  if (missing(w) || is.null(w) || !is.numeric(w)) return(mean(x, na.rm = TRUE))
+  ww <- ifelse(is.na(w), 0, w); xx <- ifelse(is.na(x), NA, x)
+  if (sum(ww[is.finite(xx)], na.rm = TRUE) == 0) return(mean(xx, na.rm = TRUE))
+  sum(xx * ww, na.rm = TRUE) / sum(ww[is.finite(xx)], na.rm = TRUE)
+}
+std_fips <- function(x) stringr::str_pad(as.character(x), 5, pad = "0")
+
+# ---------- prerequisites ----------
+stopifnot(exists("cy"), exists("detail_long"))
+stopifnot(!is.na(prop_garbage_col), !is.na(overd_col))
+stopifnot("detail_icd4_ucod" %in% names(detail_long))
+
+# Pop weighting?
+pop_col_ok <- exists("pop_col") && !is.na(pop_col) && pop_col %in% names(cy)
+message(if (pop_col_ok) paste0("Population weighting ON (", pop_col, ").")
+        else "Population weighting OFF.")
+
+# ---------- reporting type lookup ----------
+get_reporting_lookup <- function() {
+  if (exists("rep_lu")) {
+    stopifnot(all(c("county_ihme","reporting_type") %in% names(rep_lu)))
+    return(rep_lu %>% transmute(county_ihme = std_fips(county_ihme),
+                                reporting_type = as.character(reporting_type)))
+  }
+  candidates <- c(
+    here::here("data_raw","County-Death-Investigation-System-2018-1-9-2024.csv"),
+    here::here("data_raw","County-Death-Investigation-System-2018.csv"),
+    "data_raw/County-Death-Investigation-System-2018-1-9-2024.csv"
+  )
+  path <- candidates[file.exists(candidates)][1]
+  if (is.na(path)) {
+    stop("No reporting-type lookup found. Provide `rep_lu` (county_ihme, reporting_type) ",
+         "or place the CSV under data_raw/.")
+  }
+  rep_raw <- readr::read_csv(path, show_col_types = FALSE)
+  # find columns
+  get_colname <- function(df, patterns) {
+    nm <- names(df); hits <- which(Reduce(`|`, lapply(patterns, \(p) grepl(p, nm, ignore.case = TRUE))))
+    if (!length(hits)) NA_character_ else nm[hits[1]]
+  }
+  fips_col <- get_colname(rep_raw, c("^fips$","^fips_?code$","geoid","county_?fips","countyrs","fips.*5"))
+  type_col <- get_colname(rep_raw, c("reporting.*type","investigation.*type","death.*investigation.*system","^type$","system"))
+  if (is.na(fips_col) || is.na(type_col)) stop("Could not detect FIPS/type columns in reporting CSV.")
+  rep_raw %>%
+    transmute(
+      county_ihme = std_fips(.data[[fips_col]]),
+      reporting_type = dplyr::recode(
+        stringr::str_to_title(trimws(as.character(.data[[type_col]]))),
+        "Me" = "Medical Examiner", "Medical Examiner" = "Medical Examiner",
+        "Coroner" = "Coroner", "Mixed" = "Mixed", "Hybrid" = "Mixed",
+        .default = stringr::str_to_title(trimws(as.character(.data[[type_col]])))
+      )
+    ) %>%
+    filter(nchar(county_ihme) == 5, reporting_type != "") %>%
+    distinct()
+}
+rep_lookup <- get_reporting_lookup()
+# normalize reporting types and include "Other County Official"
+normalize_reporting_type <- function(x) {
+  y <- stringr::str_to_lower(stringr::str_squish(as.character(x)))
+  dplyr::case_when(
+    y %in% c("me", "medical examiner")            ~ "Medical Examiner",
+    y %in% c("coroner")                           ~ "Coroner",
+    y %in% c("mixed", "hybrid")                   ~ "Mixed",
+    grepl("other", y)                              ~ "Other County Official",   # catch "other county official(s)" etc.
+    y %in% c("na","n/a","unknown","unspecified","") ~ NA_character_,
+    TRUE                                           ~ stringr::str_to_title(y)
+  )
+}
+
+rep_lookup <- rep_lookup %>%
+  dplyr::mutate(
+    reporting_type = normalize_reporting_type(reporting_type),
+    reporting_type = factor(
+      reporting_type,
+      levels = c("Coroner","Other County Official","Mixed","Medical Examiner")
+    )
+  ) %>%
+  dplyr::filter(!is.na(reporting_type))
+
+# and keep levels in this order for plots
+rt_levels <- levels(rep_lookup$reporting_type)
+
+
+# ---------- assemble county-year series ----------
+base_sel <- cy %>%
+  mutate(
+    prop_garbage = suppressWarnings(as.numeric(.data[[prop_garbage_col]])),
+    overd_unspec = suppressWarnings(as.numeric(.data[[overd_col]])),
+    population   = if (pop_col_ok) suppressWarnings(as.numeric(.data[[pop_col]])) else NA_real_
+  ) %>%
+  filter(year >= 1999, year <= 2022) %>%
+  select(county_ihme, year, prop_garbage, overd_unspec, population)
+
+detail_year <- detail_long %>%
+  transmute(county_ihme, year,
+            detail_icd4 = suppressWarnings(as.numeric(detail_icd4_ucod)))
+
+series_rt <- base_sel %>%
+  left_join(detail_year, by = c("county_ihme","year")) %>%
+  inner_join(rep_lookup, by = "county_ihme") %>%
+  filter(!is.na(reporting_type)) %>%
+  mutate(reporting_type = factor(reporting_type, levels = rt_levels))
+
+# ---------- aggregate to year × reporting_type ----------
+wmaybe <- function(x, w) if (pop_col_ok) weighted_mean_na(x, w) else mean(x, na.rm = TRUE)
+
+ts_rt <- series_rt %>%
+  group_by(year, reporting_type) %>%
+  summarise(
+    prop_garbage = wmaybe(prop_garbage, population),
+    overd_unspec = wmaybe(overd_unspec, population),
+    detail_icd4  = wmaybe(detail_icd4,  population),
+    .groups = "drop"
+  )
+
+# ---------- plotting helper ----------
+plot_metric_rt <- function(df, var, title, file_out) {
+  dd <- df %>% filter(is.finite(.data[[var]]))
+  if (!nrow(dd)) stop("No finite data for ", var)
+  p <- ggplot(dd, aes(x = year, y = .data[[var]], colour = reporting_type)) +
+    geom_line(linewidth = 1.2) +
+    geom_point(size = 1.8) +
+    scale_x_continuous(breaks = seq(2000, 2022, 2)) +
+    labs(
+      title = title,
+      subtitle = paste0("County means by reporting type (1999–2022)",
+                        if (pop_col_ok) ", population-weighted" else ", unweighted"),
+      x = NULL, y = "Mean value", colour = "Reporting type"
+    ) +
+    theme_bw(base_size = 12)
+  ggsave(here("figures","reporting_type_timeseries", file_out),
+         p, width = 8.8, height = 5.2, dpi = 320)
+  p
+}
+
+p1 <- plot_metric_rt(ts_rt, "prop_garbage", "Proportion garbage (UCOD)",      "prop_garbage_by_reporting_timeseries.png")
+p2 <- plot_metric_rt(ts_rt, "overd_unspec", "Overdoses unspecified (share)",  "overd_unspec_by_reporting_timeseries.png")
+p3 <- plot_metric_rt(ts_rt, "detail_icd4",  "Phillips detail (UCOD, ICD-4)",  "detail_icd4_by_reporting_timeseries.png")
+
+# ---------- combined 3-panel (optional) ----------
+suppressPackageStartupMessages(library(patchwork))
+combined <- (p1 / p2 / p3) + plot_layout(heights = c(1,1,1))
+ggsave(here("figures","reporting_type_timeseries","metrics_by_reporting_timeseries_3panel.png"),
+       combined, width = 9.5, height = 12, dpi = 320)
+
+# print to Viewer
+p1; p2; p3
+
+```
+
 
 
 

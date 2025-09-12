@@ -1,0 +1,2 @@
+term,estimate,std.error,statistic,p.value,model,target,family
+(Intercept),59.39968223747755,0.02505796652208823,2370.4909249167363,0,OLS_age,detail_mcod,mcod_root3
