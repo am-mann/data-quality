@@ -2807,7 +2807,6 @@ cat("\n# Reporting-type coverage (distinct counties):\n")
 print(rep_lu %>% count(reporting_type) %>% mutate(total = sum(n)))
 
 # ---- finance-year snapping (+ fallback) — ROBUST --------------
-stopifnot(exists("ph_pc"), exists("direction_year"))
 # Make sure fin_year is integer for joins; be tolerant if fin_all missing
 ph_pc   <- ph_pc   %>% mutate(fin_year = suppressWarnings(as.integer(fin_year)))
 fin_all <- if (exists("fin_all")) fin_all else tibble()
@@ -3169,15 +3168,90 @@ if (nrow(ts_ba) > 0) {
 }
 
 ```
+Pre-requisites
+```{r}
+# ---------- prerequisites ----------
+stopifnot(exists("cy"), exists("ph_pc"), exists("detail_year"))
+if (!exists("prop_garbage_col") || !exists("overd_col")) {
+  stop("Run the preamble that defines prop_garbage_col/overd_col and builds detail_year.")
+}
+
+# ---------- population weighting (robust & non-crashy) ----------
+pop_col_name <- if (exists("pop_col") && !is.na(pop_col) && pop_col %in% names(cy)) {
+  as.character(pop_col)
+} else NA_character_
+pop_col_ok <- is.character(pop_col_name) && !is.na(pop_col_name)
+message(if (pop_col_ok) paste0("Population weighting ON (", pop_col_name, ").")
+        else "Population weighting OFF.")
+
+# ---------- build base_sel (1999–2022), drop dummy FIPS ----------
+base_sel <- cy %>%
+  dplyr::mutate(
+    county_ihme = stringr::str_pad(as.character(county_ihme), 5, pad = "0"),
+    pg  = suppressWarnings(as.numeric(.data[[prop_garbage_col]])),
+    od  = suppressWarnings(as.numeric(.data[[overd_col]])),
+    # create 'pop' ONLY if a population column is available; else NA
+    pop = if (pop_col_ok) suppressWarnings(as.numeric(.data[[pop_col_name]])) else NA_real_
+  ) %>%
+  dplyr::filter(
+    year >= 1999, year <= 2022,
+    county_ihme != "00000", county_ihme != "0000"
+  )
+
+# ---------- temporally stable, safe weighted mean ----------
+safe_wmean <- function(x, w) {
+  xx <- ifelse(is.finite(x), x, NA_real_)
+  if (all(is.na(xx))) return(NA_real_)
+  if (missing(w) || is.null(w) || all(is.na(w))) return(mean(xx, na.rm = TRUE))
+  ww <- ifelse(is.finite(w), w, NA_real_)
+  if (sum(ww, na.rm = TRUE) <= 0) return(mean(xx, na.rm = TRUE))
+  sum(xx * ww, na.rm = TRUE) / sum(ww, na.rm = TRUE)
+}
+wmaybe <- function(x, w) if (pop_col_ok) safe_wmean(x, w) else mean(x, na.rm = TRUE)
+
+# ---------- per-county temporally stable averages ----------
+county_avg <- base_sel %>%
+  dplyr::group_by(county_ihme) %>%
+  dplyr::summarise(
+    prop_garbage = wmaybe(pg, pop),       # uses weights if present; else unweighted mean
+    overd_unspec = wmaybe(od, pop),
+    pop_wt       = if (pop_col_ok) mean(pop, na.rm = TRUE) else NA_real_,
+    .groups = "drop"
+  )
+
+# ---------- detail averages from prebuilt detail_year ----------
+detail_avg <- detail_year %>%
+  dplyr::mutate(county_ihme = stringr::str_pad(as.character(county_ihme), 5, pad = "0")) %>%
+  dplyr::filter(county_ihme != "00000", county_ihme != "0000") %>%
+  dplyr::group_by(county_ihme) %>%
+  dplyr::summarise(detail_icd4 = mean(detail_icd4, na.rm = TRUE), .groups = "drop")
+
+# PH spend quintiles (stable across finance years)
+ph_any <- ph_pc %>%
+  dplyr::mutate(county_ihme = stringr::str_pad(as.character(county_ihme), 5, pad = "0")) %>%
+  dplyr::filter(county_ihme != "00000", county_ihme != "0000") %>%
+  dplyr::group_by(county_ihme) %>%
+  dplyr::summarise(ph_pc = median(suppressWarnings(as.numeric(ph_pc)), na.rm = TRUE), .groups = "drop") %>%
+  dplyr::filter(is.finite(ph_pc))
+
+# Income quintiles (already pooled over time in your function)
+income_quint <- income_quint %>%
+  dplyr::mutate(county_ihme = stringr::str_pad(as.character(county_ihme), 5, pad = "0")) %>%
+  dplyr::filter(county_ihme != "00000", county_ihme != "0000")
+
+
+```
+
 Validation: 4 metrics by public health spending
 ```{r}
 # ──────────────────────────────────────────────────────────────
-# 3 line plots: Metric vs PH-spend quintile, 5 lines = Income quintiles
-# Metrics: prop_garbage | overdoses unspecified | Phillips detail (UCOD, ICD-4)
-# Output: figures/ph_spend_relationship/{prop_garbage,overd_unspec,detail_icd4}_lines.png
+# 4 line plots: Metric vs PH-spend quintile, 5 lines = Income quintiles
+# Adds: Reassignability Index (RI)
+# Output adds: figures/ph_spend_relationship/ri_lines.png
+# Combined 4-panel: figures/ph_spend_relationship/metrics_vs_phspend_lines_4panel.png
 # ──────────────────────────────────────────────────────────────
 suppressPackageStartupMessages({
-  library(dplyr); library(tidyr); library(ggplot2); library(scales); library(here)
+  library(dplyr); library(tidyr); library(ggplot2); library(scales); library(here); library(stringr); library(patchwork)
 })
 
 dir.create(here("figures","ph_spend_relationship"), recursive = TRUE, showWarnings = FALSE)
@@ -3192,25 +3266,103 @@ weighted_mean_na <- function(x, w) {
 make_quintile_breaks <- function(v) {
   v <- v[is.finite(v)]; stopifnot(length(v) > 0)
   qs <- quantile(v, probs = seq(0,1,0.2), na.rm = TRUE, names = FALSE, type = 7)
-  # enforce strictly increasing
   for (i in 2:length(qs)) if (qs[i] <= qs[i-1]) qs[i] <- qs[i-1] + .Machine$double.eps
   qs[1] <- min(v) - 1e-9; qs[length(qs)] <- max(v) + 1e-9; qs
 }
 labs_quint <- c("Q1 lowest","Q2","Q3","Q4","Q5 highest")
+`%||%` <- function(a,b) if (!is.null(a) && length(a) && !is.na(a)) a else b
+find_col <- function(df, patterns) {
+  nms <- names(df); hit <- NULL
+  for (pat in patterns) { m <- nms[grepl(pat, tolower(nms))]; if (length(m)) { hit <- m[1]; break } }
+  hit %||% NA_character_
+}
+ri_label <- "Re-assignability Index (RI)"
 
 # ---------- prerequisites ----------
-stopifnot(exists("cy"), exists("ph_pc"), exists("detail_long"))
-stopifnot(!is.na(prop_garbage_col), !is.na(overd_col))
-stopifnot("detail_icd4_ucod" %in% names(detail_long))
+stopifnot(exists("cy"), exists("ph_pc"))      # detail_year is built below if missing
+cy <- cy %>% mutate(county_ihme = stringr::str_pad(as.character(county_ihme), 5, pad = "0"))
 
-# Population weighting (optional)
-pop_col_ok <- exists("pop_col") && !is.na(pop_col) && pop_col %in% names(cy)
-message(if (pop_col_ok) paste0("Population weighting ON (", pop_col, ").")
+# Auto-detect metrics in cy
+if (!exists("prop_garbage_col")) {
+  prop_garbage_col <- find_col(
+    cy, c("\\bprop[_]?garbage\\b","garbage[_]?share","frac[_]?garbage",
+          "dq_rec_ig_frac_mean_garbage","foreman[_]?garbage","\\bgarbage\\b")
+  )
+}
+overd_col <- if ("pct_overd_miss" %in% names(cy)) "pct_overd_miss" else NA_character_
+
+# NEW: auto-detect RI column
+ri_col <- find_col(
+  cy, c("^ri$","\\bri[_]?score\\b","richness.*index","\\bd95\\b","d[_]?95","rarefaction.*index")
+)
+have_ri <- !is.na(ri_col)
+
+if (is.na(prop_garbage_col) || is.na(overd_col)) {
+  stop("Need columns: prop_garbage (auto-detected) AND pct_overd_miss (explicit).")
+}
+
+# Build detail_year if needed (period → mid-year)
+period_to_midyear <- function(p) {
+  p <- as.character(p)
+  m <- stringr::str_match(p, "([0-9]{4})\\D+([0-9]{4})")
+  if (is.na(m[1,1])) return(NA_integer_)
+  s <- suppressWarnings(as.integer(m[,2])); e <- suppressWarnings(as.integer(m[,3]))
+  as.integer(round((s + e)/2))
+}
+if (!exists("detail_year")) {
+  stopifnot(exists("detail_long"))
+  detail_long <- detail_long %>%
+    mutate(county_ihme = stringr::str_pad(as.character(county_ihme), 5, pad = "0"))
+  ucod_icd4_candidates <- c("detail_icd4_ucod","detail_ucod_icd4_cstd","detail_ucod_icd4","detail_icd4")
+  wide_hit <- intersect(ucod_icd4_candidates, names(detail_long))[1]
+  has_year   <- "year"   %in% names(detail_long)
+  has_period <- "period" %in% names(detail_long)
+
+  if (!is.na(wide_hit)) {
+    detail_year <- detail_long %>%
+      transmute(
+        county_ihme,
+        year = if (has_year) suppressWarnings(as.integer(year)) else period_to_midyear(period),
+        detail_icd4 = suppressWarnings(as.numeric(.data[[wide_hit]]))
+      )
+  } else {
+    stopifnot(all(c("metric","value") %in% names(detail_long)))
+    icd4_pat <- "(detail|diversity).*ucod.*icd\\s*[-_ ]?4|icd\\s*[-_ ]?4.*ucod"
+    dl <- detail_long %>% filter(grepl(icd4_pat, tolower(metric)))
+    if (!nrow(dl)) stop("Could not find a UCOD ICD-4 detail metric inside `detail_long` (long).")
+    detail_year <- dl %>%
+      transmute(
+        county_ihme,
+        year = if (has_year) suppressWarnings(as.integer(year)) else period_to_midyear(period),
+        detail_icd4 = suppressWarnings(as.numeric(value))
+      ) %>%
+      group_by(county_ihme, year) %>%
+      summarise(detail_icd4 = mean(detail_icd4, na.rm = TRUE), .groups = "drop")
+  }
+  detail_year <- detail_year %>%
+    filter(is.finite(year), is.finite(detail_icd4)) %>%
+    mutate(year = as.integer(year)) %>%
+    filter(county_ihme != "00000", county_ihme != "0000") %>%
+    distinct()
+}
+
+# ---------- population weighting ----------
+pop_col_name <- if (exists("pop_col") && !is.na(pop_col) && pop_col %in% names(cy)) as.character(pop_col) else NA_character_
+pop_col_ok <- is.character(pop_col_name) && !is.na(pop_col_name)
+message(if (pop_col_ok) paste0("Population weighting ON (", pop_col_name, ").")
         else "Population weighting OFF.")
+safe_wmean <- function(x, w) {
+  xx <- ifelse(is.finite(x), x, NA_real_)
+  if (all(is.na(xx))) return(NA_real_)
+  if (missing(w) || is.null(w) || all(is.na(w))) return(mean(xx, na.rm = TRUE))
+  ww <- ifelse(is.finite(w), w, NA_real_)
+  if (sum(ww, na.rm = TRUE) <= 0) return(mean(xx, na.rm = TRUE))
+  sum(xx * ww, na.rm = TRUE) / sum(ww, na.rm = TRUE)
+}
+wmaybe <- function(x, w) if (pop_col_ok) safe_wmean(x, w) else mean(x, na.rm = TRUE)
 
-# ---------- income (for 5 colored lines) ----------
+# ---------- income quintiles (for line colors) ----------
 get_income_quintiles <- function(cy_df) {
-  # 1) try to find an income column in cy
   income_candidates <- c("median_household_income","median_income","mhi","hh_income",
                          "income_pc","per_capita_income","pc_income","income")
   inc_col <- income_candidates[income_candidates %in% names(cy_df)][1]
@@ -3227,8 +3379,6 @@ get_income_quintiles <- function(cy_df) {
                             right = FALSE, labels = labs_quint)) %>%
       transmute(county_ihme, income_q))
   }
-
-  # 2) fallback: pull median household income from ACS (B19013_001, ACS5 2022)
   if (requireNamespace("tidycensus", quietly = TRUE)) {
     message("Income source: ACS (B19013_001, ACS5 2022). If you see API errors, run:\n",
             "  tidycensus::census_api_key(\"YOUR_KEY\", install = TRUE)")
@@ -3239,81 +3389,86 @@ get_income_quintiles <- function(cy_df) {
     )
     if (inherits(inc_acs, "error")) stop("Failed to fetch ACS income: ", inc_acs$message)
     inc_any <- inc_acs %>%
-      transmute(county_ihme = GEOID, income = as.numeric(estimate)) %>%
-      filter(is.finite(income))
+      transmute(county_ihme = stringr::str_pad(GEOID, 5, pad = "0"),
+                income = as.numeric(estimate)) %>%
+      filter(is.finite(income), county_ihme != "00000", county_ihme != "0000")
     qb_inc <- make_quintile_breaks(inc_any$income)
     return(inc_any %>%
       mutate(income_q = cut(income, breaks = qb_inc, include.lowest = TRUE,
                             right = FALSE, labels = labs_quint)) %>%
       transmute(county_ihme, income_q))
   }
-
-  stop("No income available in `cy`, and {tidycensus} not installed. ",
-       "Either add an income column to `cy` or install {tidycensus} and set a Census API key.")
+  stop("No income available in `cy`, and {tidycensus} not installed.")
 }
+income_quint <- get_income_quintiles(cy) %>%
+  mutate(county_ihme = stringr::str_pad(as.character(county_ihme), 5, pad = "0")) %>%
+  filter(county_ihme != "00000", county_ihme != "0000")
 
-income_quint <- get_income_quintiles(cy)
-
-# ---------- per-county metric averages (1999–2022) ----------
+# ---------- per-county averages ----------
 base_sel <- cy %>%
   mutate(
     pg  = suppressWarnings(as.numeric(.data[[prop_garbage_col]])),
     od  = suppressWarnings(as.numeric(.data[[overd_col]])),
-    pop = if (pop_col_ok) suppressWarnings(as.numeric(.data[[pop_col]])) else NA_real_
+    ri  = if (have_ri) suppressWarnings(as.numeric(.data[[ri_col]])) else NA_real_,
+    pop = if (pop_col_ok) suppressWarnings(as.numeric(.data[[pop_col_name]])) else NA_real_
   ) %>%
-  filter(year >= 1999, year <= 2022)
+  filter(year >= 1999, year <= 2022,
+         county_ihme != "00000", county_ihme != "0000")
 
 county_avg <- base_sel %>%
   group_by(county_ihme) %>%
   summarise(
-    prop_garbage = weighted_mean_na(pg,  pop),
-    overd_unspec = weighted_mean_na(od,  pop),
-    pop_wt       = if (pop_col_ok) mean(pop, na.rm = TRUE) else NA_real_,
+    prop_garbage   = wmaybe(pg,  pop),
+    pct_overd_miss = wmaybe(od,  pop),
+    ri             = wmaybe(ri,  pop),
+    pop_wt         = if (pop_col_ok) mean(pop, na.rm = TRUE) else NA_real_,
     .groups = "drop"
   )
 
-detail_avg <- detail_long %>%
-  mutate(detail_icd4_ucod = suppressWarnings(as.numeric(detail_icd4_ucod))) %>%
+detail_avg <- detail_year %>%
+  mutate(county_ihme = stringr::str_pad(as.character(county_ihme), 5, pad = "0")) %>%
+  filter(county_ihme != "00000", county_ihme != "0000") %>%
   group_by(county_ihme) %>%
-  summarise(detail_icd4 = mean(detail_icd4_ucod, na.rm = TRUE), .groups = "drop")
+  summarise(detail_icd4 = mean(detail_icd4, na.rm = TRUE), .groups = "drop")
 
-# ---------- per-county PH spend (median across finance years) → x-axis quintiles ----------
+# ---------- PH spend quintiles (x-axis) ----------
 ph_any <- ph_pc %>%
+  mutate(county_ihme = stringr::str_pad(as.character(county_ihme), 5, pad = "0")) %>%
+  filter(county_ihme != "00000", county_ihme != "0000") %>%
   group_by(county_ihme) %>%
   summarise(ph_pc = median(suppressWarnings(as.numeric(ph_pc)), na.rm = TRUE), .groups = "drop") %>%
   filter(is.finite(ph_pc))
-
 qb_spend <- make_quintile_breaks(ph_any$ph_pc)
 spend_quint <- ph_any %>%
   mutate(spend_q = cut(ph_pc, breaks = qb_spend, include.lowest = TRUE, right = FALSE, labels = labs_quint)) %>%
   select(county_ihme, spend_q)
 
-# ---------- combine + summarise: mean metric by spend_q × income_q ----------
+# ---------- combine + summarise ----------
 comb <- county_avg %>%
   left_join(detail_avg,  by = "county_ihme") %>%
   inner_join(spend_quint, by = "county_ihme") %>%
   inner_join(income_quint, by = "county_ihme")
 
-wmaybe <- function(x, w) if (pop_col_ok) weighted_mean_na(x, w) else mean(x, na.rm = TRUE)
+metrics_cols <- intersect(c("prop_garbage","pct_overd_miss","detail_icd4","ri"), names(comb))
 
 by_q <- comb %>%
-  pivot_longer(cols = c(prop_garbage, overd_unspec, detail_icd4),
-               names_to = "metric", values_to = "value") %>%
+  pivot_longer(cols = all_of(metrics_cols), names_to = "metric", values_to = "value") %>%
   group_by(metric, spend_q, income_q) %>%
   summarise(mean_value = wmaybe(value, pop_wt), n = dplyr::n(), .groups = "drop") %>%
   mutate(
-    metric = recode(metric,
-      prop_garbage = "Proportion garbage (UCOD)",
-      overd_unspec = "Overdoses unspecified (share)",
-      detail_icd4  = "Phillips detail (UCOD, ICD-4)"),
+    metric = dplyr::recode(metric,
+      prop_garbage   = "Proportion garbage (UCOD)",
+      pct_overd_miss = "Overdose % missing",
+      detail_icd4    = "Phillips detail (UCOD, ICD-4)",
+      ri             = ri_label
+    ),
     spend_q  = factor(spend_q,  levels = labs_quint),
     income_q = factor(income_q, levels = labs_quint)
   )
 
-# ---------- line-plot helper (x = PH-spend quintile; 5 lines = income quintiles) ----------
 plot_lines <- function(df, mname, ylab, file_out) {
-  dd <- df %>% filter(metric == mname)
-  if (!nrow(dd)) stop("No data for metric: ", mname)
+  dd <- df %>% filter(metric == mname, is.finite(mean_value))
+  if (!nrow(dd)) { message("Skipping (no data): ", mname); return(NULL) }
   p <- ggplot(dd, aes(x = spend_q, y = mean_value, group = income_q, colour = income_q)) +
     geom_line(linewidth = 1.2) +
     geom_point(size = 2.2) +
@@ -3330,32 +3485,32 @@ plot_lines <- function(df, mname, ylab, file_out) {
   p
 }
 
-p_garb  <- plot_lines(by_q, "Proportion garbage (UCOD)",       "Proportion garbage (UCOD)",      "prop_garbage_lines.png")
-p_overd <- plot_lines(by_q, "Overdoses unspecified (share)",   "Overdoses unspecified (share)",  "overd_unspec_lines.png")
-p_det   <- plot_lines(by_q, "Phillips detail (UCOD, ICD-4)",   "Phillips detail (UCOD, ICD-4)",  "detail_icd4_lines.png")
+p_garb  <- plot_lines(by_q, "Proportion garbage (UCOD)", "Proportion garbage (UCOD)", "prop_garbage_lines.png")
+p_overd <- plot_lines(by_q, "Overdose % missing",        "Overdose % missing",        "pct_overd_miss_lines.png")
+p_det   <- plot_lines(by_q, "Phillips detail (UCOD, ICD-4)", "Phillips detail (UCOD, ICD-4)", "detail_icd4_lines.png")
+p_ri    <- plot_lines(by_q, ri_label, ri_label, "ri_lines.png")
 
-# Optional combined 3-panel
-suppressPackageStartupMessages(library(patchwork))
-combined <- (p_garb / p_overd / p_det) + plot_layout(heights = c(1,1,1))
-ggsave(here("figures","ph_spend_relationship","metrics_vs_phspend_lines_3panel.png"),
-       combined, width = 9.5, height = 12, dpi = 320)
+# Combined 4-panel
+plots <- list(p_garb, p_overd, p_det, p_ri) %>% purrr::compact()
+combined <- wrap_plots(plots, ncol = 1) + plot_layout(heights = rep(1, length(plots)))
+ggsave(here("figures","ph_spend_relationship","metrics_vs_phspend_lines_4panel.png"),
+       combined, width = 9.5, height = 16, dpi = 320)
 
 # Show in Viewer
-p_garb; p_overd; p_det
+p_garb; p_overd; p_det; p_ri
 
 ```
 Validation: 4 metrics by reporting type
 ```{r}
 # ──────────────────────────────────────────────────────────────
-# Time series by REPORTING TYPE (3 plots)
-#   • Metrics: prop_garbage | overdoses unspecified | Phillips detail (UCOD, ICD-4)
-#   • X = year (1999–2022), lines = reporting type
-#   • Population-weighted means if population is available in `cy`
-# Saves: figures/reporting_type_timeseries/*.png + combined 3-panel
+# Time series by REPORTING TYPE (4 plots incl. RI)
+# New outputs:
+#   figures/reporting_type_timeseries/ri_by_reporting_timeseries.png
+#   figures/reporting_type_timeseries/metrics_by_reporting_timeseries_4panel.png
 # ──────────────────────────────────────────────────────────────
 suppressPackageStartupMessages({
   library(dplyr); library(tidyr); library(ggplot2); library(scales)
-  library(readr); library(stringr); library(here)
+  library(readr); library(stringr); library(here); library(patchwork)
 })
 
 dir.create(here("figures","reporting_type_timeseries"), recursive = TRUE, showWarnings = FALSE)
@@ -3368,18 +3523,53 @@ weighted_mean_na <- function(x, w) {
   sum(xx * ww, na.rm = TRUE) / sum(ww[is.finite(xx)], na.rm = TRUE)
 }
 std_fips <- function(x) stringr::str_pad(as.character(x), 5, pad = "0")
+`%||%` <- function(a,b) if (!is.null(a) && length(a) && !is.na(a)) a else b
+find_col <- function(df, patterns) {
+  nms <- names(df); hit <- NULL
+  for (pat in patterns) { m <- nms[grepl(pat, tolower(nms))]; if (length(m)) { hit <- m[1]; break } }
+  hit %||% NA_character_
+}
+period_to_midyear <- function(p) {
+  p <- as.character(p); m <- stringr::str_match(p, "([0-9]{4})\\D+([0-9]{4})")
+  if (is.na(m[1,1])) return(NA_integer_)
+  s <- suppressWarnings(as.integer(m[,2])); e <- suppressWarnings(as.integer(m[,3]))
+  as.integer(round((s + e)/2))
+}
+safe_wmean <- function(x, w) {
+  xx <- ifelse(is.finite(x), x, NA_real_)
+  if (all(is.na(xx))) return(NA_real_)
+  if (missing(w) || is.null(w) || all(is.na(w))) return(mean(xx, na.rm = TRUE))
+  ww <- ifelse(is.finite(w), w, NA_real_)
+  if (sum(ww, na.rm = TRUE) <= 0) return(mean(xx, na.rm = TRUE))
+  sum(xx * ww, na.rm = TRUE) / sum(ww, na.rm = TRUE)
+}
+ri_label <- "Re-assignability Index (RI)"
 
 # ---------- prerequisites ----------
 stopifnot(exists("cy"), exists("detail_long"))
-stopifnot(!is.na(prop_garbage_col), !is.na(overd_col))
-stopifnot("detail_icd4_ucod" %in% names(detail_long))
+cy <- cy %>% mutate(county_ihme = std_fips(county_ihme))
+
+# Auto-detect prop_garbage; force pct_overd_miss; detect RI
+if (!exists("prop_garbage_col")) {
+  prop_garbage_col <- find_col(
+    cy, c("\\bprop[_]?garbage\\b","garbage[_]?share","frac[_]?garbage",
+          "dq_rec_ig_frac_mean_garbage","foreman[_]?garbage","\\bgarbage\\b")
+  )
+}
+overd_col <- if ("pct_overd_miss" %in% names(cy)) "pct_overd_miss" else NA_character_
+ri_col <- find_col(cy, c("^ri$","\\bri[_]?score\\b","richness.*index","\\bd95\\b","d[_]?95","rarefaction.*index"))
+have_ri <- !is.na(ri_col)
+
+if (is.na(prop_garbage_col) || is.na(overd_col)) {
+  stop("Need columns in `cy`: prop_garbage (auto-detected) AND pct_overd_miss.")
+}
 
 # Pop weighting?
-pop_col_ok <- exists("pop_col") && !is.na(pop_col) && pop_col %in% names(cy)
-message(if (pop_col_ok) paste0("Population weighting ON (", pop_col, ").")
-        else "Population weighting OFF.")
+pop_col_name <- if (exists("pop_col") && !is.na(pop_col) && pop_col %in% names(cy)) as.character(pop_col) else NA_character_
+pop_col_ok <- is.character(pop_col_name) && !is.na(pop_col_name)
+message(if (pop_col_ok) paste0("Population weighting ON (", pop_col_name, ").") else "Population weighting OFF.")
 
-# ---------- reporting type lookup ----------
+# Reporting type lookup (includes "Other County Official")
 get_reporting_lookup <- function() {
   if (exists("rep_lu")) {
     stopifnot(all(c("county_ihme","reporting_type") %in% names(rep_lu)))
@@ -3392,19 +3582,17 @@ get_reporting_lookup <- function() {
     "data_raw/County-Death-Investigation-System-2018-1-9-2024.csv"
   )
   path <- candidates[file.exists(candidates)][1]
-  if (is.na(path)) {
-    stop("No reporting-type lookup found. Provide `rep_lu` (county_ihme, reporting_type) ",
-         "or place the CSV under data_raw/.")
-  }
+  if (is.na(path)) stop("No reporting-type lookup found. Provide `rep_lu` or put CSV under data_raw/.")
   rep_raw <- readr::read_csv(path, show_col_types = FALSE)
-  # find columns
+
   get_colname <- function(df, patterns) {
-    nm <- names(df); hits <- which(Reduce(`|`, lapply(patterns, \(p) grepl(p, nm, ignore.case = TRUE))))
+    nm <- names(df); hits <- which(Reduce(`|`, lapply(patterns, function(p) grepl(p, nm, ignore.case = TRUE))))
     if (!length(hits)) NA_character_ else nm[hits[1]]
   }
   fips_col <- get_colname(rep_raw, c("^fips$","^fips_?code$","geoid","county_?fips","countyrs","fips.*5"))
   type_col <- get_colname(rep_raw, c("reporting.*type","investigation.*type","death.*investigation.*system","^type$","system"))
   if (is.na(fips_col) || is.na(type_col)) stop("Could not detect FIPS/type columns in reporting CSV.")
+
   rep_raw %>%
     transmute(
       county_ihme = std_fips(.data[[fips_col]]),
@@ -3415,50 +3603,74 @@ get_reporting_lookup <- function() {
         .default = stringr::str_to_title(trimws(as.character(.data[[type_col]])))
       )
     ) %>%
-    filter(nchar(county_ihme) == 5, reporting_type != "") %>%
+    filter(nchar(county_ihme) == 5, county_ihme != "00000", reporting_type != "") %>%
     distinct()
 }
-rep_lookup <- get_reporting_lookup()
-# normalize reporting types and include "Other County Official"
-normalize_reporting_type <- function(x) {
-  y <- stringr::str_to_lower(stringr::str_squish(as.character(x)))
-  dplyr::case_when(
-    y %in% c("me", "medical examiner")            ~ "Medical Examiner",
-    y %in% c("coroner")                           ~ "Coroner",
-    y %in% c("mixed", "hybrid")                   ~ "Mixed",
-    grepl("other", y)                              ~ "Other County Official",   # catch "other county official(s)" etc.
-    y %in% c("na","n/a","unknown","unspecified","") ~ NA_character_,
-    TRUE                                           ~ stringr::str_to_title(y)
-  )
-}
-
-rep_lookup <- rep_lookup %>%
-  dplyr::mutate(
-    reporting_type = normalize_reporting_type(reporting_type),
-    reporting_type = factor(
-      reporting_type,
-      levels = c("Coroner","Other County Official","Mixed","Medical Examiner")
-    )
+rep_lookup <- get_reporting_lookup() %>%
+  mutate(
+    reporting_type = {
+      y <- stringr::str_to_lower(stringr::str_squish(as.character(reporting_type)))
+      dplyr::case_when(
+        y %in% c("me","medical examiner") ~ "Medical Examiner",
+        y %in% c("coroner")               ~ "Coroner",
+        y %in% c("mixed","hybrid")        ~ "Mixed",
+        grepl("other", y)                 ~ "Other County Official",
+        y %in% c("na","n/a","unknown","unspecified","") ~ NA_character_,
+        TRUE                              ~ stringr::str_to_title(y)
+      )
+    },
+    reporting_type = factor(reporting_type,
+                            levels = c("Coroner","Other County Official","Mixed","Medical Examiner"))
   ) %>%
-  dplyr::filter(!is.na(reporting_type))
-
-# and keep levels in this order for plots
+  filter(!is.na(reporting_type))
 rt_levels <- levels(rep_lookup$reporting_type)
 
+# detail_year (as before)
+if (!exists("detail_year")) {
+  detail_long <- detail_long %>% mutate(county_ihme = std_fips(county_ihme))
+  ucod_icd4_candidates <- c("detail_icd4_ucod","detail_ucod_icd4_cstd","detail_ucod_icd4","detail_icd4")
+  wide_hit <- intersect(ucod_icd4_candidates, names(detail_long))[1]
+  has_year   <- "year"   %in% names(detail_long)
+  has_period <- "period" %in% names(detail_long)
 
-# ---------- assemble county-year series ----------
+  if (!is.na(wide_hit)) {
+    detail_year <- detail_long %>%
+      transmute(
+        county_ihme,
+        year = if (has_year) suppressWarnings(as.integer(year)) else period_to_midyear(period),
+        detail_icd4 = suppressWarnings(as.numeric(.data[[wide_hit]]))
+      )
+  } else {
+    stopifnot(all(c("metric","value") %in% names(detail_long)))
+    icd4_pat <- "(detail|diversity).*ucod.*icd\\s*[-_ ]?4|icd\\s*[-_ ]?4.*ucod"
+    dl <- detail_long %>% filter(grepl(icd4_pat, tolower(metric)))
+    if (!nrow(dl)) stop("No UCOD ICD-4 detail metric found in `detail_long`.")
+    detail_year <- dl %>%
+      transmute(
+        county_ihme,
+        year = if (has_year) suppressWarnings(as.integer(year)) else period_to_midyear(period),
+        detail_icd4 = suppressWarnings(as.numeric(value))
+      ) %>%
+      group_by(county_ihme, year) %>%
+      summarise(detail_icd4 = mean(detail_icd4, na.rm = TRUE), .groups = "drop")
+  }
+  detail_year <- detail_year %>%
+    filter(is.finite(year), is.finite(detail_icd4)) %>%
+    mutate(year = as.integer(year)) %>%
+    filter(county_ihme != "00000") %>%
+    distinct()
+}
+
+# assemble series with RI
 base_sel <- cy %>%
   mutate(
-    prop_garbage = suppressWarnings(as.numeric(.data[[prop_garbage_col]])),
-    overd_unspec = suppressWarnings(as.numeric(.data[[overd_col]])),
-    population   = if (pop_col_ok) suppressWarnings(as.numeric(.data[[pop_col]])) else NA_real_
+    prop_garbage   = suppressWarnings(as.numeric(.data[[prop_garbage_col]])),
+    pct_overd_miss = suppressWarnings(as.numeric(.data[[overd_col]])),
+    ri             = if (have_ri) suppressWarnings(as.numeric(.data[[ri_col]])) else NA_real_,
+    population     = if (pop_col_ok) suppressWarnings(as.numeric(.data[[pop_col_name]])) else NA_real_
   ) %>%
-  filter(year >= 1999, year <= 2022) %>%
-  select(county_ihme, year, prop_garbage, overd_unspec, population)
-
-detail_year <- detail_long %>%
-  transmute(county_ihme, year,
-            detail_icd4 = suppressWarnings(as.numeric(detail_icd4_ucod)))
+  filter(year >= 1999, year <= 2022, county_ihme != "00000") %>%
+  select(county_ihme, year, prop_garbage, pct_overd_miss, ri, population)
 
 series_rt <- base_sel %>%
   left_join(detail_year, by = c("county_ihme","year")) %>%
@@ -3466,22 +3678,19 @@ series_rt <- base_sel %>%
   filter(!is.na(reporting_type)) %>%
   mutate(reporting_type = factor(reporting_type, levels = rt_levels))
 
-# ---------- aggregate to year × reporting_type ----------
-wmaybe <- function(x, w) if (pop_col_ok) weighted_mean_na(x, w) else mean(x, na.rm = TRUE)
-
 ts_rt <- series_rt %>%
   group_by(year, reporting_type) %>%
   summarise(
-    prop_garbage = wmaybe(prop_garbage, population),
-    overd_unspec = wmaybe(overd_unspec, population),
-    detail_icd4  = wmaybe(detail_icd4,  population),
+    prop_garbage   = if (pop_col_ok) safe_wmean(prop_garbage,   population) else mean(prop_garbage,   na.rm = TRUE),
+    pct_overd_miss = if (pop_col_ok) safe_wmean(pct_overd_miss, population) else mean(pct_overd_miss, na.rm = TRUE),
+    detail_icd4    = if (pop_col_ok) safe_wmean(detail_icd4,    population) else mean(detail_icd4,    na.rm = TRUE),
+    ri             = if (pop_col_ok) safe_wmean(ri,             population) else mean(ri,             na.rm = TRUE),
     .groups = "drop"
   )
 
-# ---------- plotting helper ----------
 plot_metric_rt <- function(df, var, title, file_out) {
   dd <- df %>% filter(is.finite(.data[[var]]))
-  if (!nrow(dd)) stop("No finite data for ", var)
+  if (!nrow(dd)) { message("Skipping (no data): ", var); return(NULL) }
   p <- ggplot(dd, aes(x = year, y = .data[[var]], colour = reporting_type)) +
     geom_line(linewidth = 1.2) +
     geom_point(size = 1.8) +
@@ -3498,18 +3707,319 @@ plot_metric_rt <- function(df, var, title, file_out) {
   p
 }
 
-p1 <- plot_metric_rt(ts_rt, "prop_garbage", "Proportion garbage (UCOD)",      "prop_garbage_by_reporting_timeseries.png")
-p2 <- plot_metric_rt(ts_rt, "overd_unspec", "Overdoses unspecified (share)",  "overd_unspec_by_reporting_timeseries.png")
-p3 <- plot_metric_rt(ts_rt, "detail_icd4",  "Phillips detail (UCOD, ICD-4)",  "detail_icd4_by_reporting_timeseries.png")
+p1 <- plot_metric_rt(ts_rt, "prop_garbage",   "Proportion garbage (UCOD)", "prop_garbage_by_reporting_timeseries.png")
+p2 <- plot_metric_rt(ts_rt, "pct_overd_miss", "Overdose % missing",         "pct_overd_miss_by_reporting_timeseries.png")
+p3 <- plot_metric_rt(ts_rt, "detail_icd4",    "Phillips detail (UCOD, ICD-4)", "detail_icd4_by_reporting_timeseries.png")
+p4 <- plot_metric_rt(ts_rt, "ri",             ri_label, "ri_by_reporting_timeseries.png")
 
-# ---------- combined 3-panel (optional) ----------
-suppressPackageStartupMessages(library(patchwork))
-combined <- (p1 / p2 / p3) + plot_layout(heights = c(1,1,1))
-ggsave(here("figures","reporting_type_timeseries","metrics_by_reporting_timeseries_3panel.png"),
-       combined, width = 9.5, height = 12, dpi = 320)
+combined <- wrap_plots(p1, p2, p3, p4, ncol = 1) + plot_layout(heights = rep(1,4))
+ggsave(here("figures","reporting_type_timeseries","metrics_by_reporting_timeseries_4panel.png"),
+       combined, width = 9.5, height = 16, dpi = 320)
 
 # print to Viewer
-p1; p2; p3
+p1; p2; p3; p4
+
+```
+
+Validation: 4 metrics by income
+```{r}
+# ──────────────────────────────────────────────────────────────
+# A) x = income quintile; 5 lines = PH-spend quintiles
+# B) time series by income quintile
+# Adds: RI everywhere + 4-panel combined figures
+# New outputs:
+#   figures/income_relationship/ri_lines.png
+#   figures/income_relationship/metrics_vs_income_lines_4panel.png
+#   figures/income_timeseries/ri_by_income_timeseries.png
+#   figures/income_timeseries/metrics_by_income_timeseries_4panel.png
+# ──────────────────────────────────────────────────────────────
+suppressPackageStartupMessages({
+  library(dplyr); library(tidyr); library(ggplot2); library(scales)
+  library(readr); library(stringr); library(here); library(patchwork)
+})
+
+dir.create(here("figures","income_relationship"), recursive = TRUE, showWarnings = FALSE)
+dir.create(here("figures","income_timeseries"),   recursive = TRUE, showWarnings = FALSE)
+
+# ---------- helpers ----------
+weighted_mean_na <- function(x, w) {
+  if (missing(w) || is.null(w) || !is.numeric(w)) return(mean(x, na.rm = TRUE))
+  ww <- ifelse(is.na(w), 0, w); xx <- ifelse(is.na(x), NA, x)
+  if (sum(ww[is.finite(xx)], na.rm = TRUE) == 0) return(mean(xx, na.rm = TRUE))
+  sum(xx * ww, na.rm = TRUE) / sum(ww[is.finite(xx)], na.rm = TRUE)
+}
+make_quintile_breaks <- function(v) {
+  v <- v[is.finite(v)]; stopifnot(length(v) > 0)
+  qs <- quantile(v, probs = seq(0,1,0.2), na.rm = TRUE, names = FALSE, type = 7)
+  for (i in 2:length(qs)) if (qs[i] <= qs[i-1]) qs[i] <- qs[i-1] + .Machine$double.eps
+  qs[1] <- min(v) - 1e-9; qs[length(qs)] <- max(v) + 1e-9; qs
+}
+labs_quint <- c("Q1 lowest","Q2","Q3","Q4","Q5 highest")
+std_fips <- function(x) stringr::str_pad(as.character(x), 5, pad = "0")
+`%||%` <- function(a,b) if (!is.null(a) && length(a) && !is.na(a)) a else b
+find_col <- function(df, patterns) {
+  nms <- names(df); hit <- NULL
+  for (pat in patterns) { m <- nms[grepl(pat, tolower(nms))]; if (length(m)) { hit <- m[1]; break } }
+  hit %||% NA_character_
+}
+period_to_midyear <- function(p) {
+  p <- as.character(p); m <- stringr::str_match(p, "([0-9]{4})\\D+([0-9]{4})")
+  if (is.na(m[1,1])) return(NA_integer_)
+  s <- suppressWarnings(as.integer(m[,2])); e <- suppressWarnings(as.integer(m[,3]))
+  as.integer(round((s + e)/2))
+}
+safe_wmean <- function(x, w) {
+  xx <- ifelse(is.finite(x), x, NA_real_)
+  if (all(is.na(xx))) return(NA_real_)
+  if (missing(w) || is.null(w) || all(is.na(w))) return(mean(xx, na.rm = TRUE))
+  ww <- ifelse(is.finite(w), w, NA_real_)
+  if (sum(ww, na.rm = TRUE) <= 0) return(mean(xx, na.rm = TRUE))
+  sum(xx * ww, na.rm = TRUE) / sum(ww, na.rm = TRUE)
+}
+wmaybe <- function(x, w) if (pop_col_ok) safe_wmean(x, w) else mean(x, na.rm = TRUE)
+ri_label <- "Re-assignability Index (RI)"
+
+# ---------- prerequisites ----------
+stopifnot(exists("cy"), exists("detail_long"), exists("ph_pc"))
+cy <- cy %>% mutate(county_ihme = std_fips(county_ihme))
+
+# Auto-detect + RI
+if (!exists("prop_garbage_col")) {
+  prop_garbage_col <- find_col(
+    cy, c("\\bprop[_]?garbage\\b","garbage[_]?share","frac[_]?garbage",
+          "dq_rec_ig_frac_mean_garbage","foreman[_]?garbage","\\bgarbage\\b")
+  )
+}
+overd_col <- if ("pct_overd_miss" %in% names(cy)) "pct_overd_miss" else NA_character_
+ri_col <- find_col(cy, c("^ri$","\\bri[_]?score\\b","richness.*index","\\bd95\\b","d[_]?95","rarefaction.*index"))
+have_ri <- !is.na(ri_col)
+
+if (is.na(prop_garbage_col) || is.na(overd_col)) {
+  stop("Need columns in `cy`: prop_garbage (auto-detected) AND pct_overd_miss.")
+}
+
+# Pop weighting?
+pop_col_name <- if (exists("pop_col") && !is.na(pop_col) && pop_col %in% names(cy)) as.character(pop_col) else NA_character_
+pop_col_ok <- is.character(pop_col_name) && !is.na(pop_col_name)
+message(if (pop_col_ok) paste0("Population weighting ON (", pop_col_name, ").") else "Population weighting OFF.")
+
+# ---------- income quintiles (x for panel A; line colour for panel B) ----------
+get_income_quintiles <- function(cy_df) {
+  income_candidates <- c("median_household_income","median_income","mhi","hh_income",
+                         "income_pc","per_capita_income","pc_income","income")
+  inc_col <- income_candidates[income_candidates %in% names(cy_df)][1]
+  if (!is.na(inc_col)) {
+    message("Income source: cy$", inc_col)
+    inc_any <- cy_df %>%
+      transmute(county_ihme, income_val = suppressWarnings(as.numeric(.data[[inc_col]]))) %>%
+      group_by(county_ihme) %>%
+      summarise(income = median(income_val, na.rm = TRUE), .groups = "drop") %>%
+      filter(is.finite(income))
+    qb_inc <- make_quintile_breaks(inc_any$income)
+    return(inc_any %>%
+      mutate(income_q = cut(income, breaks = qb_inc, include.lowest = TRUE,
+                            right = FALSE, labels = labs_quint)) %>%
+      transmute(county_ihme, income_q))
+  }
+  if (!requireNamespace("tidycensus", quietly = TRUE)) {
+    stop("No income in `cy`, and {tidycensus} not installed. Add income to `cy` or install {tidycensus}.")
+  }
+  message("Income source: ACS (B19013_001, ACS5 2022). If you see API errors, set your Census API key.")
+  inc_acs <- tryCatch(
+    tidycensus::get_acs(geography = "county", variables = "B19013_001",
+                        year = 2022, survey = "acs5", cache_table = TRUE, show_call = FALSE),
+    error = function(e) e
+  )
+  if (inherits(inc_acs, "error")) stop("Failed to fetch ACS income: ", inc_acs$message)
+  inc_any <- inc_acs %>%
+    transmute(county_ihme = std_fips(GEOID), income = as.numeric(estimate)) %>%
+    filter(is.finite(income), county_ihme != "00000")
+  qb_inc <- make_quintile_breaks(inc_any$income)
+  inc_any %>%
+    mutate(income_q = cut(income, breaks = qb_inc, include.lowest = TRUE,
+                          right = FALSE, labels = labs_quint)) %>%
+    transmute(county_ihme, income_q)
+}
+income_quint <- get_income_quintiles(cy) %>%
+  mutate(county_ihme = std_fips(county_ihme)) %>%
+  filter(county_ihme != "00000")
+
+# ---------- PH spend quintiles (for coloured lines in panel A) ----------
+ph_any <- ph_pc %>%
+  mutate(county_ihme = std_fips(county_ihme)) %>%
+  filter(county_ihme != "00000") %>%
+  group_by(county_ihme) %>%
+  summarise(ph_pc = median(suppressWarnings(as.numeric(ph_pc)), na.rm = TRUE), .groups = "drop") %>%
+  filter(is.finite(ph_pc))
+qb_spend <- make_quintile_breaks(ph_any$ph_pc)
+spend_quint <- ph_any %>%
+  mutate(spend_q = cut(ph_pc, breaks = qb_spend, include.lowest = TRUE,
+                       right = FALSE, labels = labs_quint)) %>%
+  select(county_ihme, spend_q)
+
+# ---------- detail_year ----------
+if (!exists("detail_year")) {
+  detail_long <- detail_long %>% mutate(county_ihme = std_fips(county_ihme))
+  ucod_icd4_candidates <- c("detail_icd4_ucod","detail_ucod_icd4_cstd","detail_ucod_icd4","detail_icd4")
+  wide_hit <- intersect(ucod_icd4_candidates, names(detail_long))[1]
+  has_year   <- "year"   %in% names(detail_long)
+  has_period <- "period" %in% names(detail_long)
+
+  if (!is.na(wide_hit)) {
+    detail_year <- detail_long %>%
+      transmute(
+        county_ihme,
+        year = if (has_year) suppressWarnings(as.integer(year)) else period_to_midyear(period),
+        detail_icd4 = suppressWarnings(as.numeric(.data[[wide_hit]]))
+      )
+  } else {
+    stopifnot(all(c("metric","value") %in% names(detail_long)))
+    icd4_pat <- "(detail|diversity).*ucod.*icd\\s*[-_ ]?4|icd\\s*[-_ ]?4.*ucod"
+    dl <- detail_long %>% filter(grepl(icd4_pat, tolower(metric)))
+    if (!nrow(dl)) stop("No UCOD ICD-4 detail metric found in `detail_long`.")
+    detail_year <- dl %>%
+      transmute(
+        county_ihme,
+        year = if (has_year) suppressWarnings(as.integer(year)) else period_to_midyear(period),
+        detail_icd4 = suppressWarnings(as.numeric(value))
+      ) %>%
+      group_by(county_ihme, year) %>%
+      summarise(detail_icd4 = mean(detail_icd4, na.rm = TRUE), .groups = "drop")
+  }
+  detail_year <- detail_year %>%
+    filter(is.finite(year), is.finite(detail_icd4)) %>%
+    mutate(year = as.integer(year)) %>%
+    filter(county_ihme != "00000") %>%
+    distinct()
+}
+
+# ---------- per-county averages (stable) ----------
+base_sel <- cy %>%
+  mutate(
+    prop_garbage   = suppressWarnings(as.numeric(.data[[prop_garbage_col]])),
+    pct_overd_miss = suppressWarnings(as.numeric(.data[[overd_col]])),
+    ri             = if (have_ri) suppressWarnings(as.numeric(.data[[ri_col]])) else NA_real_,
+    population     = if (pop_col_ok) suppressWarnings(as.numeric(.data[[pop_col_name]])) else NA_real_
+  ) %>%
+  filter(year >= 1999, year <= 2022, county_ihme != "00000")
+
+county_avg <- base_sel %>%
+  group_by(county_ihme) %>%
+  summarise(
+    prop_garbage   = wmaybe(prop_garbage,   population),
+    pct_overd_miss = wmaybe(pct_overd_miss, population),
+    ri             = wmaybe(ri,             population),
+    pop_wt         = if (pop_col_ok) mean(population, na.rm = TRUE) else NA_real_,
+    .groups = "drop"
+  )
+
+detail_avg <- detail_year %>%
+  group_by(county_ihme) %>%
+  summarise(detail_icd4 = mean(detail_icd4, na.rm = TRUE), .groups = "drop")
+
+# ============================================================
+# A) Metrics vs INCOME quintile (x = income_q; 5 lines = PH-spend quintiles)
+# ============================================================
+comb_A <- county_avg %>%
+  left_join(detail_avg,  by = "county_ihme") %>%
+  inner_join(income_quint, by = "county_ihme") %>%
+  inner_join(spend_quint,  by = "county_ihme")
+
+metrics_cols_A <- intersect(c("prop_garbage","pct_overd_miss","detail_icd4","ri"), names(comb_A))
+
+by_q_income_x <- comb_A %>%
+  pivot_longer(cols = all_of(metrics_cols_A),
+               names_to = "metric", values_to = "value") %>%
+  group_by(metric, income_q, spend_q) %>%
+  summarise(mean_value = wmaybe(value, pop_wt), n = dplyr::n(), .groups = "drop") %>%
+  mutate(
+    metric = dplyr::recode(metric,
+      prop_garbage   = "Proportion garbage (UCOD)",
+      pct_overd_miss = "Overdose % missing",
+      detail_icd4    = "Phillips detail (UCOD, ICD-4)",
+      ri             = ri_label
+    ),
+    income_q = factor(income_q, levels = labs_quint),
+    spend_q  = factor(spend_q,  levels = labs_quint)
+  )
+
+plot_lines_income <- function(df, mname, title, file_out) {
+  dd <- df %>% filter(metric == mname, is.finite(mean_value))
+  if (!nrow(dd)) { message("Skipping (no data): ", mname); return(NULL) }
+  p <- ggplot(dd, aes(x = income_q, y = mean_value, group = spend_q, colour = spend_q)) +
+    geom_line(linewidth = 1.2) +
+    geom_point(size = 2.2) +
+    labs(
+      title = title,
+      subtitle = paste0("Y: county mean (1999–2022)",
+                        if (pop_col_ok) ", population-weighted" else ", unweighted",
+                        " · Lines = PH-spend quintiles"),
+      x = "Income (median household income) quintiles",
+      y = "Mean metric", colour = "PH-spend quintile"
+    ) +
+    theme_bw(base_size = 12)
+  ggsave(here("figures","income_relationship", file_out), p, width = 8.8, height = 5.4, dpi = 320)
+  p
+}
+
+pA_garb  <- plot_lines_income(by_q_income_x, "Proportion garbage (UCOD)", "Proportion garbage (UCOD)", "prop_garbage_lines.png")
+pA_overd <- plot_lines_income(by_q_income_x, "Overdose % missing",       "Overdose % missing",        "pct_overd_miss_lines.png")
+pA_det   <- plot_lines_income(by_q_income_x, "Phillips detail (UCOD, ICD-4)", "Phillips detail (UCOD, ICD-4)", "detail_icd4_lines.png")
+pA_ri    <- plot_lines_income(by_q_income_x, ri_label, ri_label, "ri_lines.png")
+
+combined_A <- wrap_plots(pA_garb, pA_overd, pA_det, pA_ri, ncol = 1) + plot_layout(heights = rep(1,4))
+ggsave(here("figures","income_relationship","metrics_vs_income_lines_4panel.png"),
+       combined_A, width = 9.5, height = 16, dpi = 320)
+
+# ============================================================
+# B) Time series by INCOME quintile (x = year; lines = income quintiles)
+# ============================================================
+series_inc <- base_sel %>%
+  select(county_ihme, year, prop_garbage, pct_overd_miss, ri, population) %>%
+  left_join(detail_year, by = c("county_ihme","year")) %>%
+  inner_join(income_quint, by = "county_ihme")
+
+ts_income <- series_inc %>%
+  group_by(year, income_q) %>%
+  summarise(
+    prop_garbage   = wmaybe(prop_garbage,   population),
+    pct_overd_miss = wmaybe(pct_overd_miss, population),
+    detail_icd4    = wmaybe(detail_icd4,    population),
+    ri             = wmaybe(ri,             population),
+    .groups = "drop"
+  ) %>%
+  mutate(income_q = factor(income_q, levels = labs_quint))
+
+plot_metric_income_ts <- function(df, var, title, file_out) {
+  dd <- df %>% filter(is.finite(.data[[var]]))
+  if (!nrow(dd)) { message("Skipping (no data): ", var); return(NULL) }
+  p <- ggplot(dd, aes(x = year, y = .data[[var]], colour = income_q)) +
+    geom_line(linewidth = 1.2) +
+    geom_point(size = 1.8) +
+    scale_x_continuous(breaks = seq(2000, 2022, 2)) +
+    labs(
+      title = title,
+      subtitle = paste0("County means by income quintile (1999–2022)",
+                        if (pop_col_ok) ", population-weighted" else ", unweighted"),
+      x = NULL, y = "Mean value", colour = "Income quintile"
+    ) +
+    theme_bw(base_size = 12)
+  ggsave(here("figures","income_timeseries", file_out),
+         p, width = 8.8, height = 5.2, dpi = 320)
+  p
+}
+
+pB1 <- plot_metric_income_ts(ts_income, "prop_garbage",   "Proportion garbage (UCOD)", "prop_garbage_by_income_timeseries.png")
+pB2 <- plot_metric_income_ts(ts_income, "pct_overd_miss", "Overdose % missing",         "pct_overd_miss_by_income_timeseries.png")
+pB3 <- plot_metric_income_ts(ts_income, "detail_icd4",    "Phillips detail (UCOD, ICD-4)", "detail_icd4_by_income_timeseries.png")
+pB4 <- plot_metric_income_ts(ts_income, "ri",             ri_label, "ri_by_income_timeseries.png")
+
+combined_B <- wrap_plots(pB1, pB2, pB3, pB4, ncol = 1) + plot_layout(heights = rep(1,4))
+ggsave(here("figures","income_timeseries","metrics_by_income_timeseries_4panel.png"),
+       combined_B, width = 9.5, height = 16, dpi = 320)
+
+# Print to Viewer
+pA_garb; pA_overd; pA_det; pA_ri; pB1; pB2; pB3; pB4
 
 ```
 
