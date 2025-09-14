@@ -2193,24 +2193,19 @@ if (!is.null(r2_by_reporting) || !is.null(r2_by_income) || !is.null(r2_by_ph)) {
 Correlation between the 4 metrics
 ```{r}
 # ──────────────────────────────────────────────────────────────
-# CORRELATIONS: 4 z-score metrics (overall + by reporting / PH spend / income)
-#   • Metrics: z_prop_overd_unspec, z_philips_cstd, z_RI_cluster, z_prop_garbage
-#   • Weighted by deaths (sum_n_cert) at cluster×period; also saves unweighted
-#   • Stratifiers (optional; run if lookups exist):
-#       - Reporting type   (modal, death-weighted, county → cluster×period)
-#       - PH spend quintile (modal, death-weighted)
-#       - Income quintile   (modal, death-weighted)
-#   • Outputs:
-#       output/validation_zscore/corr_overall.csv
-#       output/validation_zscore/corr_by_reporting.csv     (if rep_lookup available)
-#       output/validation_zscore/corr_by_ph_spend.csv      (if ph_q available)
-#       output/validation_zscore/corr_by_income.csv        (if inc_q available)
+# PRINT-ONLY CORRELATIONS (no CSVs)
+#   Metrics: z_prop_overd_unspec, z_philips_cstd, z_RI_cluster, z_prop_garbage
+#   Levels: overall; by reporting type (if rep_lookup);
+#           by PH-spend quintile (if ph_q); by income quintile (if inc_q)
+#   Notes:
+#     • Weighted = death-weighted (sum_n_cert) at cluster×period
+#     • Also prints unweighted
 # ──────────────────────────────────────────────────────────────
 suppressPackageStartupMessages({
-  library(dplyr); library(tidyr); library(readr); library(tibble); library(here)
+  library(dplyr); library(tidyr); library(tibble)
 })
-dir.create(here("output","validation_zscore"), recursive = TRUE, showWarnings = FALSE)
-out_dir <- here("output","validation_zscore")
+
+options(pillar.max_cols = Inf)  # show all columns
 
 # ---- Inputs expected from earlier chunks ----
 stopifnot(exists("z_tbl"), exists("cluster_core"), exists("membership"), exists("cy"))
@@ -2224,26 +2219,21 @@ if (length(present_z) != length(zvars)) {
 
 z_cluster <- z_tbl %>%
   select(period, cluster, all_of(zvars)) %>%
-  inner_join(cluster_core %>% select(period, cluster, sum_n_cert), by = c("period","cluster")) %>%
+  inner_join(cluster_core %>% select(period, cluster, sum_n_cert),
+             by = c("period","cluster")) %>%
   filter(if_all(all_of(zvars), ~ is.finite(.x)),
          is.finite(sum_n_cert) & sum_n_cert > 0)
 
-# ---- Helpers ----
+# ---- Correlation helpers ----
 weighted_cor_mat <- function(df, vars, wcol = NULL, method = c("pearson","spearman")) {
   method <- match.arg(method)
   X <- df %>% dplyr::select(dplyr::all_of(vars))
   w <- if (!is.null(wcol) && wcol %in% names(df)) df[[wcol]] else NULL
 
-  # listwise complete rows across vars; handle weights safely
-  if (is.null(w)) {
-    keep <- stats::complete.cases(X)
-  } else {
-    keep <- stats::complete.cases(X) & is.finite(w) & w > 0
-  }
-
+  # listwise complete rows; handle weights safely
+  if (is.null(w)) keep <- stats::complete.cases(X) else keep <- stats::complete.cases(X) & is.finite(w) & w > 0
   if (!length(keep)) {
-    R <- matrix(NA_real_, ncol = length(vars), nrow = length(vars),
-                dimnames = list(vars, vars))
+    R <- matrix(NA_real_, ncol = length(vars), nrow = length(vars), dimnames = list(vars, vars))
     return(list(cor = R, n = 0))
   }
 
@@ -2251,14 +2241,11 @@ weighted_cor_mat <- function(df, vars, wcol = NULL, method = c("pearson","spearm
   w <- if (is.null(w)) NULL else as.numeric(w[keep])
   n_used <- nrow(X)
   if (n_used < 3) {
-    R <- matrix(NA_real_, ncol = length(vars), nrow = length(vars),
-                dimnames = list(vars, vars))
+    R <- matrix(NA_real_, ncol = length(vars), nrow = length(vars), dimnames = list(vars, vars))
     return(list(cor = R, n = n_used))
   }
 
-  if (method == "spearman") {
-    X <- apply(X, 2, rank, ties.method = "average")
-  }
+  if (method == "spearman") X <- apply(X, 2, rank, ties.method = "average")
 
   if (is.null(w)) {
     C <- stats::cov(X)
@@ -2267,8 +2254,7 @@ weighted_cor_mat <- function(df, vars, wcol = NULL, method = c("pearson","spearm
     C <- stats::cov.wt(X, wt = w, method = "ML")$cov
   }
 
-  s <- sqrt(diag(C))
-  s[!is.finite(s) | s == 0] <- NA_real_  # guard against zero variance
+  s <- sqrt(diag(C)); s[!is.finite(s) | s == 0] <- NA_real_
   R <- C / (s %o% s)
   dimnames(R) <- list(colnames(X), colnames(X))
   list(cor = R, n = n_used)
@@ -2303,13 +2289,33 @@ compute_all_methods <- function(df, label_type, label_val, wcol = NULL, include_
   )
 }
 
+# Pretty printer (forces full width, shows key cols first)
+pp <- function(x, title) {
+  cat("\n", strrep("=", nchar(title)+4), "\n", "= ", title, " =\n",
+      strrep("=", nchar(title)+4), "\n", sep = "")
+
+  grpcol <- intersect(names(x),
+                      c("reporting_type","ph_spend_quintile","income_quintile","group"))[1]
+  x2 <- x %>%
+    mutate(correlation = round(correlation, 3)) %>%
+    arrange(desc(weighted), method, var1, var2)
+
+  if (length(grpcol)) {
+    x2 <- x2 %>% select(group_type, all_of(grpcol), method, weighted, n_used, var1, var2, correlation)
+  } else {
+    x2 <- x2 %>% select(group_type, method, weighted, n_used, var1, var2, correlation)
+  }
+
+  print(x2, n = Inf, width = Inf)
+  invisible(NULL)
+}
+
 # ---- 1) OVERALL correlations (weighted & unweighted) ----
 corr_overall <- bind_rows(
   compute_all_methods(z_cluster, "overall", "All clusters", wcol = "sum_n_cert"),
   compute_all_methods(z_cluster, "overall", "All clusters", wcol = NULL)
 )
-readr::write_csv(corr_overall, file.path(out_dir, "corr_overall.csv"))
-message("[CORR] Saved overall correlations: ", file.path(out_dir, "corr_overall.csv"))
+pp(corr_overall, "Overall correlations (Pearson & Spearman; weighted & unweighted)")
 
 # ---- 2) Build county weights for modal grouping at cluster×period ----
 county_w <- cy %>%
@@ -2351,14 +2357,14 @@ if (exists("rep_lookup") && is.data.frame(rep_lookup)) {
         group_by(group) %>%
         group_modify(~ compute_all_methods(.x, "reporting_type", .y$group[[1]], wcol = NULL, include_group = FALSE)) %>%
         ungroup()
-    )
-    readr::write_csv(corr_by_reporting, file.path(out_dir, "corr_by_reporting.csv"))
-    message("[CORR] Saved by-reporting correlations: ", file.path(out_dir, "corr_by_reporting.csv"))
+    ) %>% relocate(group, .before = method)
+    pp(corr_by_reporting %>% rename(reporting_type = group),
+       "By reporting type (Pearson & Spearman; weighted & unweighted)")
   } else {
-    message("[CORR] Reporting-type lookup present but no modal groups could be formed.")
+    cat("\n[CORR] Reporting-type lookup present but no modal groups could be formed.\n")
   }
 } else {
-  message("[CORR] Reporting-type lookup not found; skipping by-reporting correlations.")
+  cat("\n[CORR] Reporting-type lookup not found; skipping by-reporting correlations.\n")
 }
 
 # ---- 3b) By PH SPEND quintile (if available) ----
@@ -2376,14 +2382,14 @@ if (exists("ph_q") && is.data.frame(ph_q) && nrow(ph_q)) {
         group_by(group) %>%
         group_modify(~ compute_all_methods(.x, "ph_spend_quintile", .y$group[[1]], wcol = NULL, include_group = FALSE)) %>%
         ungroup()
-    )
-    readr::write_csv(corr_by_ph, file.path(out_dir, "corr_by_ph_spend.csv"))
-    message("[CORR] Saved by-PH-spend correlations: ", file.path(out_dir, "corr_by_ph_spend.csv"))
+    ) %>% relocate(group, .before = method)
+    pp(corr_by_ph %>% rename(ph_spend_quintile = group),
+       "By PH-spend quintile (Pearson & Spearman; weighted & unweighted)")
   } else {
-    message("[CORR] PH spend quintiles present but no modal groups could be formed.")
+    cat("\n[CORR] PH spend quintiles present but no modal groups could be formed.\n")
   }
 } else {
-  message("[CORR] PH spend quintiles not available; skipping.")
+  cat("\n[CORR] PH spend quintiles not available; skipping.\n")
 }
 
 # ---- 3c) By INCOME quintile (if available) ----
@@ -2401,14 +2407,14 @@ if (exists("inc_q") && is.data.frame(inc_q) && nrow(inc_q)) {
         group_by(group) %>%
         group_modify(~ compute_all_methods(.x, "income_quintile", .y$group[[1]], wcol = NULL, include_group = FALSE)) %>%
         ungroup()
-    )
-    readr::write_csv(corr_by_inc, file.path(out_dir, "corr_by_income.csv"))
-    message("[CORR] Saved by-income correlations: ", file.path(out_dir, "corr_by_income.csv"))
+    ) %>% relocate(group, .before = method)
+    pp(corr_by_inc %>% rename(income_quintile = group),
+       "By income quintile (Pearson & Spearman; weighted & unweighted)")
   } else {
-    message("[CORR] Income quintiles present but no modal groups could be formed.")
+    cat("\n[CORR] Income quintiles present but no modal groups could be formed.\n")
   }
 } else {
-  message("[CORR] Income quintiles not available; skipping.")
+  cat("\n[CORR] Income quintiles not available; skipping.\n")
 }
 
 ```
