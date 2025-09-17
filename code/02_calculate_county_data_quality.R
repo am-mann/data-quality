@@ -31,7 +31,7 @@ suppressPackageStartupMessages({
 })
 
 PARALLELIZE <- TRUE
-N_WORKERS   <- 5
+N_WORKERS   <- 8
 WRITE_ONE_CSV     <- TRUE 
 out_csv           <- here("data", "county_year_quality_metrics.csv.gz")
 
