@@ -1,0 +1,121 @@
+group,group_type,method,weighted,n_used,var1,var2,correlation
+Q1 lowest,income_quintile,pearson,TRUE,726,z_prop_overd_unspec,z_philips_cstd,0.3826819597612595
+Q1 lowest,income_quintile,pearson,TRUE,726,z_prop_overd_unspec,z_RI_cluster,0.16416270891211823
+Q1 lowest,income_quintile,pearson,TRUE,726,z_prop_overd_unspec,z_prop_garbage,0.11503073449504213
+Q1 lowest,income_quintile,pearson,TRUE,726,z_philips_cstd,z_RI_cluster,-0.19691192180928227
+Q1 lowest,income_quintile,pearson,TRUE,726,z_philips_cstd,z_prop_garbage,-0.244412912801349
+Q1 lowest,income_quintile,pearson,TRUE,726,z_RI_cluster,z_prop_garbage,0.6856556107578354
+Q1 lowest,income_quintile,spearman,TRUE,726,z_prop_overd_unspec,z_philips_cstd,0.4137736630244435
+Q1 lowest,income_quintile,spearman,TRUE,726,z_prop_overd_unspec,z_RI_cluster,0.2056638010813543
+Q1 lowest,income_quintile,spearman,TRUE,726,z_prop_overd_unspec,z_prop_garbage,0.1520030581655708
+Q1 lowest,income_quintile,spearman,TRUE,726,z_philips_cstd,z_RI_cluster,-0.18700653787206709
+Q1 lowest,income_quintile,spearman,TRUE,726,z_philips_cstd,z_prop_garbage,-0.13235511753223902
+Q1 lowest,income_quintile,spearman,TRUE,726,z_RI_cluster,z_prop_garbage,0.7080239035539859
+Q2,income_quintile,pearson,TRUE,1128,z_prop_overd_unspec,z_philips_cstd,0.4247680157814228
+Q2,income_quintile,pearson,TRUE,1128,z_prop_overd_unspec,z_RI_cluster,0.016819047785422904
+Q2,income_quintile,pearson,TRUE,1128,z_prop_overd_unspec,z_prop_garbage,-0.0013614156588170015
+Q2,income_quintile,pearson,TRUE,1128,z_philips_cstd,z_RI_cluster,-0.2192283549933185
+Q2,income_quintile,pearson,TRUE,1128,z_philips_cstd,z_prop_garbage,-0.19944278594367945
+Q2,income_quintile,pearson,TRUE,1128,z_RI_cluster,z_prop_garbage,0.6611612093889732
+Q2,income_quintile,spearman,TRUE,1128,z_prop_overd_unspec,z_philips_cstd,0.43954950554441763
+Q2,income_quintile,spearman,TRUE,1128,z_prop_overd_unspec,z_RI_cluster,-0.02107247225412345
+Q2,income_quintile,spearman,TRUE,1128,z_prop_overd_unspec,z_prop_garbage,-0.07651588395548274
+Q2,income_quintile,spearman,TRUE,1128,z_philips_cstd,z_RI_cluster,-0.23182634979506353
+Q2,income_quintile,spearman,TRUE,1128,z_philips_cstd,z_prop_garbage,-0.10892729173699697
+Q2,income_quintile,spearman,TRUE,1128,z_RI_cluster,z_prop_garbage,0.6561773665720847
+Q3,income_quintile,pearson,TRUE,1271,z_prop_overd_unspec,z_philips_cstd,0.40430874894496366
+Q3,income_quintile,pearson,TRUE,1271,z_prop_overd_unspec,z_RI_cluster,0.131783171722287
+Q3,income_quintile,pearson,TRUE,1271,z_prop_overd_unspec,z_prop_garbage,0.10335163431692496
+Q3,income_quintile,pearson,TRUE,1271,z_philips_cstd,z_RI_cluster,-0.2535687711835782
+Q3,income_quintile,pearson,TRUE,1271,z_philips_cstd,z_prop_garbage,-0.1958800788223579
+Q3,income_quintile,pearson,TRUE,1271,z_RI_cluster,z_prop_garbage,0.6282336357201915
+Q3,income_quintile,spearman,TRUE,1271,z_prop_overd_unspec,z_philips_cstd,0.4315697694385527
+Q3,income_quintile,spearman,TRUE,1271,z_prop_overd_unspec,z_RI_cluster,0.12156732457496738
+Q3,income_quintile,spearman,TRUE,1271,z_prop_overd_unspec,z_prop_garbage,0.09123978866302619
+Q3,income_quintile,spearman,TRUE,1271,z_philips_cstd,z_RI_cluster,-0.26627259774429213
+Q3,income_quintile,spearman,TRUE,1271,z_philips_cstd,z_prop_garbage,-0.11386464240766009
+Q3,income_quintile,spearman,TRUE,1271,z_RI_cluster,z_prop_garbage,0.6308571592081336
+Q4,income_quintile,pearson,TRUE,1304,z_prop_overd_unspec,z_philips_cstd,0.4327902042941599
+Q4,income_quintile,pearson,TRUE,1304,z_prop_overd_unspec,z_RI_cluster,0.02653591912384294
+Q4,income_quintile,pearson,TRUE,1304,z_prop_overd_unspec,z_prop_garbage,-0.010095823862142295
+Q4,income_quintile,pearson,TRUE,1304,z_philips_cstd,z_RI_cluster,-0.28236214113255437
+Q4,income_quintile,pearson,TRUE,1304,z_philips_cstd,z_prop_garbage,-0.22095353947951923
+Q4,income_quintile,pearson,TRUE,1304,z_RI_cluster,z_prop_garbage,0.653657310893559
+Q4,income_quintile,spearman,TRUE,1304,z_prop_overd_unspec,z_philips_cstd,0.457220183521901
+Q4,income_quintile,spearman,TRUE,1304,z_prop_overd_unspec,z_RI_cluster,-0.00557109791245471
+Q4,income_quintile,spearman,TRUE,1304,z_prop_overd_unspec,z_prop_garbage,-0.047305844951155876
+Q4,income_quintile,spearman,TRUE,1304,z_philips_cstd,z_RI_cluster,-0.2988936544445102
+Q4,income_quintile,spearman,TRUE,1304,z_philips_cstd,z_prop_garbage,-0.12283380601192251
+Q4,income_quintile,spearman,TRUE,1304,z_RI_cluster,z_prop_garbage,0.6559889696181415
+Q5 highest,income_quintile,pearson,TRUE,1591,z_prop_overd_unspec,z_philips_cstd,0.2978595347918105
+Q5 highest,income_quintile,pearson,TRUE,1591,z_prop_overd_unspec,z_RI_cluster,-0.13611933466319584
+Q5 highest,income_quintile,pearson,TRUE,1591,z_prop_overd_unspec,z_prop_garbage,-0.10761811414400503
+Q5 highest,income_quintile,pearson,TRUE,1591,z_philips_cstd,z_RI_cluster,-0.2572777784742614
+Q5 highest,income_quintile,pearson,TRUE,1591,z_philips_cstd,z_prop_garbage,-0.10743703618214877
+Q5 highest,income_quintile,pearson,TRUE,1591,z_RI_cluster,z_prop_garbage,0.6040412569439504
+Q5 highest,income_quintile,spearman,TRUE,1591,z_prop_overd_unspec,z_philips_cstd,0.33369009037102654
+Q5 highest,income_quintile,spearman,TRUE,1591,z_prop_overd_unspec,z_RI_cluster,-0.1704876438180854
+Q5 highest,income_quintile,spearman,TRUE,1591,z_prop_overd_unspec,z_prop_garbage,-0.19549874582463658
+Q5 highest,income_quintile,spearman,TRUE,1591,z_philips_cstd,z_RI_cluster,-0.2866479549816359
+Q5 highest,income_quintile,spearman,TRUE,1591,z_philips_cstd,z_prop_garbage,-0.02498253677868128
+Q5 highest,income_quintile,spearman,TRUE,1591,z_RI_cluster,z_prop_garbage,0.6191066546793067
+Q1 lowest,income_quintile,pearson,FALSE,726,z_prop_overd_unspec,z_philips_cstd,0.4247811144853485
+Q1 lowest,income_quintile,pearson,FALSE,726,z_prop_overd_unspec,z_RI_cluster,0.10346460852673679
+Q1 lowest,income_quintile,pearson,FALSE,726,z_prop_overd_unspec,z_prop_garbage,0.0709108544145704
+Q1 lowest,income_quintile,pearson,FALSE,726,z_philips_cstd,z_RI_cluster,-0.25725502465211414
+Q1 lowest,income_quintile,pearson,FALSE,726,z_philips_cstd,z_prop_garbage,-0.23650316753329864
+Q1 lowest,income_quintile,pearson,FALSE,726,z_RI_cluster,z_prop_garbage,0.6551376996396192
+Q1 lowest,income_quintile,spearman,FALSE,726,z_prop_overd_unspec,z_philips_cstd,0.445472903531159
+Q1 lowest,income_quintile,spearman,FALSE,726,z_prop_overd_unspec,z_RI_cluster,0.12655388449310215
+Q1 lowest,income_quintile,spearman,FALSE,726,z_prop_overd_unspec,z_prop_garbage,0.07065604688681502
+Q1 lowest,income_quintile,spearman,FALSE,726,z_philips_cstd,z_RI_cluster,-0.24356348364178887
+Q1 lowest,income_quintile,spearman,FALSE,726,z_philips_cstd,z_prop_garbage,-0.16177058559969393
+Q1 lowest,income_quintile,spearman,FALSE,726,z_RI_cluster,z_prop_garbage,0.6727538657717648
+Q2,income_quintile,pearson,FALSE,1128,z_prop_overd_unspec,z_philips_cstd,0.45643900794369097
+Q2,income_quintile,pearson,FALSE,1128,z_prop_overd_unspec,z_RI_cluster,0.0641754060405911
+Q2,income_quintile,pearson,FALSE,1128,z_prop_overd_unspec,z_prop_garbage,0.02435949158083168
+Q2,income_quintile,pearson,FALSE,1128,z_philips_cstd,z_RI_cluster,-0.215764067960886
+Q2,income_quintile,pearson,FALSE,1128,z_philips_cstd,z_prop_garbage,-0.18766019224568764
+Q2,income_quintile,pearson,FALSE,1128,z_RI_cluster,z_prop_garbage,0.6695401419682513
+Q2,income_quintile,spearman,FALSE,1128,z_prop_overd_unspec,z_philips_cstd,0.46991875784356235
+Q2,income_quintile,spearman,FALSE,1128,z_prop_overd_unspec,z_RI_cluster,0.04221252709715061
+Q2,income_quintile,spearman,FALSE,1128,z_prop_overd_unspec,z_prop_garbage,-0.02797285002980216
+Q2,income_quintile,spearman,FALSE,1128,z_philips_cstd,z_RI_cluster,-0.22824894270678336
+Q2,income_quintile,spearman,FALSE,1128,z_philips_cstd,z_prop_garbage,-0.12202399381251475
+Q2,income_quintile,spearman,FALSE,1128,z_RI_cluster,z_prop_garbage,0.6632555489238563
+Q3,income_quintile,pearson,FALSE,1271,z_prop_overd_unspec,z_philips_cstd,0.45784064345144804
+Q3,income_quintile,pearson,FALSE,1271,z_prop_overd_unspec,z_RI_cluster,0.0649121168615065
+Q3,income_quintile,pearson,FALSE,1271,z_prop_overd_unspec,z_prop_garbage,0.05952864214559249
+Q3,income_quintile,pearson,FALSE,1271,z_philips_cstd,z_RI_cluster,-0.21106535251644498
+Q3,income_quintile,pearson,FALSE,1271,z_philips_cstd,z_prop_garbage,-0.18338665158270742
+Q3,income_quintile,pearson,FALSE,1271,z_RI_cluster,z_prop_garbage,0.6242308740987913
+Q3,income_quintile,spearman,FALSE,1271,z_prop_overd_unspec,z_philips_cstd,0.49710363727858464
+Q3,income_quintile,spearman,FALSE,1271,z_prop_overd_unspec,z_RI_cluster,0.0315381072769277
+Q3,income_quintile,spearman,FALSE,1271,z_prop_overd_unspec,z_prop_garbage,0.02526646920252984
+Q3,income_quintile,spearman,FALSE,1271,z_philips_cstd,z_RI_cluster,-0.23099089069784212
+Q3,income_quintile,spearman,FALSE,1271,z_philips_cstd,z_prop_garbage,-0.11590774322827983
+Q3,income_quintile,spearman,FALSE,1271,z_RI_cluster,z_prop_garbage,0.6107713047455547
+Q4,income_quintile,pearson,FALSE,1304,z_prop_overd_unspec,z_philips_cstd,0.47557552482164583
+Q4,income_quintile,pearson,FALSE,1304,z_prop_overd_unspec,z_RI_cluster,0.0881532009569553
+Q4,income_quintile,pearson,FALSE,1304,z_prop_overd_unspec,z_prop_garbage,0.02691329377753811
+Q4,income_quintile,pearson,FALSE,1304,z_philips_cstd,z_RI_cluster,-0.1810990108452204
+Q4,income_quintile,pearson,FALSE,1304,z_philips_cstd,z_prop_garbage,-0.1922953948048961
+Q4,income_quintile,pearson,FALSE,1304,z_RI_cluster,z_prop_garbage,0.6442587322659299
+Q4,income_quintile,spearman,FALSE,1304,z_prop_overd_unspec,z_philips_cstd,0.5096204631458688
+Q4,income_quintile,spearman,FALSE,1304,z_prop_overd_unspec,z_RI_cluster,0.0640490438811073
+Q4,income_quintile,spearman,FALSE,1304,z_prop_overd_unspec,z_prop_garbage,0.017749054868874157
+Q4,income_quintile,spearman,FALSE,1304,z_philips_cstd,z_RI_cluster,-0.21416226450240972
+Q4,income_quintile,spearman,FALSE,1304,z_philips_cstd,z_prop_garbage,-0.12648493202429617
+Q4,income_quintile,spearman,FALSE,1304,z_RI_cluster,z_prop_garbage,0.6427168165862002
+Q5 highest,income_quintile,pearson,FALSE,1591,z_prop_overd_unspec,z_philips_cstd,0.38557584364574526
+Q5 highest,income_quintile,pearson,FALSE,1591,z_prop_overd_unspec,z_RI_cluster,-0.05110306364325392
+Q5 highest,income_quintile,pearson,FALSE,1591,z_prop_overd_unspec,z_prop_garbage,-0.06670847978226736
+Q5 highest,income_quintile,pearson,FALSE,1591,z_philips_cstd,z_RI_cluster,-0.21848471409757567
+Q5 highest,income_quintile,pearson,FALSE,1591,z_philips_cstd,z_prop_garbage,-0.20719022251405425
+Q5 highest,income_quintile,pearson,FALSE,1591,z_RI_cluster,z_prop_garbage,0.6337827250605592
+Q5 highest,income_quintile,spearman,FALSE,1591,z_prop_overd_unspec,z_philips_cstd,0.43860017891436703
+Q5 highest,income_quintile,spearman,FALSE,1591,z_prop_overd_unspec,z_RI_cluster,-0.08415966136886344
+Q5 highest,income_quintile,spearman,FALSE,1591,z_prop_overd_unspec,z_prop_garbage,-0.11224897422406672
+Q5 highest,income_quintile,spearman,FALSE,1591,z_philips_cstd,z_RI_cluster,-0.2592707319432212
+Q5 highest,income_quintile,spearman,FALSE,1591,z_philips_cstd,z_prop_garbage,-0.15727557727241004
+Q5 highest,income_quintile,spearman,FALSE,1591,z_RI_cluster,z_prop_garbage,0.6298079559635756

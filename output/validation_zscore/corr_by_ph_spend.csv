@@ -1,0 +1,121 @@
+group,group_type,method,weighted,n_used,var1,var2,correlation
+Q1 lowest,ph_spend_quintile,pearson,TRUE,1158,z_prop_overd_unspec,z_philips_cstd,0.43764369284990234
+Q1 lowest,ph_spend_quintile,pearson,TRUE,1158,z_prop_overd_unspec,z_RI_cluster,0.2013689140834062
+Q1 lowest,ph_spend_quintile,pearson,TRUE,1158,z_prop_overd_unspec,z_prop_garbage,0.16019860086675727
+Q1 lowest,ph_spend_quintile,pearson,TRUE,1158,z_philips_cstd,z_RI_cluster,-0.11993864782510182
+Q1 lowest,ph_spend_quintile,pearson,TRUE,1158,z_philips_cstd,z_prop_garbage,-0.08279451269251638
+Q1 lowest,ph_spend_quintile,pearson,TRUE,1158,z_RI_cluster,z_prop_garbage,0.6819791717038995
+Q1 lowest,ph_spend_quintile,spearman,TRUE,1158,z_prop_overd_unspec,z_philips_cstd,0.45403176662840894
+Q1 lowest,ph_spend_quintile,spearman,TRUE,1158,z_prop_overd_unspec,z_RI_cluster,0.1815996070446236
+Q1 lowest,ph_spend_quintile,spearman,TRUE,1158,z_prop_overd_unspec,z_prop_garbage,0.13208697884078666
+Q1 lowest,ph_spend_quintile,spearman,TRUE,1158,z_philips_cstd,z_RI_cluster,-0.14292840964406342
+Q1 lowest,ph_spend_quintile,spearman,TRUE,1158,z_philips_cstd,z_prop_garbage,-0.009679091652735275
+Q1 lowest,ph_spend_quintile,spearman,TRUE,1158,z_RI_cluster,z_prop_garbage,0.7025372619573712
+Q2,ph_spend_quintile,pearson,TRUE,1084,z_prop_overd_unspec,z_philips_cstd,0.4492799650026784
+Q2,ph_spend_quintile,pearson,TRUE,1084,z_prop_overd_unspec,z_RI_cluster,-0.05731811335721646
+Q2,ph_spend_quintile,pearson,TRUE,1084,z_prop_overd_unspec,z_prop_garbage,-0.03311876267654201
+Q2,ph_spend_quintile,pearson,TRUE,1084,z_philips_cstd,z_RI_cluster,-0.3111627172713246
+Q2,ph_spend_quintile,pearson,TRUE,1084,z_philips_cstd,z_prop_garbage,-0.19535186296660262
+Q2,ph_spend_quintile,pearson,TRUE,1084,z_RI_cluster,z_prop_garbage,0.6260871866002332
+Q2,ph_spend_quintile,spearman,TRUE,1084,z_prop_overd_unspec,z_philips_cstd,0.45427822097305615
+Q2,ph_spend_quintile,spearman,TRUE,1084,z_prop_overd_unspec,z_RI_cluster,-0.06382903817454713
+Q2,ph_spend_quintile,spearman,TRUE,1084,z_prop_overd_unspec,z_prop_garbage,-0.10052286926827492
+Q2,ph_spend_quintile,spearman,TRUE,1084,z_philips_cstd,z_RI_cluster,-0.32336455085505506
+Q2,ph_spend_quintile,spearman,TRUE,1084,z_philips_cstd,z_prop_garbage,-0.12714689678479538
+Q2,ph_spend_quintile,spearman,TRUE,1084,z_RI_cluster,z_prop_garbage,0.6408047979144696
+Q3,ph_spend_quintile,pearson,TRUE,1081,z_prop_overd_unspec,z_philips_cstd,0.4334694714014845
+Q3,ph_spend_quintile,pearson,TRUE,1081,z_prop_overd_unspec,z_RI_cluster,-0.003984358375220203
+Q3,ph_spend_quintile,pearson,TRUE,1081,z_prop_overd_unspec,z_prop_garbage,-0.05949751374738388
+Q3,ph_spend_quintile,pearson,TRUE,1081,z_philips_cstd,z_RI_cluster,-0.29675487970809084
+Q3,ph_spend_quintile,pearson,TRUE,1081,z_philips_cstd,z_prop_garbage,-0.2518298898683905
+Q3,ph_spend_quintile,pearson,TRUE,1081,z_RI_cluster,z_prop_garbage,0.7122957921957983
+Q3,ph_spend_quintile,spearman,TRUE,1081,z_prop_overd_unspec,z_philips_cstd,0.4729669979277563
+Q3,ph_spend_quintile,spearman,TRUE,1081,z_prop_overd_unspec,z_RI_cluster,-0.03200602174450755
+Q3,ph_spend_quintile,spearman,TRUE,1081,z_prop_overd_unspec,z_prop_garbage,-0.1125801107628663
+Q3,ph_spend_quintile,spearman,TRUE,1081,z_philips_cstd,z_RI_cluster,-0.3124030691814236
+Q3,ph_spend_quintile,spearman,TRUE,1081,z_philips_cstd,z_prop_garbage,-0.16852227275818377
+Q3,ph_spend_quintile,spearman,TRUE,1081,z_RI_cluster,z_prop_garbage,0.7079023764144579
+Q4,ph_spend_quintile,pearson,TRUE,1007,z_prop_overd_unspec,z_philips_cstd,0.4482089725286611
+Q4,ph_spend_quintile,pearson,TRUE,1007,z_prop_overd_unspec,z_RI_cluster,-0.009857133363142387
+Q4,ph_spend_quintile,pearson,TRUE,1007,z_prop_overd_unspec,z_prop_garbage,-0.002433810157282074
+Q4,ph_spend_quintile,pearson,TRUE,1007,z_philips_cstd,z_RI_cluster,-0.31721044201597537
+Q4,ph_spend_quintile,pearson,TRUE,1007,z_philips_cstd,z_prop_garbage,-0.27223816374511606
+Q4,ph_spend_quintile,pearson,TRUE,1007,z_RI_cluster,z_prop_garbage,0.6121301863457784
+Q4,ph_spend_quintile,spearman,TRUE,1007,z_prop_overd_unspec,z_philips_cstd,0.5158656687633978
+Q4,ph_spend_quintile,spearman,TRUE,1007,z_prop_overd_unspec,z_RI_cluster,-0.044476518550979616
+Q4,ph_spend_quintile,spearman,TRUE,1007,z_prop_overd_unspec,z_prop_garbage,-0.04134755265069028
+Q4,ph_spend_quintile,spearman,TRUE,1007,z_philips_cstd,z_RI_cluster,-0.3339892881800228
+Q4,ph_spend_quintile,spearman,TRUE,1007,z_philips_cstd,z_prop_garbage,-0.18404378296261845
+Q4,ph_spend_quintile,spearman,TRUE,1007,z_RI_cluster,z_prop_garbage,0.5968402925135863
+Q5 highest,ph_spend_quintile,pearson,TRUE,1173,z_prop_overd_unspec,z_philips_cstd,0.31536198959645234
+Q5 highest,ph_spend_quintile,pearson,TRUE,1173,z_prop_overd_unspec,z_RI_cluster,-0.16541270342277964
+Q5 highest,ph_spend_quintile,pearson,TRUE,1173,z_prop_overd_unspec,z_prop_garbage,-0.13608753261780068
+Q5 highest,ph_spend_quintile,pearson,TRUE,1173,z_philips_cstd,z_RI_cluster,-0.25401751245518567
+Q5 highest,ph_spend_quintile,pearson,TRUE,1173,z_philips_cstd,z_prop_garbage,-0.06800336498191774
+Q5 highest,ph_spend_quintile,pearson,TRUE,1173,z_RI_cluster,z_prop_garbage,0.5397738653250596
+Q5 highest,ph_spend_quintile,spearman,TRUE,1173,z_prop_overd_unspec,z_philips_cstd,0.330672509991427
+Q5 highest,ph_spend_quintile,spearman,TRUE,1173,z_prop_overd_unspec,z_RI_cluster,-0.23195992648939218
+Q5 highest,ph_spend_quintile,spearman,TRUE,1173,z_prop_overd_unspec,z_prop_garbage,-0.2162955324561153
+Q5 highest,ph_spend_quintile,spearman,TRUE,1173,z_philips_cstd,z_RI_cluster,-0.27302143462830325
+Q5 highest,ph_spend_quintile,spearman,TRUE,1173,z_philips_cstd,z_prop_garbage,0.02014154449882307
+Q5 highest,ph_spend_quintile,spearman,TRUE,1173,z_RI_cluster,z_prop_garbage,0.5612357340829969
+Q1 lowest,ph_spend_quintile,pearson,FALSE,1158,z_prop_overd_unspec,z_philips_cstd,0.46342210901638
+Q1 lowest,ph_spend_quintile,pearson,FALSE,1158,z_prop_overd_unspec,z_RI_cluster,0.14704981289861033
+Q1 lowest,ph_spend_quintile,pearson,FALSE,1158,z_prop_overd_unspec,z_prop_garbage,0.12540842588083118
+Q1 lowest,ph_spend_quintile,pearson,FALSE,1158,z_philips_cstd,z_RI_cluster,-0.17966690847083094
+Q1 lowest,ph_spend_quintile,pearson,FALSE,1158,z_philips_cstd,z_prop_garbage,-0.1489839971212408
+Q1 lowest,ph_spend_quintile,pearson,FALSE,1158,z_RI_cluster,z_prop_garbage,0.670931537194278
+Q1 lowest,ph_spend_quintile,spearman,FALSE,1158,z_prop_overd_unspec,z_philips_cstd,0.4820997336956288
+Q1 lowest,ph_spend_quintile,spearman,FALSE,1158,z_prop_overd_unspec,z_RI_cluster,0.12905474704247538
+Q1 lowest,ph_spend_quintile,spearman,FALSE,1158,z_prop_overd_unspec,z_prop_garbage,0.10449868267329535
+Q1 lowest,ph_spend_quintile,spearman,FALSE,1158,z_philips_cstd,z_RI_cluster,-0.19969663437951768
+Q1 lowest,ph_spend_quintile,spearman,FALSE,1158,z_philips_cstd,z_prop_garbage,-0.08825775496936394
+Q1 lowest,ph_spend_quintile,spearman,FALSE,1158,z_RI_cluster,z_prop_garbage,0.6812051989951479
+Q2,ph_spend_quintile,pearson,FALSE,1084,z_prop_overd_unspec,z_philips_cstd,0.44052553298699043
+Q2,ph_spend_quintile,pearson,FALSE,1084,z_prop_overd_unspec,z_RI_cluster,-0.004380821522611611
+Q2,ph_spend_quintile,pearson,FALSE,1084,z_prop_overd_unspec,z_prop_garbage,-0.013908642361375791
+Q2,ph_spend_quintile,pearson,FALSE,1084,z_philips_cstd,z_RI_cluster,-0.28859417215269934
+Q2,ph_spend_quintile,pearson,FALSE,1084,z_philips_cstd,z_prop_garbage,-0.19992405906997648
+Q2,ph_spend_quintile,pearson,FALSE,1084,z_RI_cluster,z_prop_garbage,0.6159064548583093
+Q2,ph_spend_quintile,spearman,FALSE,1084,z_prop_overd_unspec,z_philips_cstd,0.4494001164389573
+Q2,ph_spend_quintile,spearman,FALSE,1084,z_prop_overd_unspec,z_RI_cluster,0.0037053018904418455
+Q2,ph_spend_quintile,spearman,FALSE,1084,z_prop_overd_unspec,z_prop_garbage,-0.05067093100725564
+Q2,ph_spend_quintile,spearman,FALSE,1084,z_philips_cstd,z_RI_cluster,-0.30050232868898763
+Q2,ph_spend_quintile,spearman,FALSE,1084,z_philips_cstd,z_prop_garbage,-0.14985873115492246
+Q2,ph_spend_quintile,spearman,FALSE,1084,z_RI_cluster,z_prop_garbage,0.6130179317813935
+Q3,ph_spend_quintile,pearson,FALSE,1081,z_prop_overd_unspec,z_philips_cstd,0.4749249612667494
+Q3,ph_spend_quintile,pearson,FALSE,1081,z_prop_overd_unspec,z_RI_cluster,0.0831780004951355
+Q3,ph_spend_quintile,pearson,FALSE,1081,z_prop_overd_unspec,z_prop_garbage,0.05472998137372386
+Q3,ph_spend_quintile,pearson,FALSE,1081,z_philips_cstd,z_RI_cluster,-0.20144499135401614
+Q3,ph_spend_quintile,pearson,FALSE,1081,z_philips_cstd,z_prop_garbage,-0.1873660341637343
+Q3,ph_spend_quintile,pearson,FALSE,1081,z_RI_cluster,z_prop_garbage,0.6911786359617644
+Q3,ph_spend_quintile,spearman,FALSE,1081,z_prop_overd_unspec,z_philips_cstd,0.5259554278248163
+Q3,ph_spend_quintile,spearman,FALSE,1081,z_prop_overd_unspec,z_RI_cluster,0.06978405636294047
+Q3,ph_spend_quintile,spearman,FALSE,1081,z_prop_overd_unspec,z_prop_garbage,0.04155301232489536
+Q3,ph_spend_quintile,spearman,FALSE,1081,z_philips_cstd,z_RI_cluster,-0.20681729015278938
+Q3,ph_spend_quintile,spearman,FALSE,1081,z_philips_cstd,z_prop_garbage,-0.12380154687407674
+Q3,ph_spend_quintile,spearman,FALSE,1081,z_RI_cluster,z_prop_garbage,0.6865229322780436
+Q4,ph_spend_quintile,pearson,FALSE,1007,z_prop_overd_unspec,z_philips_cstd,0.45723312565255475
+Q4,ph_spend_quintile,pearson,FALSE,1007,z_prop_overd_unspec,z_RI_cluster,-0.05410928453282132
+Q4,ph_spend_quintile,pearson,FALSE,1007,z_prop_overd_unspec,z_prop_garbage,-0.05059412777839735
+Q4,ph_spend_quintile,pearson,FALSE,1007,z_philips_cstd,z_RI_cluster,-0.25966478792769915
+Q4,ph_spend_quintile,pearson,FALSE,1007,z_philips_cstd,z_prop_garbage,-0.25663879616388185
+Q4,ph_spend_quintile,pearson,FALSE,1007,z_RI_cluster,z_prop_garbage,0.6179887282667648
+Q4,ph_spend_quintile,spearman,FALSE,1007,z_prop_overd_unspec,z_philips_cstd,0.5204497003409801
+Q4,ph_spend_quintile,spearman,FALSE,1007,z_prop_overd_unspec,z_RI_cluster,-0.08891494908746216
+Q4,ph_spend_quintile,spearman,FALSE,1007,z_prop_overd_unspec,z_prop_garbage,-0.08422441251679687
+Q4,ph_spend_quintile,spearman,FALSE,1007,z_philips_cstd,z_RI_cluster,-0.2882990043848132
+Q4,ph_spend_quintile,spearman,FALSE,1007,z_philips_cstd,z_prop_garbage,-0.19115022231926349
+Q4,ph_spend_quintile,spearman,FALSE,1007,z_RI_cluster,z_prop_garbage,0.608038001762196
+Q5 highest,ph_spend_quintile,pearson,FALSE,1173,z_prop_overd_unspec,z_philips_cstd,0.43198849589043115
+Q5 highest,ph_spend_quintile,pearson,FALSE,1173,z_prop_overd_unspec,z_RI_cluster,-0.18581521620476074
+Q5 highest,ph_spend_quintile,pearson,FALSE,1173,z_prop_overd_unspec,z_prop_garbage,-0.19859641599745761
+Q5 highest,ph_spend_quintile,pearson,FALSE,1173,z_philips_cstd,z_RI_cluster,-0.21784057517179076
+Q5 highest,ph_spend_quintile,pearson,FALSE,1173,z_philips_cstd,z_prop_garbage,-0.1939744751568427
+Q5 highest,ph_spend_quintile,pearson,FALSE,1173,z_RI_cluster,z_prop_garbage,0.5750979125350515
+Q5 highest,ph_spend_quintile,spearman,FALSE,1173,z_prop_overd_unspec,z_philips_cstd,0.4772845949638118
+Q5 highest,ph_spend_quintile,spearman,FALSE,1173,z_prop_overd_unspec,z_RI_cluster,-0.2401514067265562
+Q5 highest,ph_spend_quintile,spearman,FALSE,1173,z_prop_overd_unspec,z_prop_garbage,-0.24200249803203258
+Q5 highest,ph_spend_quintile,spearman,FALSE,1173,z_philips_cstd,z_RI_cluster,-0.2510225100846516
+Q5 highest,ph_spend_quintile,spearman,FALSE,1173,z_philips_cstd,z_prop_garbage,-0.12612388993240586
+Q5 highest,ph_spend_quintile,spearman,FALSE,1173,z_RI_cluster,z_prop_garbage,0.5671235952658983

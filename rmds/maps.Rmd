@@ -492,6 +492,9 @@ Make map of percentage missing overdoses with clusters (four panels)
 ```{r}
 # ──────────────────────────────────────────────────────────────
 # Map pct_overd_miss with temporally-stable clusters (IHME groups)
+# Changes requested:
+#   • min_overd = 30
+#   • Prefer in-state neighbors; cross state only if needed
 # ──────────────────────────────────────────────────────────────
 
 # 0) Packages & options
@@ -505,6 +508,13 @@ sf::sf_use_s2(FALSE)
 
 `%||%` <- function(a, b) if (!is.null(a)) a else b
 
+# Small helper to get a simple mode (most frequent value)
+mode_val <- function(x) {
+  ux <- na.omit(x)
+  if (!length(ux)) return(NA_character_)
+  names(sort(table(ux), decreasing = TRUE))[1]
+}
+
 # 1) Windows & inputs
 periods_list <- list(
   "1999_2005" = 1999:2005,
@@ -514,7 +524,7 @@ periods_list <- list(
 )
 periods_vec <- names(periods_list)
 
-dq <- readr::read_csv(here::here("data","county_year_quality_metrics.csv.gz"),
+dq <- readr::read_csv(here::here("data","county_year_quality_metrics.csv"),
                       show_col_types = FALSE) %>%
   dplyr::mutate(
     year        = as.integer(year),
@@ -586,18 +596,27 @@ normalize_geoid <- function(sf, year) {
   stop("No GEOID-compatible columns found in shapefile for year ", year)
 }
 
+# Build IHME group polygons and keep a dominant state per group
 build_ihme_groups_sf <- function(year) {
   counties_raw <- tigris::counties(year = year, cb = TRUE, class = "sf") %>%
     sf::st_zm(drop = TRUE, what = "ZM")
-  counties_norm <- normalize_geoid(counties_raw, year) %>% sf::st_transform(crs_proj)
+  counties_norm <- normalize_geoid(counties_raw, year) %>%
+    sf::st_transform(crs_proj)
+
   counties_norm %>%
     dplyr::left_join(ihme_map, by = "GEOID") %>%
-    dplyr::mutate(county_ihme = dplyr::coalesce(county_ihme, GEOID)) %>%
+    dplyr::mutate(
+      county_ihme = dplyr::coalesce(county_ihme, GEOID),
+      STATEFP = as.character(STATEFP)
+    ) %>%
     dplyr::group_by(county_ihme) %>%
-    dplyr::summarise(.groups = "drop")
+    dplyr::summarise(
+      state = mode_val(STATEFP),   # dominant state by membership count
+      .groups = "drop"
+    )
 }
 
-# 5) Adjacency & greedy clustering
+# 5) Adjacency & greedy clustering (state-aware; min_overd = 30)
 ihme2020 <- build_ihme_groups_sf(2020) %>% sf::st_transform(5070)
 adj_list <- sf::st_touches(ihme2020)
 neighbors_of <- setNames(
@@ -605,10 +624,15 @@ neighbors_of <- setNames(
   ihme2020$county_ihme
 )
 
+# Lookup of dominant state per IHME group
+state_of <- setNames(ihme2020$state, ihme2020$county_ihme)
+
+# Lower threshold as requested
 min_overd <- 50L
+
 nodes_tbl <- ihme2020 %>%
   sf::st_drop_geometry() %>%
-  dplyr::select(county_ihme) %>%
+  dplyr::select(county_ihme, state) %>%
   dplyr::left_join(robust_tbl, by = "county_ihme") %>%
   dplyr::mutate(robust_overd = dplyr::coalesce(robust_overd, 0))
 
@@ -618,21 +642,38 @@ clusters  <- setNames(rep(NA_character_, length(overd_vec)), to_assign)
 cid <- 1L
 
 while (length(to_assign) > 0) {
-  seed  <- to_assign[which.max(overd_vec[to_assign])]
-  cur   <- seed
-  total <- overd_vec[seed]
-  avail <- setdiff(to_assign, seed)
+  seed       <- to_assign[which.max(overd_vec[to_assign])]
+  home_state <- state_of[seed]
+  cur        <- seed
+  total      <- overd_vec[seed]
+  avail      <- setdiff(to_assign, seed)
 
   repeat {
-    nbrs <- unique(unlist(neighbors_of[cur], use.names = FALSE))
-    nbrs <- setdiff(intersect(nbrs, avail), cur)
-    if (!length(nbrs)) break
-    cand_totals <- total + overd_vec[nbrs]
-    best_idx <- if (any(cand_totals < min_overd)) which.max(cand_totals) else which.min(abs(cand_totals - min_overd))
-    best <- nbrs[best_idx]
+    nbrs_all <- unique(unlist(neighbors_of[cur], use.names = FALSE))
+    nbrs_all <- setdiff(intersect(nbrs_all, avail), cur)
+
+    if (!length(nbrs_all)) break
+
+    # Prefer in-state neighbors; cross only if no in-state remain and we're still < min_overd
+    nbrs_in_state   <- nbrs_all[state_of[nbrs_all] == home_state]
+    nbrs_candidates <- if (length(nbrs_in_state)) nbrs_in_state else nbrs_all
+
+    cand_totals <- total + overd_vec[nbrs_candidates]
+
+    # If still below target, maximize growth; else, minimize overshoot
+    if (all(cand_totals < min_overd)) {
+      best <- nbrs_candidates[which.max(cand_totals)]
+    } else {
+      best <- nbrs_candidates[which.min(abs(cand_totals - min_overd))]
+    }
+
     new_total <- total + overd_vec[best]
     if (is.na(new_total)) break
-    if (new_total <= min_overd * 1.6 || total < min_overd) {
+
+    allow_cross <- (!length(nbrs_in_state)) && (total < min_overd)
+
+    # Guard against runaway growth (1.6× tolerance), but allow while under target or allowed to cross
+    if (new_total <= min_overd * 1.6 || total < min_overd || allow_cross) {
       cur   <- c(cur, best)
       total <- new_total
       avail <- setdiff(avail, best)
@@ -645,12 +686,21 @@ while (length(to_assign) > 0) {
   cid <- cid + 1L
 }
 
-centroids <- sf::st_centroid(ihme2020) %>% dplyr::mutate(county_ihme = ihme2020$county_ihme)
+# 6) Post-processing: absorb undersized clusters, preferring same-state
+centroids <- sf::st_centroid(ihme2020) %>%
+  dplyr::mutate(county_ihme = ihme2020$county_ihme)
 xy <- sf::st_coordinates(centroids)[,c("X","Y"), drop=FALSE]; rownames(xy) <- centroids$county_ihme
 
 cluster_sum <- tapply(overd_vec[names(clusters)], clusters, sum, na.rm = TRUE)
 small <- names(cluster_sum)[cluster_sum < min_overd]
 big   <- names(cluster_sum)[cluster_sum >= min_overd]
+
+# Dominant state per cluster (by member count)
+cluster_state <- vapply(unique(na.omit(clusters)), function(clid) {
+  memb_states <- state_of[names(clusters)[clusters == clid]]
+  mode_val(memb_states)
+}, FUN.VALUE = character(1L))
+names(cluster_state) <- unique(na.omit(clusters))
 
 if (length(small) && length(big)) {
   get_center <- function(cid) {
@@ -659,12 +709,22 @@ if (length(small) && length(big)) {
   }
   small_xy <- t(vapply(small, get_center, numeric(2L)))
   big_xy   <- t(vapply(big,   get_center, numeric(2L)))
-  assign_to <- vapply(seq_len(nrow(small_xy)), function(i) {
-    dif <- t(big_xy) - small_xy[i,]; which.min(colSums(dif*dif))
-  }, integer(1L))
+
+  choose_target <- function(candidates, i_row) {
+    if (!length(candidates)) return(NA_character_)
+    dif <- t(big_xy[, candidates, drop = FALSE]) -
+      matrix(small_xy[i_row, ], nrow = length(candidates), ncol = 2, byrow = TRUE)
+    candidates[which.min(rowSums(dif * dif))]
+  }
+
   for (i in seq_along(small)) {
-    members <- names(clusters)[clusters == small[i]]
-    clusters[members] <- big[assign_to[i]]
+    s_id    <- small[i]
+    s_state <- cluster_state[s_id]
+    same_state_big <- big[cluster_state[big] == s_state]
+    target <- choose_target(same_state_big, i)
+    if (is.na(target)) target <- choose_target(big, i)  # fallback: any state
+    members <- names(clusters)[clusters == s_id]
+    clusters[members] <- target
   }
 }
 
@@ -673,30 +733,29 @@ cluster_map <- tibble::tibble(
   cluster_id  = unname(clusters)
 )
 
-# 7) Check threshold per window
-overd_by_window <- overd_by_window  # already computed
+# 7) Check threshold per window (reflects 30)
 check_df <- overd_by_window %>%
   dplyr::inner_join(cluster_map, by = "county_ihme") %>%
   dplyr::group_by(cluster_id, time_window) %>%
   dplyr::summarise(overdoses = sum(overd, na.rm = TRUE), .groups = "drop")
 if (any(check_df$overdoses < min_overd, na.rm = TRUE)) {
-  warning("Some clusters are still < 50 overdoses in a window. Consider tweaking heuristics.")
+  warning("Some clusters are still < 30 overdoses in a window. Consider tweaking heuristics.")
 }
 
-# 8) Aggregate pct_overd_miss to cluster×window with NA→0
+# 8) Aggregate pct_overd_miss to cluster×window with NA→0 (same as your original)
 dq_cluster <- dq %>%
   dplyr::filter(!is.na(time_window)) %>%
   dplyr::inner_join(cluster_map, by = "county_ihme") %>%
   dplyr::group_by(cluster_id, time_window) %>%
   dplyr::summarise(
-    pct_overd_miss = mean(replace_na(pct_overd_miss, 0)),
+    pct_overd_miss = mean(tidyr::replace_na(pct_overd_miss, 0)),
     n_counties     = dplyr::n_distinct(county_ihme),
     .groups = "drop"
   ) %>%
   tidyr::complete(cluster_id, time_window = periods_vec,
                   fill = list(pct_overd_miss = 0, n_counties = 0L))
 
-# 9) Shapes per period
+# 9) Shapes per period (group polygons by cluster for each year-vintage)
 build_clusters_sf <- function(year) {
   base <- build_ihme_groups_sf(year)
   base %>%
@@ -714,7 +773,7 @@ joined_by_period <- purrr::imap(shapefile_years, function(year, window) {
                    by = "cluster_id")
 })
 
-# 10) Map helper — keeps your “pretty” title style
+# 10) Map helper — preserves your “pretty” title style
 make_map <- function(sf_data, var = "pct_overd_miss", title = NULL, palette = "RdBu") {
   states <- tigris::states(cb = TRUE, class = "sf") |> sf::st_transform(crs_proj)
   fill_scale <- scale_fill_distiller(
@@ -734,7 +793,7 @@ make_map <- function(sf_data, var = "pct_overd_miss", title = NULL, palette = "R
     labs(title = title %||% "", fill = NULL) +
     theme_void() +
     theme(
-      plot.title = element_text(size = 16, face = "bold", hjust = 0.5),  # old pretty title
+      plot.title = element_text(size = 16, face = "bold", hjust = 0.5),
       legend.text = element_text(size = 9)
     )
 }

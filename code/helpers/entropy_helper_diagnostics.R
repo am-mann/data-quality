@@ -1,17 +1,11 @@
 # ──────────────────────────────────────────────────────────────────────────────
 # Dirichlet fallback usage: generate diagnostics (via your helper) and summarize
-# - Sources helper from here("code/helpers", "dq_entropy_helper.R")
-# - Generates glmnet probability diagnostics to output/dq_diag/ if missing
-# - Summarizes overall and per-garbage-group fallback usage
+# Robust to whitespace/casing in glmnet_grouped/reshape_note columns
 # ──────────────────────────────────────────────────────────────────────────────
 
 suppressPackageStartupMessages({
-    library(dplyr)
-    library(readr)
-    library(stringr)
-    library(purrr)
-    library(tibble)
-    library(here)
+    library(dplyr); library(readr); library(stringr); library(purrr)
+    library(tibble); library(here)
 })
 
 # ============================== CONFIG =======================================
@@ -23,28 +17,54 @@ parquet_dir_candidates <- c(
 )
 county_var <- "county_ihme"                                # county column in your data
 sample_max_rows <- 50000                                   # cap sample for quick run
-out_prefix <- NULL  # e.g., here("output","fallback_summary") to save CSVs; NULL = don't save
+out_prefix <- NULL  # e.g., here("output","fallback_summary"); NULL = don't save
+
+# =============== tiny ICD helper for synthetic fallback ======================
+canonical_icd <- function(x) stringr::str_remove_all(stringr::str_to_upper(x), "[^A-Z0-9]")
 
 # ===================== summarize fallback (core) =============================
 summarize_fallback <- function(diag_df) {
-    names(diag_df) <- tolower(names(diag_df))
+    names(diag_df) <- tolower(trimws(names(diag_df)))
     need <- c("garbage", "n_te", "glmnet_grouped", "reshape_note")
     miss <- setdiff(need, names(diag_df))
     if (length(miss)) stop("Diagnostics missing required columns: ", paste(miss, collapse = ", "))
     
+    # robust coercions (trim, lower, map)
+    to_logical_robust <- function(x) {
+        if (is.logical(x)) return(x)
+        sx <- trimws(as.character(x))
+        lx <- tolower(sx)
+        out <- ifelse(lx %in% c("true","t","1","yes","y"), TRUE,
+                      ifelse(lx %in% c("false","f","0","no","n"), FALSE, NA))
+        as.logical(out)
+    }
+    
     diag_df <- diag_df %>%
         mutate(
-            n_te = suppressWarnings(as.numeric(n_te)),
-            glmnet_grouped = dplyr::case_when(
-                is.logical(glmnet_grouped) ~ glmnet_grouped,
-                tolower(as.character(glmnet_grouped)) %in% c("true","t","1","yes","y") ~ TRUE,
-                tolower(as.character(glmnet_grouped)) %in% c("false","f","0","no","n") ~ FALSE,
-                TRUE ~ NA
-            ),
-            reshape_note = as.character(reshape_note),
             garbage = as.character(garbage),
-            is_fallback = !isTRUE(glmnet_grouped) | reshape_note == "dirichlet_fallback"
+            n_te = suppressWarnings(as.numeric(n_te)),
+            glmnet_grouped = to_logical_robust(glmnet_grouped),
+            reshape_note = trimws(as.character(reshape_note)),
+            reshape_note_l = tolower(reshape_note),
+            # Define fallback strictly: only if glmnet_grouped==FALSE OR note=="dirichlet_fallback"
+            is_fallback = (glmnet_grouped == FALSE) | (reshape_note_l == "dirichlet_fallback")
         )
+    
+    diag_df %>%
+        mutate(reason = dplyr::case_when(
+            reshape_note == "dirichlet_fallback" ~ "glmnet not fit (counts/sparsity)",
+            glmnet_grouped == FALSE              ~ "glmnet fit invalid/failed",
+            TRUE                                 ~ "ok"
+        )) %>%
+        select(garbage, n_tr, n_te, k_cand, nz_feat,
+               glmnet_grouped, reshape_note, reason)
+    
+    
+    # sanity peek: what got parsed?
+    cat("\n[parse] glmnet_grouped value counts (after coercion):\n")
+    print(diag_df %>% count(glmnet_grouped, name = "n"))
+    cat("\n[parse] reshape_note samples:\n")
+    print(diag_df %>% count(reshape_note, name = "n") %>% arrange(desc(n)) %>% head(10))
     
     overall <- diag_df %>%
         summarise(
@@ -97,9 +117,6 @@ write_fallback_summary <- function(res, out_prefix = NULL) {
     readr::write_csv(res$by_bin,  paste0(out_prefix, "_by_bin.csv"))
     invisible(NULL)
 }
-
-# =============== tiny ICD helpers for synthetic fallback =====================
-canonical_icd <- function(x) stringr::str_remove_all(stringr::str_to_upper(x), "[^A-Z0-9]")
 
 # ================ generate diagnostics if missing ============================
 ensure_diagnostics_exist <- function() {
@@ -192,7 +209,7 @@ ensure_diagnostics_exist <- function() {
         }
     }
     
-    # 4) run helper to write diagnostics (exactly your code path)
+    # 4) run helper to write diagnostics (exact path your helper uses)
     icd_map_path  <- file.path(dictionary_dir, "foreman-icd10-mapping.csv")
     table2_path   <- file.path(dictionary_dir, "foreman-table2-map.csv")
     if (!file.exists(icd_map_path) || !file.exists(table2_path)) {
@@ -216,8 +233,15 @@ ensure_diagnostics_exist <- function() {
 ensure_diagnostics_exist()
 diag_df <- read_diag_dir(diag_dir)
 res <- summarize_fallback(diag_df)
-print_fallback_summary(res)
-write_fallback_summary(res, out_prefix)
 
-# Done.
+cat("\n================= Dirichlet Fallback Usage =================\n")
+cat("Overall (weighted by n_te rows):\n")
+print(res$overall %>% mutate(across(where(is.numeric), ~ round(.x, 6))))
+cat("\nBy garbage group:\n")
+print(res$by_bin %>% mutate(across(where(is.numeric), ~ round(.x, 6))))
+cat("============================================================\n\n")
 
+# Optional: write CSVs
+if (!is.null(out_prefix) && nzchar(out_prefix)) {
+    write_fallback_summary(res, out_prefix)
+}

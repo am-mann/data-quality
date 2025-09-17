@@ -1,0 +1,25 @@
+group_type,group,method,weighted,n_used,var1,var2,correlation
+overall,All clusters,pearson,TRUE,6020,z_prop_overd_unspec,z_philips_cstd,0.3881666404045806
+overall,All clusters,pearson,TRUE,6020,z_prop_overd_unspec,z_RI_cluster,0.03443362458193234
+overall,All clusters,pearson,TRUE,6020,z_prop_overd_unspec,z_prop_garbage,0.027223079547898817
+overall,All clusters,pearson,TRUE,6020,z_philips_cstd,z_RI_cluster,-0.21140386893610233
+overall,All clusters,pearson,TRUE,6020,z_philips_cstd,z_prop_garbage,-0.12859576162066771
+overall,All clusters,pearson,TRUE,6020,z_RI_cluster,z_prop_garbage,0.6458157895309334
+overall,All clusters,spearman,TRUE,6020,z_prop_overd_unspec,z_philips_cstd,0.41297188797510936
+overall,All clusters,spearman,TRUE,6020,z_prop_overd_unspec,z_RI_cluster,0.006871571382418953
+overall,All clusters,spearman,TRUE,6020,z_prop_overd_unspec,z_prop_garbage,-0.03220544360183298
+overall,All clusters,spearman,TRUE,6020,z_philips_cstd,z_RI_cluster,-0.23406515936276412
+overall,All clusters,spearman,TRUE,6020,z_philips_cstd,z_prop_garbage,-0.05453906302973294
+overall,All clusters,spearman,TRUE,6020,z_RI_cluster,z_prop_garbage,0.6554060281149064
+overall,All clusters,pearson,FALSE,6020,z_prop_overd_unspec,z_philips_cstd,0.4502040076270516
+overall,All clusters,pearson,FALSE,6020,z_prop_overd_unspec,z_RI_cluster,0.07450048922269101
+overall,All clusters,pearson,FALSE,6020,z_prop_overd_unspec,z_prop_garbage,0.04502390027914195
+overall,All clusters,pearson,FALSE,6020,z_philips_cstd,z_RI_cluster,-0.18015100872063394
+overall,All clusters,pearson,FALSE,6020,z_philips_cstd,z_prop_garbage,-0.1637726265102845
+overall,All clusters,pearson,FALSE,6020,z_RI_cluster,z_prop_garbage,0.6581068953025642
+overall,All clusters,spearman,FALSE,6020,z_prop_overd_unspec,z_philips_cstd,0.4847368389720533
+overall,All clusters,spearman,FALSE,6020,z_prop_overd_unspec,z_RI_cluster,0.05061284175467946
+overall,All clusters,spearman,FALSE,6020,z_prop_overd_unspec,z_prop_garbage,0.00810682816347637
+overall,All clusters,spearman,FALSE,6020,z_philips_cstd,z_RI_cluster,-0.20712154108362457
+overall,All clusters,spearman,FALSE,6020,z_philips_cstd,z_prop_garbage,-0.11023006394335363
+overall,All clusters,spearman,FALSE,6020,z_RI_cluster,z_prop_garbage,0.6521587843983605

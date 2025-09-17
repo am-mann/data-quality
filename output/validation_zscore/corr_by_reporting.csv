@@ -1,0 +1,73 @@
+group,group_type,method,weighted,n_used,var1,var2,correlation
+Coroner,reporting_type,pearson,TRUE,2709,z_prop_overd_unspec,z_philips_cstd,0.48587100375825726
+Coroner,reporting_type,pearson,TRUE,2709,z_prop_overd_unspec,z_RI_cluster,-0.026432062879313545
+Coroner,reporting_type,pearson,TRUE,2709,z_prop_overd_unspec,z_prop_garbage,0.014848572170494269
+Coroner,reporting_type,pearson,TRUE,2709,z_philips_cstd,z_RI_cluster,-0.174701975467397
+Coroner,reporting_type,pearson,TRUE,2709,z_philips_cstd,z_prop_garbage,-0.10611440407310432
+Coroner,reporting_type,pearson,TRUE,2709,z_RI_cluster,z_prop_garbage,0.688897312971199
+Coroner,reporting_type,spearman,TRUE,2709,z_prop_overd_unspec,z_philips_cstd,0.5097081076314787
+Coroner,reporting_type,spearman,TRUE,2709,z_prop_overd_unspec,z_RI_cluster,-0.07273531753786275
+Coroner,reporting_type,spearman,TRUE,2709,z_prop_overd_unspec,z_prop_garbage,-0.007897200707117545
+Coroner,reporting_type,spearman,TRUE,2709,z_philips_cstd,z_RI_cluster,-0.2154861216640316
+Coroner,reporting_type,spearman,TRUE,2709,z_philips_cstd,z_prop_garbage,-0.0507183674032575
+Coroner,reporting_type,spearman,TRUE,2709,z_RI_cluster,z_prop_garbage,0.6818938827378946
+Medical Examiner,reporting_type,pearson,TRUE,2695,z_prop_overd_unspec,z_philips_cstd,0.281911923218393
+Medical Examiner,reporting_type,pearson,TRUE,2695,z_prop_overd_unspec,z_RI_cluster,-0.06990123067568244
+Medical Examiner,reporting_type,pearson,TRUE,2695,z_prop_overd_unspec,z_prop_garbage,-0.13088143930742285
+Medical Examiner,reporting_type,pearson,TRUE,2695,z_philips_cstd,z_RI_cluster,-0.3469330943305743
+Medical Examiner,reporting_type,pearson,TRUE,2695,z_philips_cstd,z_prop_garbage,-0.2693129125852961
+Medical Examiner,reporting_type,pearson,TRUE,2695,z_RI_cluster,z_prop_garbage,0.5906792206656339
+Medical Examiner,reporting_type,spearman,TRUE,2695,z_prop_overd_unspec,z_philips_cstd,0.34521602212645763
+Medical Examiner,reporting_type,spearman,TRUE,2695,z_prop_overd_unspec,z_RI_cluster,-0.10806302129248214
+Medical Examiner,reporting_type,spearman,TRUE,2695,z_prop_overd_unspec,z_prop_garbage,-0.20713320493590437
+Medical Examiner,reporting_type,spearman,TRUE,2695,z_philips_cstd,z_RI_cluster,-0.3840869977001548
+Medical Examiner,reporting_type,spearman,TRUE,2695,z_philips_cstd,z_prop_garbage,-0.16428504665622082
+Medical Examiner,reporting_type,spearman,TRUE,2695,z_RI_cluster,z_prop_garbage,0.6015357240932692
+Other County Official,reporting_type,pearson,TRUE,616,z_prop_overd_unspec,z_philips_cstd,0.3812695587245468
+Other County Official,reporting_type,pearson,TRUE,616,z_prop_overd_unspec,z_RI_cluster,-0.18188307146912708
+Other County Official,reporting_type,pearson,TRUE,616,z_prop_overd_unspec,z_prop_garbage,-0.06642299431524187
+Other County Official,reporting_type,pearson,TRUE,616,z_philips_cstd,z_RI_cluster,-0.17075645333895456
+Other County Official,reporting_type,pearson,TRUE,616,z_philips_cstd,z_prop_garbage,-0.03915243249849238
+Other County Official,reporting_type,pearson,TRUE,616,z_RI_cluster,z_prop_garbage,0.5633583285302755
+Other County Official,reporting_type,spearman,TRUE,616,z_prop_overd_unspec,z_philips_cstd,0.3785067457517448
+Other County Official,reporting_type,spearman,TRUE,616,z_prop_overd_unspec,z_RI_cluster,-0.17212036955740845
+Other County Official,reporting_type,spearman,TRUE,616,z_prop_overd_unspec,z_prop_garbage,-0.07479883951967296
+Other County Official,reporting_type,spearman,TRUE,616,z_philips_cstd,z_RI_cluster,-0.14362620733471412
+Other County Official,reporting_type,spearman,TRUE,616,z_philips_cstd,z_prop_garbage,0.056568549823444336
+Other County Official,reporting_type,spearman,TRUE,616,z_RI_cluster,z_prop_garbage,0.6335195865994601
+Coroner,reporting_type,pearson,FALSE,2709,z_prop_overd_unspec,z_philips_cstd,0.5009418686202947
+Coroner,reporting_type,pearson,FALSE,2709,z_prop_overd_unspec,z_RI_cluster,-0.004883714344667077
+Coroner,reporting_type,pearson,FALSE,2709,z_prop_overd_unspec,z_prop_garbage,0.01138900815757597
+Coroner,reporting_type,pearson,FALSE,2709,z_philips_cstd,z_RI_cluster,-0.18533839379633427
+Coroner,reporting_type,pearson,FALSE,2709,z_philips_cstd,z_prop_garbage,-0.15543545008336357
+Coroner,reporting_type,pearson,FALSE,2709,z_RI_cluster,z_prop_garbage,0.6798786370114269
+Coroner,reporting_type,spearman,FALSE,2709,z_prop_overd_unspec,z_philips_cstd,0.5330192365632375
+Coroner,reporting_type,spearman,FALSE,2709,z_prop_overd_unspec,z_RI_cluster,-0.037249003083558635
+Coroner,reporting_type,spearman,FALSE,2709,z_prop_overd_unspec,z_prop_garbage,-0.003060380108216871
+Coroner,reporting_type,spearman,FALSE,2709,z_philips_cstd,z_RI_cluster,-0.2205797191622917
+Coroner,reporting_type,spearman,FALSE,2709,z_philips_cstd,z_prop_garbage,-0.11143409367193575
+Coroner,reporting_type,spearman,FALSE,2709,z_RI_cluster,z_prop_garbage,0.6748486932783371
+Medical Examiner,reporting_type,pearson,FALSE,2695,z_prop_overd_unspec,z_philips_cstd,0.3623075152773451
+Medical Examiner,reporting_type,pearson,FALSE,2695,z_prop_overd_unspec,z_RI_cluster,-0.08801775202041302
+Medical Examiner,reporting_type,pearson,FALSE,2695,z_prop_overd_unspec,z_prop_garbage,-0.17924844101588946
+Medical Examiner,reporting_type,pearson,FALSE,2695,z_philips_cstd,z_RI_cluster,-0.3373659895264813
+Medical Examiner,reporting_type,pearson,FALSE,2695,z_philips_cstd,z_prop_garbage,-0.3130906798865514
+Medical Examiner,reporting_type,pearson,FALSE,2695,z_RI_cluster,z_prop_garbage,0.5788723247866959
+Medical Examiner,reporting_type,spearman,FALSE,2695,z_prop_overd_unspec,z_philips_cstd,0.42092022760619924
+Medical Examiner,reporting_type,spearman,FALSE,2695,z_prop_overd_unspec,z_RI_cluster,-0.1442308825668152
+Medical Examiner,reporting_type,spearman,FALSE,2695,z_prop_overd_unspec,z_prop_garbage,-0.22453458757392863
+Medical Examiner,reporting_type,spearman,FALSE,2695,z_philips_cstd,z_RI_cluster,-0.37806314797447654
+Medical Examiner,reporting_type,spearman,FALSE,2695,z_philips_cstd,z_prop_garbage,-0.23765626439167423
+Medical Examiner,reporting_type,spearman,FALSE,2695,z_RI_cluster,z_prop_garbage,0.5655686072325403
+Other County Official,reporting_type,pearson,FALSE,616,z_prop_overd_unspec,z_philips_cstd,0.43339985562149674
+Other County Official,reporting_type,pearson,FALSE,616,z_prop_overd_unspec,z_RI_cluster,-0.06916264473760263
+Other County Official,reporting_type,pearson,FALSE,616,z_prop_overd_unspec,z_prop_garbage,-0.14064773384337934
+Other County Official,reporting_type,pearson,FALSE,616,z_philips_cstd,z_RI_cluster,-0.03173565606108117
+Other County Official,reporting_type,pearson,FALSE,616,z_philips_cstd,z_prop_garbage,-0.14146141023361541
+Other County Official,reporting_type,pearson,FALSE,616,z_RI_cluster,z_prop_garbage,0.6092542275817652
+Other County Official,reporting_type,spearman,FALSE,616,z_prop_overd_unspec,z_philips_cstd,0.45042450190433886
+Other County Official,reporting_type,spearman,FALSE,616,z_prop_overd_unspec,z_RI_cluster,-0.06697673765127281
+Other County Official,reporting_type,spearman,FALSE,616,z_prop_overd_unspec,z_prop_garbage,-0.1195778003300666
+Other County Official,reporting_type,spearman,FALSE,616,z_philips_cstd,z_RI_cluster,-0.05630861212946045
+Other County Official,reporting_type,spearman,FALSE,616,z_philips_cstd,z_prop_garbage,-0.046051248826281435
+Other County Official,reporting_type,spearman,FALSE,616,z_RI_cluster,z_prop_garbage,0.6282857317406869

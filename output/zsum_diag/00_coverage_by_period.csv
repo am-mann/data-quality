@@ -1,0 +1,5 @@
+period,clusters_membership,clusters_from_dq,clusters_from_metrics,clusters_ready,clusters_missing_dq,clusters_missing_ph
+1999_2005,1589,1589,1590,1589,0,0
+2006_2012,1615,NA,1616,0,1615,0
+2013_2019,1702,NA,1703,0,1702,0
+2020_2022,1114,NA,1115,0,1114,0
