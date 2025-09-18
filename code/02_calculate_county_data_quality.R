@@ -27,7 +27,7 @@
 
 suppressPackageStartupMessages({
     library(dplyr); library(tidyr); library(readr); library(stringr)
-    library(purrr); library(Matrix); library(here); library(binom)
+    library(purrr); library(Matrix); library(here); library(binom); library(arrow)
 })
 
 PARALLELIZE <- TRUE
@@ -331,5 +331,8 @@ if (WRITE_ONE_CSV) {
     message("Rows written to dataset dir: ", WRITE_DATASET_DIR)
 }
 
+BASE_DIR = Path("/Users/amymann/Documents/Data Quality Project/data/parquet")
+
 
 # read_parquet(here("data_private/mcod_sample/mcod_1999.parquet"))
+read_parquet("/Users/amymann/Documents/Data Quality Project/data/parquet/mort2020.parquet")
