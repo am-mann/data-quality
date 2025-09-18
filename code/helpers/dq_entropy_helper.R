@@ -1,12 +1,19 @@
-# ───────────────── dq_entropy_helper.R — Foreman bins + RI (county×year) ─────────────────
+# ───────────────── dq_entropy_helper.R — Foreman bins + RI (+ JSD) (county×year) ─────────────────
 #
 # Outputs (county×year):
-#   total, DQ_overall, RI, RI_post_only, N_garbage
-# ──────────────────────────────────────────────────────────────────────────────────────────
+#   total, DQ_overall, RI, RI_post_only, RI_jsd, N_garbage
+# Notes:
+#   • Posterior (glmnet) uses: contributing causes + age dummies + sex dummies (M/F)
+#   • Prior uses: age×sex frequencies from training rows (Dirichlet-smoothed)
+#   • RI = mean over garbage rows of KL(P || Q) / log(k_cand)   (clipped to [0,1])
+#   • RI_post_only = 1 - mean( H(P_tau) / log(k_cand) )         (clipped to [0,1]); P_tau = temp-scaled posterior
+#   • RI_jsd = mean( JSD(P, Q) / log 2 )                        (clipped to [0,1]); symmetric & bounded
+#   • Tau (DQ_POST_TAU) behaves like temperature: >1 sharpens, <1 flattens (see comments below)
+# ────────────────────────────────────────────────────────────────────────────────────────────────
 
 suppressPackageStartupMessages({
     library(dplyr); library(tidyr); library(readr); library(stringr)
-    library(purrr); library(Matrix)
+    library(purrr); library(Matrix); library(tibble)
 })
 
 # ------- Options & helpers -------
@@ -23,12 +30,12 @@ suppressPackageStartupMessages({
 .lmr_default              <- function() as.numeric(getOption("DQ_LAMBDA_MIN_RATIO", 0.05))
 
 # NEW knobs (safe defaults)
-.alpha_default            <- function() as.numeric(getOption("DQ_ALPHA", 0.7))           # sparsity 0..1
-.lambda_choice_default    <- function() as.character(getOption("DQ_LAMBDA_CHOICE","lambda.min")) # "lambda.min"|"lambda.1se"
-.tau_default              <- function() as.numeric(getOption("DQ_POST_TAU", 0.75))       # <1 sharpens metrics-only
-.min_train_support_def    <- function() as.integer(getOption("DQ_MIN_TRAIN_SUPPORT", 20))# prune low-support targets
+.alpha_default            <- function() as.numeric(getOption("DQ_ALPHA", 0.7))                 # glmnet sparsity 0..1
+.lambda_choice_default    <- function() as.character(getOption("DQ_LAMBDA_CHOICE","lambda.min"))# "lambda.min"|"lambda.1se"
+.tau_default              <- function() as.numeric(getOption("DQ_POST_TAU", 0.75))             # temperature for entropy only
+.min_train_support_def    <- function() as.integer(getOption("DQ_MIN_TRAIN_SUPPORT", 20))      # prune low-support targets
 .max_k_cand_def           <- function() { x <- getOption("DQ_MAX_K_CAND", NA_integer_); if (is.na(x)) NA_integer_ else as.integer(x) }
-.target_per_class_def     <- function() as.integer(getOption("DQ_TARGET_PER_CLASS", 1500)) # balance training
+.target_per_class_def     <- function() as.integer(getOption("DQ_TARGET_PER_CLASS", 1500))     # balance training per class
 
 `%||%`        <- function(a,b) if (!is.null(a)) a else b
 canonical_icd <- function(x) stringr::str_remove_all(stringr::str_to_upper(x), "[^A-Z0-9]")
@@ -223,20 +230,19 @@ compute_entropy_county_foreman <- function(
         TRUE ~ NA_character_
     )
     
-    # Sparse feature builder: record_* counts (+ optional age dummies)
+    # ---------- Sparse feature builder: record_* counts + age dummies + sex dummies ----------
     build_X_for_rows <- function(keep_idx) {
         rec_cols_local <- intersect(paste0("record_", 1:20), names(dat))
         n_keep <- length(keep_idx)
         
-        # contributing cause (USCOD-bin) *COUNTS* (no 0/1 override)
+        # contributing-cause counts by Foreman bin
         if (n_keep == 0 || length(rec_cols_local) == 0) {
             X_cc <- Matrix(0, nrow = n_keep, ncol = 0, sparse = TRUE)
             colnames(X_cc) <- character(0)
         } else {
             bin_to_j <- new.env(parent = emptyenv())
             j_to_bin <- character(0)
-            i_vec <- integer(0)
-            j_vec <- integer(0)
+            i_vec <- integer(0); j_vec <- integer(0)
             
             for (col in rec_cols_local) {
                 v <- dat[[col]][keep_idx]
@@ -253,27 +259,23 @@ compute_entropy_county_foreman <- function(
                     for (k2 in seq_along(new_bins)) assign(new_bins[k2], start + k2, envir = bin_to_j)
                 }
                 j_sub <- unname(vapply(b_sub, function(x) get(x, envir = bin_to_j, inherits = FALSE), 1L))
-                i_sub <- which(ok)  # duplicates across columns accumulate -> counts
+                i_sub <- which(ok)  # duplicates across columns accumulate → counts
                 
                 i_vec <- c(i_vec, i_sub)
                 j_vec <- c(j_vec, j_sub)
-                
-                rm(v, b, ok, b_sub, j_sub, i_sub); gc(FALSE)
             }
             
             if (length(i_vec)) {
                 X_cc <- sparseMatrix(i = i_vec, j = j_vec, x = 1,
                                      dims = c(n_keep, length(j_to_bin)),
                                      dimnames = list(NULL, paste0("cc_", j_to_bin)))
-                # IMPORTANT: do NOT force X_cc@x <- 1; duplicates already sum to counts
-                # Matrix::sparseMatrix sums duplicates by default.
             } else {
                 X_cc <- Matrix(0, nrow = n_keep, ncol = 0, sparse = TRUE)
                 colnames(X_cc) <- character(0)
             }
         }
         
-        # Optional age dummies (help classification; not used in prior construction)
+        # age dummies (either age_years cut or ager27)
         age_mm <- Matrix(0, nrow = n_keep, ncol = 0, sparse = TRUE)
         if ("age_years" %in% names(dat) && any(!is.na(dat$age_years[keep_idx]))) {
             age_keep   <- suppressWarnings(as.numeric(dat$age_years[keep_idx]))
@@ -281,19 +283,38 @@ compute_entropy_county_foreman <- function(
             levs <- levels(age_bucket); P <- length(levs)
             if (P > 0) {
                 ok <- !is.na(age_bucket); i <- which(ok); j <- match(age_bucket[ok], levs)
-                age_mm <- sparseMatrix(i = i, j = j, x = 1, dims = c(n_keep, P), dimnames = list(NULL, paste0("age_", levs)))
+                age_mm <- sparseMatrix(i = i, j = j, x = 1, dims = c(n_keep, P),
+                                       dimnames = list(NULL, paste0("age_", levs)))
             }
         } else if ("ager27" %in% names(dat) && any(!is.na(dat$ager27[keep_idx]))) {
-            a <- suppressWarnings(as.integer(dat$ager27[keep_idx])); ok <- !is.na(a) & a >= 1 & a <= 27
+            a <- suppressWarnings(as.integer(dat$ager27[keep_idx]))
+            ok <- !is.na(a) & a >= 1 & a <= 27
             if (any(ok)) {
                 i <- which(ok); j <- a[ok]
-                age_mm <- sparseMatrix(i = i, j = j, x = 1, dims = c(n_keep, 27), dimnames = list(NULL, paste0("ager27_", 1:27)))
+                age_mm <- sparseMatrix(i = i, j = j, x = 1, dims = c(n_keep, 27),
+                                       dimnames = list(NULL, paste0("ager27_", 1:27)))
             }
         }
         
-        if (ncol(age_mm) > 0L && ncol(X_cc) > 0L) cbind(X_cc, age_mm)
-        else if (ncol(age_mm) > 0L) age_mm
-        else X_cc
+        # NEW: sex dummies (M/F)
+        sex_mm <- Matrix(0, nrow = n_keep, ncol = 0, sparse = TRUE)
+        if ("sex" %in% names(dat) && any(!is.na(dat$sex[keep_idx]))) {
+            sx <- toupper(as.character(dat$sex[keep_idx]))
+            sx[!(sx %in% c("M","F"))] <- NA
+            levs <- c("M","F")
+            ok <- !is.na(sx)
+            if (any(ok)) {
+                i <- which(ok); j <- match(sx[ok], levs)
+                sex_mm <- sparseMatrix(i = i, j = j, x = 1, dims = c(n_keep, length(levs)),
+                                       dimnames = list(NULL, paste0("sex_", levs)))
+            }
+        }
+        
+        # final bind
+        parts <- list(X_cc, age_mm, sex_mm)
+        parts <- parts[vapply(parts, ncol, 1L) > 0]
+        if (length(parts) == 0) Matrix(0, nrow = n_keep, ncol = 0, sparse = TRUE)
+        else if (length(parts) == 1) parts[[1]] else do.call(cbind, parts)
     }
     
     # Prior constructor from TRAINING rows by age×sex (Dirichlet-smoothed)
@@ -302,22 +323,22 @@ compute_entropy_county_foreman <- function(
         age_tr    <- age_bucket_vec[tr_idx2]
         sex_tr    <- sex_vec[tr_idx2]
         
-        df <- tibble::tibble(
+        df <- tibble(
             cls = cls_train,
             age = age_tr,
             sex = sex_tr
         ) %>%
-            dplyr::filter(!is.na(cls), cls %in% classes_all) %>%
-            dplyr::mutate(
+            filter(!is.na(cls), cls %in% classes_all) %>%
+            mutate(
                 age = ifelse(is.na(age), "_NA_", age),
                 sex = ifelse(is.na(sex), "_NA_", sex)
             )
         
         tabs <- list(
-            by_age_sex = df %>% dplyr::count(cls, age, sex, name = "k"),
-            by_age     = df %>% dplyr::count(cls, age, name = "k"),
-            by_sex     = df %>% dplyr::count(cls, sex, name = "k"),
-            by_all     = df %>% dplyr::count(cls, name = "k")
+            by_age_sex = df %>% count(cls, age, sex, name = "k"),
+            by_age     = df %>% count(cls, age, name = "k"),
+            by_sex     = df %>% count(cls, sex, name = "k"),
+            by_all     = df %>% count(cls, name = "k")
         )
         
         smoothed_norm <- function(named_counts) {
@@ -331,13 +352,13 @@ compute_entropy_county_foreman <- function(
             a <- ifelse(is.na(age_key), "_NA_", age_key)
             s <- ifelse(is.na(sex_key), "_NA_", sex_key)
             
-            vec <- tabs$by_age_sex %>% dplyr::filter(age == a, sex == s)
+            vec <- tabs$by_age_sex %>% filter(age == a, sex == s)
             if (nrow(vec)) return(smoothed_norm(stats::setNames(vec$k, vec$cls)))
             
-            vec <- tabs$by_age %>% dplyr::filter(age == a)
+            vec <- tabs$by_age %>% filter(age == a)
             if (nrow(vec)) return(smoothed_norm(stats::setNames(vec$k, vec$cls)))
             
-            vec <- tabs$by_sex %>% dplyr::filter(sex == s)
+            vec <- tabs$by_sex %>% filter(sex == s)
             if (nrow(vec)) return(smoothed_norm(stats::setNames(vec$k, vec$cls)))
             
             if (nrow(tabs$by_all)) return(smoothed_norm(stats::setNames(tabs$by_all$k, tabs$by_all$cls)))
@@ -371,14 +392,14 @@ compute_entropy_county_foreman <- function(
         n_tr <- length(tr_all); n_te <- length(te_idx)
         if (n_tr < 30) stop(sprintf("No-fallback: g=%s too few training rows (n_tr=%d < 30).", g, n_tr))
         
-        # Compute per-class counts on pooled training
+        # per-class counts on pooled training
         cls_counts_all <- table(dat$ubin[tr_all])
         
         # Minimum per-class present for model viability
         ok_classes <- names(cls_counts_all)[cls_counts_all >= minpc]
         if (length(ok_classes) < 2) stop(sprintf("No-fallback: g=%s has <2 classes with >=%d rows.", g, minpc))
         
-        # --- NEW: prune by minimum pooled support + optional top-k cap
+        # prune by minimum pooled support + optional top-k cap
         min_support <- .min_train_support_def()
         keep_cands  <- names(cls_counts_all)[cls_counts_all >= min_support]
         ok_classes  <- intersect(ok_classes, keep_cands)
@@ -392,7 +413,7 @@ compute_entropy_county_foreman <- function(
         if (length(ok_classes) < 2) stop(sprintf("No-fallback: g=%s <2 viable classes after pruning.", g))
         classes_all <- sort(intersect(classes_all, ok_classes))
         
-        # --- Build feature matrices on balanced training+test subset
+        # Build feature matrices on balanced training+test subset
         keep_idx <- sort(unique(c(tr_all, te_idx)))
         X_local  <- build_X_for_rows(keep_idx)
         
@@ -400,7 +421,7 @@ compute_entropy_county_foreman <- function(
         nz <- if (ncol(X_local)) which(Matrix::colSums(X_local[match(tr_all, keep_idx), , drop = FALSE]) > 0) else integer(0)
         if (!length(nz)) stop(sprintf("No-fallback: g=%s empty feature matrix after filtering.", g))
         
-        # --- NEW: class-balanced training (undersample/oversample toward target)
+        # class-balanced training (undersample/oversample toward target)
         target_per_class <- .target_per_class_def()
         tr_by_class <- split(tr_all, dat$ubin[tr_all])
         take <- unlist(lapply(tr_by_class, function(ix) {
@@ -423,12 +444,12 @@ compute_entropy_county_foreman <- function(
                             g, length(tr_idx2), n_te, length(levels(y_tr)), msg))
         }
         
-        # --- NEW: elastic net & lambda choice
+        # elastic net & lambda choice
         fit <- suppressWarnings(tryCatch(
             glmnet::cv.glmnet(
                 X_tr, y_tr,
                 family = "multinomial",
-                alpha  = .alpha_default(),                 # NEW
+                alpha  = .alpha_default(),
                 type.multinomial = "grouped",
                 nfolds = .cv_folds_default(),
                 nlambda = .nlambda_default(),
@@ -464,107 +485,126 @@ compute_entropy_county_foreman <- function(
         for (i in seq_along(te_idx)) prior_mat[i, ] <- prior_getter(age_te[i], sex_te[i])
         colnames(prior_mat) <- classes_all
         
-        # ----- Aggregate predicted mass to county×year×bin for DQ_overall -----
+        # ---- Aggregate predicted mass to county×year×bin for DQ_overall ----
         te_meta <- dat[te_idx, c(county_var, "year")]; colnames(te_meta) <- c("cnty", "year")
         cls_summaries <- lapply(seq_along(classes_all), function(j) {
-            tibble::tibble(cnty = te_meta$cnty, year = te_meta$year, k = probs[, j]) %>%
-                dplyr::group_by(cnty, year) %>% dplyr::summarise(k = sum(k), .groups = "drop") %>%
-                dplyr::mutate(bin = classes_all[j])
+            tibble(cnty = te_meta$cnty, year = te_meta$year, k = probs[, j]) %>%
+                group_by(cnty, year) %>% summarise(k = sum(k), .groups = "drop") %>%
+                mutate(bin = classes_all[j])
         })
-        prob_counts_list[[length(prob_counts_list)+1L]] <- dplyr::bind_rows(cls_summaries)
+        prob_counts_list[[length(prob_counts_list)+1L]] <- bind_rows(cls_summaries)
         
-        # ----- Per-record metrics: KL uses original probs; entropy uses SHARPENED probs -----
+        # ====================== Per-record metrics (KL, entropy, JSD) ======================
         eps <- .Machine$double.eps
-        # metrics-only sharpening
+        
+        # (A) Posterior entropy for RI_post_only (optionally temperature-scaled)
+        #     tau > 1 → sharpen (lower entropy); tau < 1 → flatten (higher entropy)
         probs_for_metrics <- probs
         tau <- .tau_default()
         if (!is.na(tau) && tau > 0 && tau != 1) {
             probs_for_metrics <- probs_for_metrics ^ tau
             probs_for_metrics <- probs_for_metrics / rowSums(probs_for_metrics)
         }
-        
         H_post  <- rowSums(-probs_for_metrics * log(pmax(probs_for_metrics,  eps)))
         k_cand  <- length(classes_all)
         Hnorm_gc_by_kcand <- if (k_cand > 1) H_post / log(k_cand) else rep(0, length(H_post))
-        # KL against prior (do NOT sharpen)
-        KL_raw_vec  <- rowSums(probs * (log(pmax(probs, eps)) - log(pmax(prior_mat, eps))))
+        
+        # (B) KL(P || Q) for RI (no temperature)
+        P0 <- pmax(probs,     eps); P0 <- P0 / rowSums(P0)
+        Q0 <- pmax(prior_mat, eps); Q0 <- Q0 / rowSums(Q0)
+        KL_raw_vec  <- rowSums(P0 * (log(P0) - log(Q0)))
         KL_norm_vec <- if (k_cand > 1) KL_raw_vec / log(k_cand) else rep(0, length(KL_raw_vec))
         
-        metr <- tibble::tibble(
+        # (C) NEW: Jensen–Shannon divergence (bounded); normalize to [0,1] by log(2)
+        M0 <- 0.5 * (P0 + Q0)
+        KL_PM <- rowSums(P0 * (log(P0) - log(pmax(M0, eps))))
+        KL_QM <- rowSums(Q0 * (log(Q0) - log(pmax(M0, eps))))
+        JSD_vec <- 0.5 * (KL_PM + KL_QM)               # nats, bounded by log 2
+        JSD_norm_vec <- JSD_vec / log(2)               # [0,1]
+        
+        metr <- tibble(
             cnty = te_meta$cnty, year = te_meta$year,
             sum_KL_norm           = KL_norm_vec,
             sum_Hnorm_gc_by_kcand = Hnorm_gc_by_kcand,
+            sum_JSD_norm          = JSD_norm_vec,
             one = 1L
         ) %>%
-            dplyr::group_by(cnty, year) %>%
-            dplyr::summarise(
+            group_by(cnty, year) %>%
+            summarise(
                 sum_KL_norm           = sum(sum_KL_norm,           na.rm = TRUE),
                 sum_Hnorm_gc_by_kcand = sum(sum_Hnorm_gc_by_kcand, na.rm = TRUE),
+                sum_JSD_norm          = sum(sum_JSD_norm,          na.rm = TRUE),
                 N_garbage             = sum(one),
                 .groups = "drop"
             )
         metrics_list[[length(metrics_list)+1L]] <- metr
     } # end g loop
     
-    prob_counts_all <- if (length(prob_counts_list)) dplyr::bind_rows(prob_counts_list) else
-        tibble::tibble(cnty = character(), year = numeric(), k = numeric(), bin = character())
+    prob_counts_all <- if (length(prob_counts_list)) bind_rows(prob_counts_list) else
+        tibble(cnty = character(), year = numeric(), k = numeric(), bin = character())
     
     # Final county×year×bin distribution = observed valid UCOD + redistributed garbage mass
-    cty_year_bin <- dplyr::bind_rows(
-        base_counts_all %>% dplyr::select(cnty, year, bin, k),
-        prob_counts_all  %>% dplyr::select(cnty, year, bin, k)
+    cty_year_bin <- bind_rows(
+        base_counts_all %>% select(cnty, year, bin, k),
+        prob_counts_all  %>% select(cnty, year, bin, k)
     ) %>%
-        dplyr::group_by(cnty, year, bin) %>%
-        dplyr::summarise(k = sum(k), .groups = "drop")
+        group_by(cnty, year, bin) %>%
+        summarise(k = sum(k), .groups = "drop")
     
     out_aggregate <- cty_year_bin %>%
-        dplyr::group_by(cnty, year) %>%
-        dplyr::summarise(
+        group_by(cnty, year) %>%
+        summarise(
             total      = sum(k),
-            DQ_overall = { p <- k / sum(k); .shannon_H(p) / log(K) },
+            DQ_overall = { p <- k / sum(k); .shannon_H(p) / log(K) },  # note: normalized by global K (valid bins in dictionaries)
             .groups = "drop"
         ) %>%
-        dplyr::mutate(DQ_overall = pmax(0, pmin(1, DQ_overall)))
+        mutate(DQ_overall = pmax(0, pmin(1, DQ_overall)))
     
-    counts_cy <- dat %>% dplyr::count(.data[[county_var]], year, name = "N_total", .drop = FALSE)
-    counts_cy2 <- counts_cy %>% dplyr::rename(cnty = dplyr::all_of(county_var))
+    counts_cy <- dat %>% count(.data[[county_var]], year, name = "N_total", .drop = FALSE)
+    counts_cy2 <- counts_cy %>% rename(cnty = dplyr::all_of(county_var))
     
     metrics_sum <- if (length(metrics_list)) {
-        dplyr::bind_rows(metrics_list) %>%
-            dplyr::group_by(cnty, year) %>%
-            dplyr::summarise(
+        bind_rows(metrics_list) %>%
+            group_by(cnty, year) %>%
+            summarise(
                 sum_KL_norm           = sum(sum_KL_norm,           na.rm = TRUE),
                 sum_Hnorm_gc_by_kcand = sum(sum_Hnorm_gc_by_kcand, na.rm = TRUE),
+                sum_JSD_norm          = sum(sum_JSD_norm,          na.rm = TRUE),
                 N_garbage             = sum(N_garbage),
                 .groups = "drop"
             )
     } else {
-        tibble::tibble(cnty = character(), year = numeric(),
-                       sum_KL_norm = numeric(), sum_Hnorm_gc_by_kcand = numeric(),
-                       N_garbage = integer())
+        tibble(
+            cnty = character(), year = numeric(),
+            sum_KL_norm = numeric(), sum_Hnorm_gc_by_kcand = numeric(),
+            sum_JSD_norm = numeric(),
+            N_garbage = integer()
+        )
     }
     
     out_perrecord <- counts_cy2 %>%
-        dplyr::left_join(metrics_sum,  by = c("cnty", "year")) %>%
-        dplyr::mutate(
-            across(c(sum_KL_norm, sum_Hnorm_gc_by_kcand), ~ dplyr::coalesce(.x, 0)),
-            N_garbage  = dplyr::coalesce(N_garbage, 0L),
-            RI         = dplyr::if_else(N_garbage > 0, sum_KL_norm / N_garbage, NA_real_),
-            RI_post_only = dplyr::if_else(N_garbage > 0, 1 - (sum_Hnorm_gc_by_kcand / N_garbage), NA_real_)
+        left_join(metrics_sum,  by = c("cnty", "year")) %>%
+        mutate(
+            across(c(sum_KL_norm, sum_Hnorm_gc_by_kcand, sum_JSD_norm), ~ dplyr::coalesce(.x, 0)),
+            N_garbage   = dplyr::coalesce(N_garbage, 0L),
+            RI          = dplyr::if_else(N_garbage > 0, sum_KL_norm / N_garbage, NA_real_),
+            RI_post_only= dplyr::if_else(N_garbage > 0, 1 - (sum_Hnorm_gc_by_kcand / N_garbage), NA_real_),
+            RI_jsd      = dplyr::if_else(N_garbage > 0, sum_JSD_norm / N_garbage, NA_real_)
         ) %>%
-        dplyr::mutate(
-            RI           = ifelse(is.na(RI), RI, pmax(0, pmin(1, RI))),
-            RI_post_only = ifelse(is.na(RI_post_only), RI_post_only, pmax(0, pmin(1, RI_post_only)))
+        mutate(
+            RI          = ifelse(is.na(RI),          RI,          pmax(0, pmin(1, RI))),
+            RI_post_only= ifelse(is.na(RI_post_only),RI_post_only,pmax(0, pmin(1, RI_post_only))),
+            RI_jsd      = ifelse(is.na(RI_jsd),      RI_jsd,      pmax(0, pmin(1, RI_jsd)))
         ) %>%
-        dplyr::select(cnty, year, RI, RI_post_only, N_garbage)
+        select(cnty, year, RI, RI_post_only, RI_jsd, N_garbage)
     
     out <- out_aggregate %>%
-        dplyr::left_join(out_perrecord, by = c("cnty", "year")) %>%
-        dplyr::rename(!!county_var := cnty)
+        left_join(out_perrecord, by = c("cnty", "year")) %>%
+        rename(!!county_var := cnty)
     
-    # Optional probability diagnostics hook (leave empty unless you add diag rows)
+    # Optional probability diagnostics hook (currently empty)
     if (length(diag_rows)) {
-        diag_df <- dplyr::bind_rows(diag_rows)
+        diag_df <- bind_rows(diag_rows)
         if (!is.null(diag_dir)) {
             if (!dir.exists(diag_dir)) dir.create(diag_dir, recursive = TRUE, showWarnings = FALSE)
             ts <- format(Sys.time(), "%Y%m%d_%H%M%S")
@@ -577,4 +617,5 @@ compute_entropy_county_foreman <- function(
     
     out
 }
+
 
