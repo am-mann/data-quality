@@ -311,13 +311,8 @@ if (!is.null(years_wanted)) {
 if (PARALLELIZE) {
     suppressPackageStartupMessages({ library(future); library(furrr) })
     plan(multisession, workers = max(1, N_WORKERS))
-    county_year_all <- furrr::future_map_dfr(
-        parquet_files,
-        summarise_year_file,
-        .options = furrr::furrr_options(
-            seed = TRUE,
-            packages = c("arrow","tidyr","Matrix","glmnet","stringr","readr","dplyr")
-        )
+    county_year_all <- purrr::map_dfr(parquet_files, summarise_year_file)
+}
     )
     plan(sequential)
 } else {

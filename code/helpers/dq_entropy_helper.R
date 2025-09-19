@@ -1,44 +1,45 @@
-    # ───────────────── dq_entropy_helper.R — Foreman bins + RI (+ JSD)
-    #      g3/g8/g9 fully excluded; NO prior-only fallback;
-    #      CC-presence features, robust quartiles, training backoff, diagnostics
-    #      Adds pct of certs that are {g1,g2,g4,g5,g6,g7} by county×year
-    # ─────────────────────────────────────────────────────────────────────────
-    
-    suppressPackageStartupMessages({
-        library(dplyr); library(tidyr); library(readr); library(stringr)
-        library(purrr); library(Matrix); library(tibble); library(jsonlite)
-    })
+# ───────────────── dq_entropy_helper.R — Foreman bins + RI (+ JSD)
+#      g3/g8/g9 fully excluded; NO prior-only fallback;
+#      CC-presence features, robust quartiles, training backoff, diagnostics
+#      Adds pct of certs that are {g1,g2,g4,g5,g6,g7} by county×year
+# ─────────────────────────────────────────────────────────────────────────
+
+suppressPackageStartupMessages({
+    library(dplyr); library(tidyr); library(readr); library(stringr)
+    library(purrr); library(Matrix); library(tibble); library(jsonlite)
+})
 
 # ====== Recommended knobs (edit as needed) ======
 # Per-bin strat modes (choices: "age_sex", "age_only", "sex_only", "none")
-# (We no longer reference g3/g8/g9 anywhere; they’re excluded below.)
+# No longer reference g3/g8/g9 anywhere, they're excluded
 options(DQ_STRAT_MODE_BY_BIN = list())
 # Rarity & capacity
 options(
     DQ_MIN_PER_CLASS      = 8L,
     DQ_MIN_TRAIN_SUPPORT  = 10L,
     DQ_TARGET_PER_CLASS   = 3000,
-    DQ_POOL_YEARS         = 3L  
+    DQ_POOL_YEARS         = 3L
 )
 
 # ====== Option helpers ======
-.pool_years_default       <- function() as.integer(getOption("DQ_POOL_YEARS", 20L))
+.pool_years_default       <- function() as.integer(getOption("DQ_POOL_YEARS", 3L))
 .dirichlet_prior_default  <- function() as.numeric(getOption("DQ_DIRICHLET_PRIOR", 0.25))
-.min_per_class_default    <- function() as.integer(getOption("DQ_MIN_PER_CLASS", 10L))
+.min_per_class_default    <- function() as.integer(getOption("DQ_MIN_PER_CLASS", 8L))
 .max_train_per_class_def  <- function() as.integer(getOption("DQ_MAX_TRAIN_PER_CLASS", 3000L))
 .seed_default             <- function() as.integer(getOption("DQ_SEED", NA_integer_))
 .verbose_default          <- function() isTRUE(getOption("DQ_VERBOSE", TRUE))
 .diag_dir_default         <- function() { x <- getOption("DQ_DIAG_DIR", NULL); if (is.character(x) && nzchar(x)) x else NULL }
 .has_glmnet               <- function() requireNamespace("glmnet", quietly = TRUE)
+# +++ NEW: detect doParallel
+.has_doParallel           <- function() requireNamespace("doParallel", quietly = TRUE)
 .cv_folds_default         <- function() as.integer(getOption("DQ_CV_FOLDS", 3L))
 .nlambda_default          <- function() as.integer(getOption("DQ_NLAMBDA", 60L))
 .lmr_default              <- function() as.numeric(getOption("DQ_LAMBDA_MIN_RATIO", 0.05))
 .alpha_default            <- function() as.numeric(getOption("DQ_ALPHA", 0.7))
 .lambda_choice_default    <- function() as.character(getOption("DQ_LAMBDA_CHOICE","lambda.min"))
 .tau_default              <- function() as.numeric(getOption("DQ_POST_TAU", 0.75))
-.min_train_support_def    <- function() as.integer(getOption("DQ_MIN_TRAIN_SUPPORT", 25L))
-.max_k_cand_def           <- function() { x <- getOption("DQ_MAX_K_CAND", 25L); if (is.na(x)) NA_integer_ else as.integer(x) }
-.target_per_class_def     <- function() as.integer(getOption("DQ_TARGET_PER_CLASS", 1500L))
+.min_train_support_def    <- function() as.integer(getOption("DQ_MIN_TRAIN_SUPPORT", 10L))
+.target_per_class_def     <- function() as.integer(getOption("DQ_TARGET_PER_CLASS", 3000L))
 
 # Per-bin stratification mode
 .strat_mode_for_bin <- function(g) {
@@ -258,7 +259,7 @@ map_icd_to_bin <- function(x, lu) {
            "age_sex" = list(
                list(age=age_key, sex=sex_key, tag="AGE_Q×SEX"),
                list(age=age_key, sex=NA,     tag="AGE_Q"),
-               list(age=NA,      sex=sex_key,tag="SEX"),
+               list(age=NA,      sex=sex_key, tag="SEX"),
                list(age=NA,      sex=NA,     tag="ALL")
            ),
            "age_only" = list(
@@ -309,12 +310,12 @@ map_icd_to_bin <- function(x, lu) {
             a <- as.character(age_key)
             v <- tabs$by_age %>% filter(age == a)
             if (nrow(v)) return(smoothed_norm(setNames(v$k, v$cls)))
-            if (nrow(tabs$by_all)) return(smoothed_norm(setNames(tabs$by_all$k, tabs$by_all$cls)))
+            if (nrow(tabs$by_all)) return(smoothed_norm(setNames(tabs$by_all$k, v$cls)))
         } else if (mode == "sex_only") {
             s <- as.character(sex_key)
             v <- tabs$by_sex %>% filter(sex == s)
             if (nrow(v)) return(smoothed_norm(setNames(v$k, v$cls)))
-            if (nrow(tabs$by_all)) return(smoothed_norm(setNames(tabs$by_all$k, tabs$by_all$cls)))
+            if (nrow(tabs$by_all)) return(smoothed_norm(setNames(tabs$by_all$k, v$cls)))
         } else { # none
             if (nrow(tabs$by_all)) return(smoothed_norm(setNames(tabs$by_all$k, tabs$by_all$cls)))
         }
@@ -342,8 +343,17 @@ compute_entropy_county_foreman <- function(
     diag_dir <- .diag_dir_default()
     diag_rows <- list(); on.exit({gc()}, add = TRUE)
     
+    # +++ NEW: register parallel backend if available
+    if (.has_doParallel()) {
+        cores <- parallel::detectCores()
+        doParallel::registerDoParallel(cores = cores)
+        if (verbose) message(sprintf("[diag] Parallel CV enabled (%d cores).", cores))
+    } else {
+        if (verbose) message("[diag] doParallel not installed; running CV in serial.")
+    }
+    
     dropped_log <- list()
-    .log_drop <- function(g, key, stage, classes_before, support_vec, kept_classes, k_cap, note = NA_character_) {
+    .log_drop <- function(g, key, stage, classes_before, support_vec, kept_classes, note = NA_character_) {
         before  <- sort(classes_before)
         kept    <- sort(kept_classes)
         dropped <- setdiff(before, kept)
@@ -354,7 +364,6 @@ compute_entropy_county_foreman <- function(
             total_candidates = length(before),
             kept_n           = length(kept),
             dropped_n        = length(dropped),
-            k_cap            = ifelse(is.na(k_cap), NA_integer_, as.integer(k_cap)),
             dropped_classes  = paste(dropped, collapse = "|"),
             kept_classes     = paste(kept, collapse = "|"),
             support_json     = as.character(jsonlite::toJSON(as.list(support_vec[before]), auto_unbox = TRUE)),
@@ -524,26 +533,17 @@ compute_entropy_county_foreman <- function(
                 
                 # Stage 1: MIN_PER_CLASS
                 ok_minpc <- names(support_vec)[support_vec >= minpc]
-                dropped_log[[length(dropped_log)+1L]] <- .log_drop(g, key, "after_minpc", classes_all_global, support_vec, ok_minpc, NA_integer_, note = lvl$tag)
+                dropped_log[[length(dropped_log)+1L]] <- .log_drop(g, key, "after_minpc", classes_all_global, support_vec, ok_minpc, note = lvl$tag)
                 if (length(ok_minpc) < 2) next
                 
                 # Stage 2: MIN_TRAIN_SUPPORT
                 min_support <- .min_train_support_def()
                 ok_support  <- names(support_vec)[support_vec >= max(minpc, min_support)]
                 ok_classes_try  <- intersect(ok_minpc, ok_support)
-                dropped_log[[length(dropped_log)+1L]] <- .log_drop(g, key, "after_support", classes_all_global, support_vec, ok_classes_try, NA_integer_, note = lvl$tag)
+                dropped_log[[length(dropped_log)+1L]] <- .log_drop(g, key, "after_support", classes_all_global, support_vec, ok_classes_try, note = lvl$tag)
                 if (length(ok_classes_try) < 2) next
                 
-                # Stage 3: top-k cap
-                k_cap <- .max_k_cand_def()
-                if (!is.na(k_cap) && length(ok_classes_try) > k_cap) {
-                    ord <- names(sort(support_vec[ok_classes_try], decreasing = TRUE))
-                    ok_classes_try <- ord[seq_len(k_cap)]
-                }
-                dropped_log[[length(dropped_log)+1L]] <- .log_drop(g, key, "after_kcap", classes_all_global, support_vec, ok_classes_try, k_cap, note = lvl$tag)
-                if (length(ok_classes_try) < 2) next
-                
-                # success at this backoff level
+                # success at this backoff level (no k-cap)
                 tr_idx    <- tr_idx_try
                 ok_classes <- sort(ok_classes_try)
                 used_tag  <- lvl$tag
@@ -553,7 +553,7 @@ compute_entropy_county_foreman <- function(
             # If training still failed, we now simply skip (no fallback)
             if (!length(tr_idx) || length(ok_classes) < 2) {
                 dropped_log[[length(dropped_log)+1L]] <- .log_drop(
-                    g, key, "skipped_stratum", classes_all_global, support_vec, ok_classes, NA_integer_,
+                    g, key, "skipped_stratum", classes_all_global, support_vec, ok_classes,
                     note = "no_backoff_succeeded"
                 )
                 next
@@ -577,7 +577,7 @@ compute_entropy_county_foreman <- function(
             tr_idx2 <- sort(unique(take))
             if (!length(tr_idx2)) {
                 dropped_log[[length(dropped_log)+1L]] <- .log_drop(g, key, "skipped_stratum",
-                                                                   classes_all_global, support_vec, ok_classes, NA_integer_,
+                                                                   classes_all_global, support_vec, ok_classes,
                                                                    note = paste0("empty_after_balancing:", used_tag))
                 next
             }
@@ -588,7 +588,7 @@ compute_entropy_county_foreman <- function(
             nz <- if (ncol(X_local)) which(Matrix::colSums(X_local[match(tr_idx2, keep_idx), , drop = FALSE]) > 0) else integer(0)
             if (!length(nz)) {
                 dropped_log[[length(dropped_log)+1L]] <- .log_drop(g, key, "skipped_stratum",
-                                                                   classes_all_global, support_vec, ok_classes, NA_integer_,
+                                                                   classes_all_global, support_vec, ok_classes,
                                                                    note = paste0("no_nz_features:", used_tag))
                 next
             }
@@ -608,13 +608,13 @@ compute_entropy_county_foreman <- function(
                     nlambda = .nlambda_default(),
                     lambda.min.ratio = .lmr_default(),
                     standardize = FALSE,
-                    parallel = FALSE
+                    parallel = .has_doParallel()   # <── parallel CV when doParallel is available
                 ),
                 error = function(e) NULL
             ))
             if (is.null(fit)) {
                 dropped_log[[length(dropped_log)+1L]] <- .log_drop(g, key, "skipped_stratum",
-                                                                   classes_all_global, support_vec, ok_classes, NA_integer_,
+                                                                   classes_all_global, support_vec, ok_classes,
                                                                    note = paste0("glmnet_fail:", used_tag))
                 next
             }
@@ -623,7 +623,7 @@ compute_entropy_county_foreman <- function(
             M_raw <- .extract_multinomial_probs(fit, X_te, ok_classes, s = lambda_choice)
             if (is.null(M_raw)) {
                 dropped_log[[length(dropped_log)+1L]] <- .log_drop(g, key, "skipped_stratum",
-                                                                   classes_all_global, support_vec, ok_classes, NA_integer_,
+                                                                   classes_all_global, support_vec, ok_classes,
                                                                    note = paste0("predict_fail:", used_tag))
                 next
             }
@@ -785,6 +785,3 @@ compute_entropy_county_foreman <- function(
     
     out
 }
-
-
-        
