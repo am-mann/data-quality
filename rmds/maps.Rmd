@@ -208,9 +208,13 @@ message("✓ Done. 4-panel maps saved to: ", output_dir)
 Map RI scores with light clustering
 ```{r}
 # ──────────────────────────────────────────────────────────────
-# Map RI with temporally-stable clusters built from Foreman-garbage counts
-#   • Clustering logic mirrors the overdose script
-#   • Robust FG count across windows; min threshold = 50 per cluster
+# Map RI and RI_post_only with temporally-stable light clusters
+#   • Clustering uses n_cert as the "garbage count" proxy
+#   • Robust min across 4 windows; min per-cluster threshold = 150
+#   • Fixed color limits:
+#        RI          = [0.2, 0.4]
+#        RI_post_only = [0.05, 0.2]
+#   • Alaska & Hawaii included via state outlines
 # ──────────────────────────────────────────────────────────────
 
 # 0) Packages & options
@@ -219,24 +223,22 @@ required <- c("sf","tigris","readr","dplyr","stringr","purrr","ggplot2",
 missing <- setdiff(required, rownames(installed.packages()))
 if (length(missing)) install.packages(missing)
 invisible(lapply(required, library, character.only = TRUE))
+
 options(tigris_use_cache = TRUE, tigris_class = "sf")
 sf::sf_use_s2(FALSE)
 
 `%||%` <- function(a, b) if (!is.null(a)) a else b
 
 # 1) Windows & inputs
-periods_list <- list(
-  "1999_2005" = 1999:2005,
-  "2006_2012" = 2006:2012,
-  "2013_2019" = 2013:2019,
-  "2020_2022" = 2020:2022
-)
-periods_vec <- names(periods_list)
+periods_vec <- c("1999_2005","2006_2012","2013_2019","2020_2022")
+shapefile_years <- c("1999_2005"=2000, "2006_2012"=2010, "2013_2019"=2019, "2020_2022"=2020)
 
-dq <- readr::read_csv(here::here("data","county_year_quality_metrics.csv"),
-                      show_col_types = FALSE) %>%
+metrics_path_gz <- here::here("data","county_year_quality_metrics.csv.gz")
+metrics_path    <- if (file.exists(metrics_path_gz)) metrics_path_gz else here::here("data","county_year_quality_metrics.csv")
+
+dq <- readr::read_csv(metrics_path, show_col_types = FALSE) %>%
   dplyr::mutate(
-    year        = as.integer(year),
+    year        = suppressWarnings(as.integer(year)),
     county_ihme = stringr::str_pad(as.character(county_ihme), 5, pad = "0"),
     time_window = dplyr::case_when(
       year >= 1999 & year <= 2005 ~ "1999_2005",
@@ -244,12 +246,16 @@ dq <- readr::read_csv(here::here("data","county_year_quality_metrics.csv"),
       year >= 2013 & year <= 2019 ~ "2013_2019",
       year >= 2020 & year <= 2022 ~ "2020_2022",
       TRUE ~ NA_character_
-    )
+    ),
+    time_window = stringr::str_replace_all(time_window, "[\u2013\u2014]", "_")
   )
 
-stopifnot("RI" %in% names(dq))
+stopifnot(all(c("RI","RI_post_only","n_cert") %in% names(dq)))
 
-# 2) IHME crosswalk (temporality-stable groups)
+dq$gb_n <- suppressWarnings(as.numeric(dq$n_cert))
+dq$gb_n[is.na(dq$gb_n)] <- 0
+
+# 2) IHME crosswalk
 load(here::here("data_raw","ihme_fips.rda"))  # -> ihme_fips
 ihme_map <- ihme_fips %>%
   dplyr::transmute(
@@ -258,69 +264,57 @@ ihme_map <- ihme_fips %>%
   ) %>%
   dplyr::distinct()
 
-# 3) Robust Foreman-garbage totals per IHME group (to build clusters)
-fg_n_col <- intersect(c("foreman_garbage_n","fg_n","n_foreman_garbage","foreman_garbage_count"),
-                      names(dq))[1] %||% NA_character_
-total_col <- intersect(c("total_deaths","deaths","n_deaths","N","n","total","num_deaths","all_deaths"),
-                       names(dq))[1] %||% NA_character_
-
-dq <- dq %>%
-  dplyr::mutate(
-    fg_n = if (!is.na(fg_n_col)) {
-      as.numeric(.data[[fg_n_col]])
-    } else if ("foreman_garbage" %in% names(dq) && !is.na(total_col)) {
-      suppressWarnings(as.numeric(foreman_garbage) * as.numeric(.data[[total_col]]))
-    } else NA_real_
-  ) %>%
-  dplyr::mutate(fg_n = tidyr::replace_na(fg_n, 0))
-
-fg_by_window <- dq %>%
+# 3) Robust n_cert totals
+gb_by_window <- dq %>%
   dplyr::filter(!is.na(time_window)) %>%
   dplyr::group_by(county_ihme, time_window) %>%
-  dplyr::summarise(fg = sum(fg_n, na.rm = TRUE), .groups = "drop")
+  dplyr::summarise(gb = sum(gb_n, na.rm = TRUE), .groups = "drop")
 
-fg_wide <- fg_by_window %>%
-  tidyr::pivot_wider(names_from = time_window, values_from = fg, values_fill = 0)
-for (w in periods_vec) if (!w %in% names(fg_wide)) fg_wide[[w]] <- 0
+gb_wide <- gb_by_window %>%
+  tidyr::pivot_wider(names_from = time_window, values_from = gb, values_fill = 0)
+for (w in periods_vec) if (!w %in% names(gb_wide)) gb_wide[[w]] <- 0
 
-robust_tbl <- fg_wide %>%
-  dplyr::mutate(robust_fg = pmin(`1999_2005`,`2006_2012`,`2013_2019`,`2020_2022`, na.rm = TRUE)) %>%
-  dplyr::transmute(county_ihme, robust_fg = as.numeric(robust_fg))
+robust_tbl <- gb_wide %>%
+  dplyr::mutate(robust_gb = pmin(`1999_2005`,`2006_2012`,`2013_2019`,`2020_2022`, na.rm = TRUE)) %>%
+  dplyr::transmute(county_ihme, robust_gb = as.numeric(robust_gb))
 
-# 4) Shapefile helpers
+# 4) Shapefiles
 crs_proj <- 2163
-shapefile_years <- c("1999_2005"=2000, "2006_2012"=2010, "2013_2019"=2019, "2020_2022"=2020)
+albers_5070 <- 5070
 
-normalize_geoid <- function(sf, year) {
-  nms <- names(sf)
+normalize_geoid <- function(sfobj, year) {
+  nms <- names(sfobj)
   geoid_col <- grep("^GEOID", nms, value = TRUE)[1]
   if (!is.na(geoid_col)) {
-    sf <- dplyr::rename(sf, GEOID = !!rlang::sym(geoid_col))
-    sf$GEOID <- stringr::str_pad(as.character(sf$GEOID), 5, pad = "0")
-    return(sf)
+    sfobj <- dplyr::rename(sfobj, GEOID = !!rlang::sym(geoid_col))
+    sfobj$GEOID <- stringr::str_pad(as.character(sfobj$GEOID), 5, pad = "0")
+    return(sfobj)
   }
   state_col  <- grep("^STATE.*FP$", nms, value = TRUE)[1]
   county_col <- grep("^COUNTY.*FP$", nms, value = TRUE)[1]
   if (!is.na(state_col) && !is.na(county_col)) {
-    sf$GEOID <- paste0(
-      stringr::str_pad(as.character(sf[[state_col]]),  2, pad = "0"),
-      stringr::str_pad(as.character(sf[[county_col]]), 3, pad = "0")
+    sfobj$GEOID <- paste0(
+      stringr::str_pad(as.character(sfobj[[state_col]]),  2, pad = "0"),
+      stringr::str_pad(as.character(sfobj[[county_col]]), 3, pad = "0")
     )
-    return(sf)
+    return(sfobj)
   }
   combo_col <- grep("^CNTYIDFP$", nms, value = TRUE)[1]
   if (!is.na(combo_col)) {
-    sf <- dplyr::rename(sf, GEOID = !!rlang::sym(combo_col))
-    sf$GEOID <- stringr::str_pad(as.character(sf$GEOID), 5, pad = "0")
-    return(sf)
+    sfobj <- dplyr::rename(sfobj, GEOID = !!rlang::sym(combo_col))
+    sfobj$GEOID <- stringr::str_pad(as.character(sfobj$GEOID), 5, pad = "0")
+    return(sfobj)
   }
   stop("No GEOID-compatible columns found in shapefile for year ", year)
 }
 
 build_ihme_groups_sf <- function(year) {
   counties_raw <- tigris::counties(year = year, cb = TRUE, class = "sf") %>%
-    sf::st_zm(drop = TRUE, what = "ZM")
-  counties_norm <- normalize_geoid(counties_raw, year) %>% sf::st_transform(crs_proj)
+    sf::st_zm(drop = TRUE, what = "ZM") %>%
+    sf::st_make_valid()
+  counties_norm <- normalize_geoid(counties_raw, year) %>%
+    sf::st_transform(crs_proj) %>%
+    sf::st_make_valid()
   counties_norm %>%
     dplyr::left_join(ihme_map, by = "GEOID") %>%
     dplyr::mutate(county_ihme = dplyr::coalesce(county_ihme, GEOID)) %>%
@@ -328,46 +322,45 @@ build_ihme_groups_sf <- function(year) {
     dplyr::summarise(.groups = "drop")
 }
 
-# 5) Adjacency & greedy clustering (MIMICS OVERDOSE SCRIPT)
-ihme2020 <- build_ihme_groups_sf(2020) %>% sf::st_transform(5070)
+# 5) Clustering
+ihme2020 <- build_ihme_groups_sf(2020) %>% sf::st_transform(albers_5070)
 adj_list <- sf::st_touches(ihme2020)
-neighbors_of <- setNames(
-  lapply(seq_len(nrow(ihme2020)), function(i) ihme2020$county_ihme[adj_list[[i]]]),
-  ihme2020$county_ihme
-)
+neighbors_of <- setNames(lapply(seq_len(nrow(ihme2020)), function(i) ihme2020$county_ihme[adj_list[[i]]]),
+                         ihme2020$county_ihme)
 
-min_fg <- 70L
+min_gb <- 2000L   # cluster size threshold
+
 nodes_tbl <- ihme2020 %>%
   sf::st_drop_geometry() %>%
   dplyr::select(county_ihme) %>%
   dplyr::left_join(robust_tbl, by = "county_ihme") %>%
-  dplyr::mutate(robust_fg = dplyr::coalesce(robust_fg, 0))
+  dplyr::mutate(robust_gb = dplyr::coalesce(robust_gb, 0))
 
-fg_vec   <- setNames(nodes_tbl$robust_fg, nodes_tbl$county_ihme)
-to_assign <- names(fg_vec)
-clusters  <- setNames(rep(NA_character_, length(fg_vec)), to_assign)
+gb_vec    <- setNames(nodes_tbl$robust_gb, nodes_tbl$county_ihme)
+to_assign <- names(gb_vec)
+clusters  <- setNames(rep(NA_character_, length(gb_vec)), to_assign)
 cid <- 1L
 
 while (length(to_assign) > 0) {
-  seed  <- to_assign[which.max(fg_vec[to_assign])]
+  seed  <- to_assign[which.max(gb_vec[to_assign])]
   cur   <- seed
-  total <- fg_vec[seed]
+  total <- gb_vec[seed]
   avail <- setdiff(to_assign, seed)
 
   repeat {
     nbrs <- unique(unlist(neighbors_of[cur], use.names = FALSE))
     nbrs <- setdiff(intersect(nbrs, avail), cur)
     if (!length(nbrs)) break
-    cand_totals <- total + fg_vec[nbrs]
-    best_idx <- if (any(cand_totals < min_fg)) which.max(cand_totals) else which.min(abs(cand_totals - min_fg))
+    cand_totals <- total + gb_vec[nbrs]
+    best_idx <- if (any(cand_totals < min_gb)) which.max(cand_totals) else which.min(abs(cand_totals - min_gb))
     best <- nbrs[best_idx]
-    new_total <- total + fg_vec[best]
+    new_total <- total + gb_vec[best]
     if (is.na(new_total)) break
-    if (new_total <= min_fg * 1.6 || total < min_fg) {
+    if (new_total <= min_gb * 1.6 || total < min_gb) {
       cur   <- c(cur, best)
       total <- new_total
       avail <- setdiff(avail, best)
-      if (total >= min_fg) break
+      if (total >= min_gb) break
     } else break
   }
 
@@ -376,58 +369,25 @@ while (length(to_assign) > 0) {
   cid <- cid + 1L
 }
 
-# Merge small clusters into nearest big one (centroid rule) — same as overdose
-centroids <- sf::st_centroid(ihme2020) %>% dplyr::mutate(county_ihme = ihme2020$county_ihme)
-xy <- sf::st_coordinates(centroids)[,c("X","Y"), drop=FALSE]; rownames(xy) <- centroids$county_ihme
+cluster_map <- tibble::tibble(county_ihme = names(clusters), cluster_id = unname(clusters))
 
-cluster_sum <- tapply(fg_vec[names(clusters)], clusters, sum, na.rm = TRUE)
-small <- names(cluster_sum)[cluster_sum < min_fg]
-big   <- names(cluster_sum)[cluster_sum >= min_fg]
-
-if (length(small) && length(big)) {
-  get_center <- function(cid) {
-    memb <- names(clusters)[clusters == cid]
-    colMeans(xy[memb,,drop=FALSE])
-  }
-  small_xy <- t(vapply(small, get_center, numeric(2L)))
-  big_xy   <- t(vapply(big,   get_center, numeric(2L)))
-  assign_to <- vapply(seq_len(nrow(small_xy)), function(i) {
-    dif <- t(big_xy) - small_xy[i,]; which.min(colSums(dif*dif))
-  }, integer(1L))
-  for (i in seq_along(small)) {
-    members <- names(clusters)[clusters == small[i]]
-    clusters[members] <- big[assign_to[i]]
-  }
+# 6) Aggregate metrics
+agg_metric <- function(varname) {
+  dq %>%
+    dplyr::filter(!is.na(time_window)) %>%
+    dplyr::inner_join(cluster_map, by = "county_ihme") %>%
+    dplyr::group_by(cluster_id, time_window) %>%
+    dplyr::summarise(val = mean(.data[[varname]], na.rm = TRUE),
+                     n_counties = dplyr::n_distinct(county_ihme),
+                     .groups = "drop") %>%
+    tidyr::complete(cluster_id, time_window = periods_vec,
+                    fill = list(val = NA_real_, n_counties = 0L))
 }
 
-cluster_map <- tibble::tibble(
-  county_ihme = names(clusters),
-  cluster_id  = unname(clusters)
-)
+dq_cluster_RI <- agg_metric("RI") %>% dplyr::rename(RI = val)
+dq_cluster_post <- agg_metric("RI_post_only") %>% dplyr::rename(RI_post_only = val)
 
-# 6) Check threshold per window (diagnostic only)
-check_df <- fg_by_window %>%
-  dplyr::inner_join(cluster_map, by = "county_ihme") %>%
-  dplyr::group_by(cluster_id, time_window) %>%
-  dplyr::summarise(fg_total = sum(fg, na.rm = TRUE), .groups = "drop")
-if (any(check_df$fg_total < min_fg, na.rm = TRUE)) {
-  warning("Some clusters are still < 50 FG in a window. Consider tweaking heuristics.")
-}
-
-# 7) Aggregate RI to cluster×window (mean, mirroring overdose script’s approach)
-dq_cluster <- dq %>%
-  dplyr::filter(!is.na(time_window)) %>%
-  dplyr::inner_join(cluster_map, by = "county_ihme") %>%
-  dplyr::group_by(cluster_id, time_window) %>%
-  dplyr::summarise(
-    RI = mean(RI, na.rm = TRUE),
-    n_counties = dplyr::n_distinct(county_ihme),
-    .groups = "drop"
-  ) %>%
-  tidyr::complete(cluster_id, time_window = periods_vec,
-                  fill = list(RI = NA_real_, n_counties = 0L))
-
-# 8) Shapes per period
+# 7) Shapes per period
 build_clusters_sf <- function(year) {
   base <- build_ihme_groups_sf(year)
   base %>%
@@ -435,57 +395,79 @@ build_clusters_sf <- function(year) {
     dplyr::filter(!is.na(cluster_id)) %>%
     dplyr::group_by(cluster_id) %>%
     dplyr::summarise(.groups = "drop") %>%
-    sf::st_transform(crs_proj)
+    sf::st_transform(crs_proj) %>%
+    sf::st_make_valid()
 }
 
-joined_by_period <- purrr::imap(shapefile_years, function(year, window) {
-  shape_all <- build_clusters_sf(year)
-  dplyr::left_join(shape_all,
-                   dplyr::filter(dq_cluster, time_window == window),
-                   by = "cluster_id")
-})
+join_shapes <- function(metric_df) {
+  lapply(names(shapefile_years), function(window) {
+    year <- unname(shapefile_years[[window]])
+    shape_all <- build_clusters_sf(year)
+    left_join(shape_all, dplyr::filter(metric_df, time_window == window), by = "cluster_id")
+  }) %>% setNames(names(shapefile_years))
+}
 
-# 9) Map helper — same “pretty” style; RI palette/limits like before
-make_map <- function(sf_data, var = "RI", title = NULL, palette = "RdBu") {
-  states <- tigris::states(cb = TRUE, class = "sf") |> sf::st_transform(crs_proj)
-  fill_scale <- scale_fill_distiller(
-    palette = palette,
-    limits = if (var == "RI") c(0.12, 0.3) else NULL,
-    oob = scales::squish,
-    direction = 1,               # RI: higher = better (flip direction)
-    na.value = "grey90"
-  )
+joined_by_period_RI   <- join_shapes(dq_cluster_RI)
+joined_by_period_post <- join_shapes(dq_cluster_post)
+
+# 8) Map helpers with different limits
+make_map_RI <- function(sf_data, title) {
+  states <- tigris::states(cb = TRUE, class = "sf") |>
+    sf::st_transform(crs_proj) |>
+    sf::st_make_valid()
   ggplot() +
-    geom_sf(data = sf_data, aes(fill = .data[[var]]), colour = NA) +
+    geom_sf(data = sf_data, aes(fill = RI), colour = NA) +
     geom_sf(data = states, fill = NA, colour = "white", linewidth = 0.3) +
-    fill_scale +
-    coord_sf(xlim = c(-2500000, 2500000),
-             ylim = c(-2200000, 730000),
-             expand = FALSE) +
-    labs(title = title %||% "", fill = NULL) +
+    scale_fill_distiller(palette = "RdBu", limits = c(0.15, 0.3),
+                         oob = scales::squish, direction = 1,
+                         na.value = "grey90") +
+    coord_sf(xlim = c(-2500000, 2500000), ylim = c(-2200000, 730000), expand = FALSE) +
+    labs(title = title, fill = NULL) +
     theme_void() +
-    theme(
-      plot.title = element_text(size = 16, face = "bold", hjust = 0.5),
-      legend.text = element_text(size = 9)
-    )
+    theme(plot.title = element_text(size = 16, face = "bold", hjust = 0.5),
+          legend.text = element_text(size = 9))
 }
 
-# 10) Save combined 2×2 with PERIOD-ONLY panel titles
+make_map_post <- function(sf_data, title) {
+  states <- tigris::states(cb = TRUE, class = "sf") |>
+    sf::st_transform(crs_proj) |>
+    sf::st_make_valid()
+  ggplot() +
+    geom_sf(data = sf_data, aes(fill = RI_post_only), colour = NA) +
+    geom_sf(data = states, fill = NA, colour = "white", linewidth = 0.3) +
+    scale_fill_distiller(palette = "RdBu", limits = c(0.05, 0.15),
+                         oob = scales::squish, direction = 1,
+                         na.value = "grey90") +
+    coord_sf(xlim = c(-2500000, 2500000), ylim = c(-2200000, 730000), expand = FALSE) +
+    labs(title = title, fill = NULL) +
+    theme_void() +
+    theme(plot.title = element_text(size = 16, face = "bold", hjust = 0.5),
+          legend.text = element_text(size = 9))
+}
+
+# 9) Save maps
 output_dir <- here::here("figures", "5yr_avg_stable")
 dir.create(output_dir, showWarnings = FALSE, recursive = TRUE)
 
-p_1999 <- make_map(joined_by_period[["1999_2005"]], "RI", "1999_2005")
-p_2006 <- make_map(joined_by_period[["2006_2012"]], "RI", "2006_2012")
-p_2013 <- make_map(joined_by_period[["2013_2019"]], "RI", "2013_2019")
-p_2020 <- make_map(joined_by_period[["2020_2022"]], "RI", "2020_2022")
+# RI maps
+p_1999_RI <- make_map_RI(joined_by_period_RI[["1999_2005"]], "1999_2005")
+p_2006_RI <- make_map_RI(joined_by_period_RI[["2006_2012"]], "2006_2012")
+p_2013_RI <- make_map_RI(joined_by_period_RI[["2013_2019"]], "2013_2019")
+p_2020_RI <- make_map_RI(joined_by_period_RI[["2020_2022"]], "2020_2022")
+combined_RI <- (p_1999_RI | p_2006_RI) / (p_2013_RI | p_2020_RI)
+ggsave(file.path(output_dir, "RI_clustered_garbage150_4panel.png"),
+       plot = combined_RI, width = 12, height = 9, dpi = 320)
 
-combined <- (p_1999 | p_2006) / (p_2013 | p_2020)
+# RI_post_only maps
+p_1999_post <- make_map_post(joined_by_period_post[["1999_2005"]], "1999_2005")
+p_2006_post <- make_map_post(joined_by_period_post[["2006_2012"]], "2006_2012")
+p_2013_post <- make_map_post(joined_by_period_post[["2013_2019"]], "2013_2019")
+p_2020_post <- make_map_post(joined_by_period_post[["2020_2022"]], "2020_2022")
+combined_post <- (p_1999_post | p_2006_post) / (p_2013_post | p_2020_post)
+ggsave(file.path(output_dir, "RI_post_only_clustered_garbage150_4panel.png"),
+       plot = combined_post, width = 12, height = 9, dpi = 320)
 
-ggsave(filename = file.path(output_dir, "RI_clustered_fg50_4panel.png"),
-       plot = combined, width = 12, height = 9, dpi = 320)
-
-message("✓ Done. Single 4-panel RI map saved to: ",
-        file.path(output_dir, "RI_clustered_fg50_4panel.png"))
+message("✓ Done. Maps saved to: ", output_dir)
 
 ```
 Make map of percentage missing overdoses with clusters (four panels)
@@ -834,7 +816,7 @@ suppressPackageStartupMessages({
 options(tigris_use_cache = TRUE, tigris_class = "sf", sf_use_s2 = TRUE)
 
 # ------------------------ PATHS ------------------------
-data_file       <- here("data",   "county_year_quality_metrics.csv")
+data_file       <- here("data",   "county_year_quality_metrics.csv.gz")
 membership_file <- here("output", "county_cluster_membership.csv.gz")
 philips_file    <- here("output", "cluster_metrics_ucr39_cstd.csv.gz")
 out_dir_figs    <- here("figures","5yr_avg_stable")
@@ -975,7 +957,7 @@ if (!("garb_k" %in% nms)) {
 }
 
 # Required vars
-need_vars <- c("county_ihme","period","overd_n","overd_miss_k","garb_k","n_cert","N_garbage","RI")
+need_vars <- c("county_ihme","period","overd_n","overd_miss_k","garb_k","n_cert","N_garbage","RI_post_only")
 miss <- setdiff(need_vars, names(dy))
 if (length(miss)) stop("Missing required columns in data_file: ", paste(miss, collapse=", "))
 
@@ -991,7 +973,7 @@ cluster_core <- dy %>%
     sum_garb_k       = sum(garb_k,       na.rm = TRUE),
     sum_n_cert       = sum(n_cert,       na.rm = TRUE),
     sum_N_garbage    = sum(N_garbage,    na.rm = TRUE),
-    num_RI_weighted  = sum(N_garbage * RI, na.rm = TRUE),
+    num_RI_weighted  = sum(n_cert * RI_post_only, na.rm = TRUE),
     prop_overd_unspec = safe_div(sum_overd_miss_k, sum_overd_n),
     prop_garbage      = safe_div(sum_garb_k,       sum_n_cert),
     RI_cluster        = safe_div(num_RI_weighted,  sum_N_garbage),
@@ -1563,7 +1545,7 @@ make_quintile_breaks <- function(v) {
 labs_quint <- c("Q1 lowest","Q2","Q3","Q4","Q5 highest")
 
 # ---------- file paths (robust candidates) ----------
-data_candidates <- c(here("data","county_year_quality_metrics.csv"),
+data_candidates <- c(here("data","county_year_quality_metrics.csv.gz"),
                      here("data","county_year_quality_metrics.csv.gz"))
 membership_candidates <- c(here("output","county_cluster_membership.csv.gz"),
                            here("output","county_cluster_membership.csv"),
@@ -1688,7 +1670,7 @@ if (!("garb_k" %in% nms)) {
 }
 
 # ---------- aggregate county → cluster×period (OD, garbage, RI) ----------
-need_vars <- c("county_ihme","period","overd_n","overd_miss_k","garb_k","n_cert","N_garbage","RI")
+need_vars <- c("county_ihme","period","overd_n","overd_miss_k","garb_k","n_cert","N_garbage","RI_post_only")
 miss <- setdiff(need_vars, names(cy))
 if (length(miss)) stop("Missing required columns in data: ", paste(miss, collapse=", "))
 
@@ -1703,7 +1685,7 @@ cluster_core <- cy %>%
     sum_garb_k       = sum(garb_k,       na.rm = TRUE),
     sum_n_cert       = sum(n_cert,       na.rm = TRUE),
     sum_N_garbage    = sum(N_garbage,    na.rm = TRUE),
-    num_RI_weighted  = sum(N_garbage * RI, na.rm = TRUE),
+    num_RI_weighted  = sum(n_cert * RI_post_only, na.rm = TRUE),
     prop_overd_unspec = safe_div(sum_overd_miss_k, sum_overd_n),
     prop_garbage      = safe_div(sum_garb_k,       sum_n_cert),
     RI_cluster        = safe_div(num_RI_weighted,  sum_N_garbage),
@@ -3589,7 +3571,6 @@ if (nrow(ts_ba) > 0) {
 Pre-requisites
 ```{r}
 # ---------- prerequisites ----------
-stopifnot(exists("cy"), exists("ph_pc"), exists("detail_year"))
 if (!exists("prop_garbage_col") || !exists("overd_col")) {
   stop("Run the preamble that defines prop_garbage_col/overd_col and builds detail_year.")
 }
@@ -3714,7 +3695,7 @@ prop_garbage_col <- get0("prop_garbage_col") %||% find_col(
         "dq_rec_ig_frac_mean_garbage","foreman[_]?garbage","\\bgarbage\\b")
 )
 overd_col <- if ("pct_overd_miss" %in% names(cy)) "pct_overd_miss" else NA_character_
-ri_col    <- find_col(cy, c("^ri$","\\bri(_score)?\\b","re.?assign.*index","re.?assign.*score","\\bri\\b"))
+ri_col    <- "RI_post_only"
 if (is.na(prop_garbage_col) || is.na(overd_col)) {
   stop("Need columns in `cy`: prop_garbage (auto-detected) AND pct_overd_miss.")
 }
@@ -3894,7 +3875,7 @@ prop_garbage_col <- get0("prop_garbage_col") %||% find_col(
         "dq_rec_ig_frac_mean_garbage","foreman[_]?garbage","\\bgarbage\\b")
 )
 overd_col <- if ("pct_overd_miss" %in% names(cy)) "pct_overd_miss" else NA_character_
-ri_col    <- find_col(cy, c("^ri$","\\bri(_score)?\\b","re.?assign.*index","re.?assign.*score","\\bri\\b"))
+ri_col    <- "RI_post_only"
 if (is.na(prop_garbage_col) || is.na(overd_col)) stop("Need prop_garbage + pct_overd_miss in `cy`.")
 have_ri <- !is.na(ri_col)
 
@@ -4100,7 +4081,7 @@ prop_garbage_col <- get0("prop_garbage_col") %||% find_col(
         "dq_rec_ig_frac_mean_garbage","foreman[_]?garbage","\\bgarbage\\b")
 )
 overd_col <- if ("pct_overd_miss" %in% names(cy)) "pct_overd_miss" else NA_character_
-ri_col    <- find_col(cy, c("^ri$","\\bri(_score)?\\b","re.?assign.*index","re.?assign.*score","\\bri\\b"))
+ri_col    <- "RI_post_only"
 if (is.na(prop_garbage_col) || is.na(overd_col)) stop("Need prop_garbage + pct_overd_miss in `cy`.")
 have_ri <- !is.na(ri_col)
 

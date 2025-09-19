@@ -1,25 +1,30 @@
-# ───────────────── dq_entropy_helper.R — Foreman bins + RI (+ JSD) (county×year) ─────────────────
-#
-# Outputs (county×year):
-#   total, DQ_overall, RI, RI_post_only, RI_jsd, N_garbage
-# Notes:
-#   • Posterior (glmnet) uses: contributing causes + age dummies + sex dummies (M/F)
-#   • Prior uses: age×sex frequencies from training rows (Dirichlet-smoothed)
-#   • RI = mean over garbage rows of KL(P || Q) / log(k_cand)   (clipped to [0,1])
-#   • RI_post_only = 1 - mean( H(P_tau) / log(k_cand) )         (clipped to [0,1]); P_tau = temp-scaled posterior
-#   • RI_jsd = mean( JSD(P, Q) / log 2 )                        (clipped to [0,1]); symmetric & bounded
-#   • Tau (DQ_POST_TAU) behaves like temperature: >1 sharpens, <1 flattens (see comments below)
-# ────────────────────────────────────────────────────────────────────────────────────────────────
+    # ───────────────── dq_entropy_helper.R — Foreman bins + RI (+ JSD)
+    #      g3/g8/g9 fully excluded; NO prior-only fallback;
+    #      CC-presence features, robust quartiles, training backoff, diagnostics
+    #      Adds pct of certs that are {g1,g2,g4,g5,g6,g7} by county×year
+    # ─────────────────────────────────────────────────────────────────────────
+    
+    suppressPackageStartupMessages({
+        library(dplyr); library(tidyr); library(readr); library(stringr)
+        library(purrr); library(Matrix); library(tibble); library(jsonlite)
+    })
 
-suppressPackageStartupMessages({
-    library(dplyr); library(tidyr); library(readr); library(stringr)
-    library(purrr); library(Matrix); library(tibble)
-})
+# ====== Recommended knobs (edit as needed) ======
+# Per-bin strat modes (choices: "age_sex", "age_only", "sex_only", "none")
+# (We no longer reference g3/g8/g9 anywhere; they’re excluded below.)
+options(DQ_STRAT_MODE_BY_BIN = list())
+# Rarity & capacity
+options(
+    DQ_MIN_PER_CLASS      = 8L,
+    DQ_MIN_TRAIN_SUPPORT  = 10L,
+    DQ_TARGET_PER_CLASS   = 3000,
+    DQ_POOL_YEARS         = 3L  
+)
 
-# ------- Options & helpers -------
-.pool_years_default       <- function() as.integer(getOption("DQ_POOL_YEARS", 2L))
+# ====== Option helpers ======
+.pool_years_default       <- function() as.integer(getOption("DQ_POOL_YEARS", 20L))
 .dirichlet_prior_default  <- function() as.numeric(getOption("DQ_DIRICHLET_PRIOR", 0.25))
-.min_per_class_default    <- function() as.integer(getOption("DQ_MIN_PER_CLASS", 5L))
+.min_per_class_default    <- function() as.integer(getOption("DQ_MIN_PER_CLASS", 10L))
 .max_train_per_class_def  <- function() as.integer(getOption("DQ_MAX_TRAIN_PER_CLASS", 3000L))
 .seed_default             <- function() as.integer(getOption("DQ_SEED", NA_integer_))
 .verbose_default          <- function() isTRUE(getOption("DQ_VERBOSE", TRUE))
@@ -28,15 +33,22 @@ suppressPackageStartupMessages({
 .cv_folds_default         <- function() as.integer(getOption("DQ_CV_FOLDS", 3L))
 .nlambda_default          <- function() as.integer(getOption("DQ_NLAMBDA", 60L))
 .lmr_default              <- function() as.numeric(getOption("DQ_LAMBDA_MIN_RATIO", 0.05))
+.alpha_default            <- function() as.numeric(getOption("DQ_ALPHA", 0.7))
+.lambda_choice_default    <- function() as.character(getOption("DQ_LAMBDA_CHOICE","lambda.min"))
+.tau_default              <- function() as.numeric(getOption("DQ_POST_TAU", 0.75))
+.min_train_support_def    <- function() as.integer(getOption("DQ_MIN_TRAIN_SUPPORT", 25L))
+.max_k_cand_def           <- function() { x <- getOption("DQ_MAX_K_CAND", 25L); if (is.na(x)) NA_integer_ else as.integer(x) }
+.target_per_class_def     <- function() as.integer(getOption("DQ_TARGET_PER_CLASS", 1500L))
 
-# NEW knobs (safe defaults)
-.alpha_default            <- function() as.numeric(getOption("DQ_ALPHA", 0.7))                 # glmnet sparsity 0..1
-.lambda_choice_default    <- function() as.character(getOption("DQ_LAMBDA_CHOICE","lambda.min"))# "lambda.min"|"lambda.1se"
-.tau_default              <- function() as.numeric(getOption("DQ_POST_TAU", 0.75))             # temperature for entropy only
-.min_train_support_def    <- function() as.integer(getOption("DQ_MIN_TRAIN_SUPPORT", 20))      # prune low-support targets
-.max_k_cand_def           <- function() { x <- getOption("DQ_MAX_K_CAND", NA_integer_); if (is.na(x)) NA_integer_ else as.integer(x) }
-.target_per_class_def     <- function() as.integer(getOption("DQ_TARGET_PER_CLASS", 1500))     # balance training per class
+# Per-bin stratification mode
+.strat_mode_for_bin <- function(g) {
+    per <- getOption("DQ_STRAT_MODE_BY_BIN", NULL)
+    mode <- if (is.list(per) && !is.null(per[[g]])) as.character(per[[g]]) else "age_sex"
+    if (!mode %in% c("age_sex","age_only","sex_only","none")) mode <- "age_sex"
+    mode
+}
 
+# ====== Utilities ======
 `%||%`        <- function(a,b) if (!is.null(a)) a else b
 canonical_icd <- function(x) stringr::str_remove_all(stringr::str_to_upper(x), "[^A-Z0-9]")
 icd3          <- function(x) substr(canonical_icd(x), 1, 3)
@@ -93,7 +105,7 @@ map_icd_to_bin <- function(x, lu) {
 .align_cols <- function(M, classes) {
     have <- colnames(M) %||% character(0)
     keep <- intersect(classes, have); miss <- setdiff(classes, have)
-    base <- if (length(keep)) M[, keep, drop = FALSE] else matrix(, nrow = nrow(M), ncol = 0)
+    base <- if (length(keep)) M[, keep, drop = FALSE] else matrix(0, nrow = nrow(M), ncol = 0)
     if (length(miss)) base <- cbind(base, matrix(0, nrow = nrow(M), ncol = length(miss), dimnames = list(NULL, miss)))
     base[, classes, drop = FALSE]
 }
@@ -135,7 +147,7 @@ map_icd_to_bin <- function(x, lu) {
         M2 <- t(M); colnames(M2) <- classes
         return(list(M=M2, note="transpose"))
     }
-    if (is.matrix(M) && nrow(M) == n_te * k && ncol(M) == k) {
+    if (is.matrix(M) && dims[1] == n_te * k && dims[2] == k) {
         grp <- rep(seq_len(n_te), each = k)
         M2  <- rowsum(M, grp)
         rs  <- rowSums(M2); rs[rs == 0] <- 1
@@ -147,7 +159,168 @@ map_icd_to_bin <- function(x, lu) {
         M2 <- matrix(as.numeric(M), nrow = n_te, ncol = k, byrow = TRUE); colnames(M2) <- classes
         return(list(M=M2, note="vector reshape"))
     }
-    stop("Bad prob shape: ", paste(dims, collapse="×"), if (!is.null(context)) paste0(" (", context, ")") else "")
+    stop("Bad prob shape: ", paste(dims, collapse="×"),
+         " expected ", n_te, "×", k, if (!is.null(context)) paste0(" (", context, ")") else "")
+}
+
+# ---------- Sex parsing & stratification guards ----------
+.normalize_sex <- function(x) {
+    sx <- toupper(trimws(as.character(x)))
+    sx[sx %in% c("1","M","MALE")]   <- "M"
+    sx[sx %in% c("2","F","FEMALE")] <- "F"
+    sx[!(sx %in% c("M","F"))] <- NA
+    sx
+}
+.warn_if_sex_bad <- function(sex2, context = "dataset") {
+    n  <- length(sex2); if (!n) return(invisible(NULL))
+    n_na <- sum(is.na(sex2)); p_na <- n_na / n
+    lev  <- sort(unique(sex2[!is.na(sex2)]))
+    if (p_na >= 0.8 || length(lev) == 0) {
+        warning(sprintf("[DQ] Sex parsing failed for %s: %d/%d NA (%.1f%%). Stratification by sex will be disabled where needed.",
+                        context, n_na, n, 100 * p_na), call. = FALSE)
+    } else if (length(lev) == 1) {
+        warning(sprintf("[DQ] Sex has a single level ('%s') in %s; treating as effectively missing for stratification.",
+                        lev, context), call. = FALSE)
+    }
+    invisible(NULL)
+}
+.effective_mode_for_slice <- function(mode, sex_vec, idx) {
+    if (!(mode %in% c("age_sex","sex_only"))) return(mode)
+    if (length(idx) == 0) return(mode)
+    sx <- sex_vec[idx]
+    lev <- unique(sx[!is.na(sx)])
+    if (length(lev) < 2) {
+        if (mode == "age_sex") return("age_only")
+        if (mode == "sex_only") return("none")
+    }
+    mode
+}
+
+# Build sparse presence-only CC features for selected rows
+.build_X_for_rows <- function(keep_idx, cc_long) {
+    if (NROW(cc_long) == 0L || length(keep_idx) == 0L) {
+        X_cc <- Matrix(0, nrow = length(keep_idx), ncol = 0, sparse = TRUE)
+        colnames(X_cc) <- character(0); return(X_cc)
+    }
+    cc_sub <- cc_long %>% dplyr::filter(.row %in% keep_idx) %>% dplyr::distinct(.row, cc_bin)
+    if (!NROW(cc_sub)) {
+        X_cc <- Matrix(0, nrow = length(keep_idx), ncol = 0, sparse = TRUE)
+        colnames(X_cc) <- character(0); return(X_cc)
+    }
+    feat_bins <- sort(unique(cc_sub$cc_bin))
+    j_lookup  <- setNames(seq_along(feat_bins), feat_bins)
+    i_vec <- match(cc_sub$.row, keep_idx); j_vec <- unname(j_lookup[cc_sub$cc_bin])
+    ok <- !is.na(i_vec) & !is.na(j_vec); i_vec <- i_vec[ok]; j_vec <- j_vec[ok]
+    if (length(i_vec)) {
+        key <- paste0(i_vec, "_", j_vec); keepu <- !duplicated(key)
+        i_vec <- i_vec[keepu]; j_vec <- j_vec[keepu]
+    }
+    Matrix::sparseMatrix(i=i_vec, j=j_vec, x=1,
+                         dims=c(length(keep_idx), length(feat_bins)),
+                         dimnames=list(NULL, paste0("cc_", feat_bins)))
+}
+
+# Robust quartile helpers (tolerant to ties)
+.strict_breaks <- function(q) {
+    q <- as.numeric(q); if (length(q) < 5) q <- rep_len(q, 5)
+    rng <- diff(range(q[is.finite(q)], na.rm = TRUE)); step <- if (is.finite(rng) && rng > 0) rng * 1e-9 else 1e-9
+    q[!is.finite(q)] <- 0
+    for (i in 2:5) if (!(q[i] > q[i-1])) q[i] <- q[i-1] + step
+    q[1] <- q[1] - step; q[5] <- q[5] + step
+    q
+}
+.label_q4 <- function(x, brk) {
+    b <- .strict_breaks(brk)
+    idx <- findInterval(x, vec = b, rightmost.closed = TRUE, all.inside = TRUE)
+    idx <- pmax(1L, pmin(4L, idx))
+    factor(c("Q1","Q2","Q3","Q4")[idx], levels = c("Q1","Q2","Q3","Q4"))
+}
+
+# Build TEST split per mode
+.make_te_split <- function(te_idx_all, mode, age_q_all, sex_vec) {
+    if (mode == "age_sex") {
+        split_key <- paste(addNA(age_q_all[te_idx_all]),
+                           addNA(factor(sex_vec[te_idx_all], levels=c("M","F"))),
+                           sep="|")
+    } else if (mode == "age_only") {
+        split_key <- as.character(addNA(age_q_all[te_idx_all]))
+    } else if (mode == "sex_only") {
+        split_key <- as.character(addNA(factor(sex_vec[te_idx_all], levels=c("M","F"))))
+    } else { # none
+        split_key <- rep("ALL", length(te_idx_all))
+    }
+    split(seq_along(te_idx_all), split_key, drop = TRUE)
+}
+
+# Backoff chain for TRAINING per mode
+.backoff_levels_for_mode <- function(mode, age_key, sex_key) {
+    switch(mode,
+           "age_sex" = list(
+               list(age=age_key, sex=sex_key, tag="AGE_Q×SEX"),
+               list(age=age_key, sex=NA,     tag="AGE_Q"),
+               list(age=NA,      sex=sex_key,tag="SEX"),
+               list(age=NA,      sex=NA,     tag="ALL")
+           ),
+           "age_only" = list(
+               list(age=age_key, sex=NA, tag="AGE_Q"),
+               list(age=NA,      sex=NA, tag="ALL")
+           ),
+           "sex_only" = list(
+               list(age=NA,      sex=sex_key, tag="SEX"),
+               list(age=NA,      sex=NA,      tag="ALL")
+           ),
+           "none" = list(
+               list(age=NA,      sex=NA,      tag="ALL")
+           )
+    )
+}
+
+# Prior getter honoring mode (pure: no reference to external `dat`)
+.make_prior_getter <- function(classes_all, mode, cls_train, age_tr, sex_tr, alpha0) {
+    df <- tibble(
+        cls = as.character(cls_train),
+        age = as.character(age_tr),
+        sex = as.character(sex_tr)
+    ) %>% filter(!is.na(cls), cls %in% classes_all)
+    
+    tabs <- list(
+        by_age_sex = df %>% filter(!is.na(age), !is.na(sex)) %>% count(cls, age, sex, name="k"),
+        by_age     = df %>% filter(!is.na(age))               %>% count(cls, age,       name="k"),
+        by_sex     = df %>% filter(!is.na(sex))               %>% count(cls,     sex,   name="k"),
+        by_all     = df %>%                                    count(cls,              name="k")
+    )
+    
+    smoothed_norm <- function(named_counts) {
+        v <- setNames(numeric(length(classes_all)), classes_all)
+        if (!is.null(named_counts) && length(named_counts)) v[names(named_counts)] <- named_counts
+        v <- v + alpha0
+        v / sum(v)
+    }
+    
+    function(age_key, sex_key) {
+        if (mode == "age_sex") {
+            a <- as.character(age_key); s <- as.character(sex_key)
+            v <- tabs$by_age_sex %>% filter(age == a, sex == s)
+            if (nrow(v)) return(smoothed_norm(setNames(v$k, v$cls)))
+            v <- tabs$by_age %>% filter(age == a); if (nrow(v)) return(smoothed_norm(setNames(v$k, v$cls)))
+            v <- tabs$by_sex %>% filter(sex == s); if (nrow(v)) return(smoothed_norm(setNames(v$k, v$cls)))
+            if (nrow(tabs$by_all)) return(smoothed_norm(setNames(tabs$by_all$k, tabs$by_all$cls)))
+        } else if (mode == "age_only") {
+            a <- as.character(age_key)
+            v <- tabs$by_age %>% filter(age == a)
+            if (nrow(v)) return(smoothed_norm(setNames(v$k, v$cls)))
+            if (nrow(tabs$by_all)) return(smoothed_norm(setNames(tabs$by_all$k, tabs$by_all$cls)))
+        } else if (mode == "sex_only") {
+            s <- as.character(sex_key)
+            v <- tabs$by_sex %>% filter(sex == s)
+            if (nrow(v)) return(smoothed_norm(setNames(v$k, v$cls)))
+            if (nrow(tabs$by_all)) return(smoothed_norm(setNames(tabs$by_all$k, tabs$by_all$cls)))
+        } else { # none
+            if (nrow(tabs$by_all)) return(smoothed_norm(setNames(tabs$by_all$k, tabs$by_all$cls)))
+        }
+        # fall back uniform
+        rep(1/length(classes_all), length(classes_all))
+    }
 }
 
 # ============================== MAIN FUNCTION ==============================
@@ -155,8 +328,7 @@ compute_entropy_county_foreman <- function(
         ds, county_var,
         dict_dir      = NULL,
         icd_map_path  = if (!is.null(dict_dir)) file.path(dict_dir, "foreman-icd10-mapping.csv") else NULL,
-        code_map_path = if (!is.null(dict_dir)) file.path(dict_dir, "foreman-table2-map.csv") else NULL,
-        age_breaks    = c(-Inf, 1, 5, seq(10, 85, by = 5), Inf)
+        code_map_path = if (!is.null(dict_dir)) file.path(dict_dir, "foreman-table2-map.csv") else NULL
 ) {
     if (is.null(icd_map_path) || is.null(code_map_path)) stop("Provide icd_map_path and code_map_path (or dict_dir).")
     if (!.has_glmnet()) stop("glmnet package is required.")
@@ -170,6 +342,25 @@ compute_entropy_county_foreman <- function(
     diag_dir <- .diag_dir_default()
     diag_rows <- list(); on.exit({gc()}, add = TRUE)
     
+    dropped_log <- list()
+    .log_drop <- function(g, key, stage, classes_before, support_vec, kept_classes, k_cap, note = NA_character_) {
+        before  <- sort(classes_before)
+        kept    <- sort(kept_classes)
+        dropped <- setdiff(before, kept)
+        tibble(
+            garbage_bin      = g,
+            stratum          = key,
+            stage            = stage,
+            total_candidates = length(before),
+            kept_n           = length(kept),
+            dropped_n        = length(dropped),
+            k_cap            = ifelse(is.na(k_cap), NA_integer_, as.integer(k_cap)),
+            dropped_classes  = paste(dropped, collapse = "|"),
+            kept_classes     = paste(kept, collapse = "|"),
+            support_json     = as.character(jsonlite::toJSON(as.list(support_vec[before]), auto_unbox = TRUE)),
+            note             = note
+        )
+    }
     if (verbose) {
         message(sprintf("[settings] cap/class=%d, CV folds=%d, nlambda=%d, pool years=%d, alpha=%.2f, lambda=%s, tau=%.2f",
                         capc, .cv_folds_default(), .nlambda_default(), pool_y,
@@ -180,15 +371,19 @@ compute_entropy_county_foreman <- function(
     t2_map   <- .read_table2_map(code_map_path)
     icd_lu   <- .make_icd_lookup(icd_map)
     
-    garbage_bins     <- sort(unique(t2_map$garbage))
+    # Allowed/garbage sets
+    garbage_bins_all <- sort(unique(t2_map$garbage))
+    # Remove g3, g8, g9 entirely from redistribution
+    garbage_bins     <- setdiff(garbage_bins_all, c("g3","g8","g9"))
+    
     all_bins_in_map  <- sort(unique(icd_map$bin))
-    valid_bins       <- setdiff(all_bins_in_map, garbage_bins)
-    K <- length(valid_bins)
-    if (K < 2) stop("Too few valid bins found in dictionaries.")
+    valid_bins       <- setdiff(all_bins_in_map, sort(unique(t2_map$garbage)))
+    if (length(valid_bins) < 2) stop("Too few valid bins found in dictionaries.")
     
     targets_by_g <- split(t2_map$target, t2_map$garbage, drop = TRUE) |>
         lapply(function(x) sort(unique(x)))
     
+    # Basic columns
     if (!county_var %in% names(ds)) {
         if ("county" %in% names(ds)) ds <- dplyr::rename(ds, !!county_var := .data$county)
         else stop("county_var '", county_var, "' not found.")
@@ -201,171 +396,64 @@ compute_entropy_county_foreman <- function(
     keep <- c("ucod", county_var, "year", "age_years", "ager27", "sex", rec_cols)
     keep <- intersect(keep, names(ds))
     
+    # Normalize basics
     dat <- ds %>%
         dplyr::select(dplyr::all_of(keep)) %>%
         dplyr::mutate(
             uc4  = icd4(ucod),
             uc3  = icd3(ucod),
-            ubin = map_icd_to_bin(ucod, icd_lu)
+            ubin = map_icd_to_bin(ucod, icd_lu),
+            sex2 = .normalize_sex(sex),
+            age_num = dplyr::case_when(
+                "age_years" %in% names(.) & !is.na(suppressWarnings(as.numeric(age_years))) ~ suppressWarnings(as.numeric(age_years)),
+                "ager27" %in% names(.)    & !is.na(suppressWarnings(as.integer(ager27)))   ~ suppressWarnings(as.integer(ager27)),
+                TRUE ~ NA_real_
+            )
         )
+    
+    # warn up-front if sex is problematic
+    .warn_if_sex_bad(dat$sex2, context = "full dataset")
+    
+    # Flags for garbage membership (UCOD-level; used for the new % metric)
+    garbage_set_for_pct <- c("g1","g2","g4","g5","g6","g7")
+    is_garb_pct <- !is.na(dat$ubin) & dat$ubin %in% garbage_set_for_pct
+    
+    # CC presence-only (exclude UCOD duplicates)
+    cc_long <- if (length(rec_cols) == 0) {
+        tibble(.row = integer(), cc_bin = character())
+    } else {
+        dat %>%
+            mutate(.row = dplyr::row_number()) %>%
+            dplyr::select(.row, dplyr::all_of(rec_cols), uc4, uc3) %>%
+            tidyr::pivot_longer(cols = dplyr::all_of(rec_cols), names_to = "rec", values_to = "cc_raw") %>%
+            mutate(cc_icd4 = icd4(cc_raw)) %>%
+            filter(!(substr(cc_icd4, 1, 4) == uc4 | substr(cc_icd4, 1, 3) == uc3)) %>%
+            transmute(.row, cc_bin = map_icd_to_bin(cc_icd4, icd_lu)) %>%
+            filter(!is.na(cc_bin) & cc_bin != "") %>%
+            distinct(.row, cc_bin)
+    }
     
     row_is_garbage <- !is.na(dat$ubin) & dat$ubin %in% garbage_bins
     
+    # Base valid counts (UCOD valid & not one of the active garbage bins)
     base_counts_agg <- dat %>%
-        dplyr::filter(!is.na(ubin) & ubin %in% valid_bins) %>%
-        dplyr::count(.data[[county_var]], year, bin = ubin, name = "k", .drop = FALSE)
-    base_counts_all <- base_counts_agg %>% dplyr::rename(cnty = dplyr::all_of(county_var))
+        dplyr::filter(!is.na(ubin) & ubin %in% valid_bins & !row_is_garbage) %>%
+        dplyr::count(.data[[county_var]], year, bin = ubin, name = "k", .drop = FALSE) %>%
+        dplyr::rename(cnty = dplyr::all_of(county_var))
     
-    # age bucket + sex keys (for prior only)
-    age_bucket_vec <- dplyr::case_when(
-        "age_years" %in% names(dat) & !is.na(dat$age_years) ~ as.character(cut(
-            suppressWarnings(as.numeric(dat$age_years)),
-            breaks = age_breaks, right = FALSE, include.lowest = TRUE
-        )),
-        "ager27" %in% names(dat) & !is.na(dat$ager27) ~ paste0("ager27_", pmax(1L, pmin(27L, suppressWarnings(as.integer(dat$ager27))))),
-        TRUE ~ NA_character_
-    )
-    sex_vec <- dplyr::case_when(
-        "sex" %in% names(dat) & dat$sex %in% c("M","F") ~ dat$sex,
-        TRUE ~ NA_character_
-    )
-    
-    # ---------- Sparse feature builder: record_* counts + age dummies + sex dummies ----------
-    build_X_for_rows <- function(keep_idx) {
-        rec_cols_local <- intersect(paste0("record_", 1:20), names(dat))
-        n_keep <- length(keep_idx)
-        
-        # contributing-cause counts by Foreman bin
-        if (n_keep == 0 || length(rec_cols_local) == 0) {
-            X_cc <- Matrix(0, nrow = n_keep, ncol = 0, sparse = TRUE)
-            colnames(X_cc) <- character(0)
+    # Per-bin age quartiles (fixed across years)
+    .make_q4_breaks_for_bin <- function(g) {
+        x <- dat$age_num[dat$ubin == g & is.finite(dat$age_num)]
+        if (length(x) < 4 || length(unique(x)) < 4) {
+            rng <- range(x, finite = TRUE); if (!all(is.finite(rng))) rng <- c(0, 100)
+            q <- seq(rng[1], rng[2], length.out = 5L)
         } else {
-            bin_to_j <- new.env(parent = emptyenv())
-            j_to_bin <- character(0)
-            i_vec <- integer(0); j_vec <- integer(0)
-            
-            for (col in rec_cols_local) {
-                v <- dat[[col]][keep_idx]
-                v <- canonical_icd(v)
-                b <- map_icd_to_bin(v, icd_lu)
-                ok <- !is.na(b) & nzchar(b)
-                if (!any(ok)) next
-                
-                b_sub <- b[ok]
-                new_bins <- unique(b_sub[!(b_sub %in% j_to_bin)])
-                if (length(new_bins)) {
-                    start <- length(j_to_bin)
-                    j_to_bin <- c(j_to_bin, new_bins)
-                    for (k2 in seq_along(new_bins)) assign(new_bins[k2], start + k2, envir = bin_to_j)
-                }
-                j_sub <- unname(vapply(b_sub, function(x) get(x, envir = bin_to_j, inherits = FALSE), 1L))
-                i_sub <- which(ok)  # duplicates across columns accumulate → counts
-                
-                i_vec <- c(i_vec, i_sub)
-                j_vec <- c(j_vec, j_sub)
-            }
-            
-            if (length(i_vec)) {
-                X_cc <- sparseMatrix(i = i_vec, j = j_vec, x = 1,
-                                     dims = c(n_keep, length(j_to_bin)),
-                                     dimnames = list(NULL, paste0("cc_", j_to_bin)))
-            } else {
-                X_cc <- Matrix(0, nrow = n_keep, ncol = 0, sparse = TRUE)
-                colnames(X_cc) <- character(0)
-            }
+            q <- as.numeric(stats::quantile(x, probs = seq(0, 1, 0.25), na.rm = TRUE, names = FALSE, type = 7))
         }
-        
-        # age dummies (either age_years cut or ager27)
-        age_mm <- Matrix(0, nrow = n_keep, ncol = 0, sparse = TRUE)
-        if ("age_years" %in% names(dat) && any(!is.na(dat$age_years[keep_idx]))) {
-            age_keep   <- suppressWarnings(as.numeric(dat$age_years[keep_idx]))
-            age_bucket <- cut(age_keep, breaks = age_breaks, right = FALSE, include.lowest = TRUE)
-            levs <- levels(age_bucket); P <- length(levs)
-            if (P > 0) {
-                ok <- !is.na(age_bucket); i <- which(ok); j <- match(age_bucket[ok], levs)
-                age_mm <- sparseMatrix(i = i, j = j, x = 1, dims = c(n_keep, P),
-                                       dimnames = list(NULL, paste0("age_", levs)))
-            }
-        } else if ("ager27" %in% names(dat) && any(!is.na(dat$ager27[keep_idx]))) {
-            a <- suppressWarnings(as.integer(dat$ager27[keep_idx]))
-            ok <- !is.na(a) & a >= 1 & a <= 27
-            if (any(ok)) {
-                i <- which(ok); j <- a[ok]
-                age_mm <- sparseMatrix(i = i, j = j, x = 1, dims = c(n_keep, 27),
-                                       dimnames = list(NULL, paste0("ager27_", 1:27)))
-            }
-        }
-        
-        # NEW: sex dummies (M/F)
-        sex_mm <- Matrix(0, nrow = n_keep, ncol = 0, sparse = TRUE)
-        if ("sex" %in% names(dat) && any(!is.na(dat$sex[keep_idx]))) {
-            sx <- toupper(as.character(dat$sex[keep_idx]))
-            sx[!(sx %in% c("M","F"))] <- NA
-            levs <- c("M","F")
-            ok <- !is.na(sx)
-            if (any(ok)) {
-                i <- which(ok); j <- match(sx[ok], levs)
-                sex_mm <- sparseMatrix(i = i, j = j, x = 1, dims = c(n_keep, length(levs)),
-                                       dimnames = list(NULL, paste0("sex_", levs)))
-            }
-        }
-        
-        # final bind
-        parts <- list(X_cc, age_mm, sex_mm)
-        parts <- parts[vapply(parts, ncol, 1L) > 0]
-        if (length(parts) == 0) Matrix(0, nrow = n_keep, ncol = 0, sparse = TRUE)
-        else if (length(parts) == 1) parts[[1]] else do.call(cbind, parts)
+        .strict_breaks(q)
     }
-    
-    # Prior constructor from TRAINING rows by age×sex (Dirichlet-smoothed)
-    .make_age_sex_prior_getter <- function(classes_all, tr_idx2, age_bucket_vec, sex_vec, alpha0) {
-        cls_train <- as.character(dat$ubin[tr_idx2])
-        age_tr    <- age_bucket_vec[tr_idx2]
-        sex_tr    <- sex_vec[tr_idx2]
-        
-        df <- tibble(
-            cls = cls_train,
-            age = age_tr,
-            sex = sex_tr
-        ) %>%
-            filter(!is.na(cls), cls %in% classes_all) %>%
-            mutate(
-                age = ifelse(is.na(age), "_NA_", age),
-                sex = ifelse(is.na(sex), "_NA_", sex)
-            )
-        
-        tabs <- list(
-            by_age_sex = df %>% count(cls, age, sex, name = "k"),
-            by_age     = df %>% count(cls, age, name = "k"),
-            by_sex     = df %>% count(cls, sex, name = "k"),
-            by_all     = df %>% count(cls, name = "k")
-        )
-        
-        smoothed_norm <- function(named_counts) {
-            v <- setNames(numeric(length(classes_all)), classes_all)
-            if (!is.null(named_counts) && length(named_counts)) v[names(named_counts)] <- named_counts
-            v <- v + alpha0
-            v / sum(v)
-        }
-        
-        function(age_key, sex_key) {
-            a <- ifelse(is.na(age_key), "_NA_", age_key)
-            s <- ifelse(is.na(sex_key), "_NA_", sex_key)
-            
-            vec <- tabs$by_age_sex %>% filter(age == a, sex == s)
-            if (nrow(vec)) return(smoothed_norm(stats::setNames(vec$k, vec$cls)))
-            
-            vec <- tabs$by_age %>% filter(age == a)
-            if (nrow(vec)) return(smoothed_norm(stats::setNames(vec$k, vec$cls)))
-            
-            vec <- tabs$by_sex %>% filter(sex == s)
-            if (nrow(vec)) return(smoothed_norm(stats::setNames(vec$k, vec$cls)))
-            
-            if (nrow(tabs$by_all)) return(smoothed_norm(stats::setNames(tabs$by_all$k, tabs$by_all$cls)))
-            
-            rep(1/length(classes_all), length(classes_all))  # uniform fallback
-        }
-    }
+    age_q_breaks <- setNames(vector("list", length(garbage_bins)), garbage_bins)
+    for (g in garbage_bins) age_q_breaks[[g]] <- .make_q4_breaks_for_bin(g)
     
     prob_counts_list <- list()
     metrics_list     <- list()
@@ -373,179 +461,248 @@ compute_entropy_county_foreman <- function(
     # ============================ per garbage bin ============================
     for (g in garbage_bins) {
         targets_raw <- targets_by_g[[g]]; if (is.null(targets_raw) || !length(targets_raw)) next
-        classes_all <- sort(intersect(targets_raw, valid_bins)); if (!length(classes_all)) next
+        classes_all_global <- sort(intersect(targets_raw, valid_bins)); if (!length(classes_all_global)) next
         
-        tr_all <- which(!is.na(dat$ubin) & dat$ubin %in% classes_all)
+        rows_with_g_cc <- if (nrow(cc_long)) unique(cc_long$.row[cc_long$cc_bin == g]) else integer(0)
+        te_idx_all <- intersect(which(row_is_garbage), which(dat$ubin == g))
+        if (!length(te_idx_all)) next
         
-        # Temporal pooling of training around test years in this bin
-        if (pool_y > 0) {
-            te_years_probe <- unique(dat$year[row_is_garbage & dat$ubin == g])
-            if (length(te_years_probe)) {
-                tr_mask <- dat$year >= min(te_years_probe) - pool_y & dat$year <= max(te_years_probe) + pool_y
-                tr_all <- intersect(tr_all, which(tr_mask))
+        brk_g <- age_q_breaks[[g]]
+        age_q_all <- .label_q4(dat$age_num, brk_g)
+        
+        # Per-bin strat mode (+ slice-wise effective mode)
+        mode_g <- .strat_mode_for_bin(g)
+        mode_eff <- .effective_mode_for_slice(mode_g, dat$sex2, te_idx_all)
+        if (.verbose_default() && mode_eff != mode_g) {
+            warning(sprintf("[DQ] Bin %s: switched stratification %s → %s (sex missing/constant in this slice).",
+                            g, mode_g, mode_eff), call. = FALSE)
+        }
+        
+        # TEST split by effective mode
+        te_meta_all <- dat[te_idx_all, c(county_var, "year", "sex2")]
+        colnames(te_meta_all)[1] <- "cnty"
+        te_split <- .make_te_split(te_idx_all, mode_eff, age_q_all, dat$sex2)
+        
+        for (key in names(te_split)) {
+            idx_local <- te_split[[key]]
+            te_idx    <- te_idx_all[idx_local]
+            n_te      <- length(te_idx); if (!n_te) next
+            
+            # representative keys for this split
+            age_k <- if (mode_eff %in% c("age_sex","age_only")) age_q_all[te_idx][1] else NA
+            sex_k <- if (mode_eff %in% c("age_sex","sex_only")) dat$sex2[te_idx][1]   else NA
+            
+            # TRAINING BACKOFF for this mode
+            backoff_levels <- .backoff_levels_for_mode(mode_eff, age_k, sex_k)
+            
+            tr_idx <- integer(0)
+            used_tag <- NA_character_
+            ok_classes <- character(0)
+            support_vec <- setNames(numeric(length(classes_all_global)), classes_all_global)
+            
+            for (lvl in backoff_levels) {
+                # Vectorized masks
+                age_mask <- if (is.na(lvl$age)) rep(TRUE, nrow(dat)) else (!is.na(age_q_all) & (age_q_all == lvl$age))
+                sex_mask <- if (is.na(lvl$sex)) rep(TRUE, nrow(dat)) else (!is.na(dat$sex2)  & (dat$sex2  == lvl$sex))
+                
+                tr_all <- which(!is.na(dat$ubin) & (dat$ubin %in% classes_all_global) & age_mask & sex_mask)
+                tr_idx_try <- intersect(rows_with_g_cc, tr_all)
+                
+                # temporal pooling
+                pool_y_use <- .pool_years_default()
+                if (pool_y_use > 0 && length(tr_idx_try)) {
+                    te_years_probe <- unique(dat$year[te_idx])
+                    tr_mask <- dat$year >= min(te_years_probe) - pool_y_use & dat$year <= max(te_years_probe) + pool_y_use
+                    tr_idx_try <- intersect(tr_idx_try, which(tr_mask))
+                }
+                if (!length(tr_idx_try)) next
+                
+                # support per class in this widened stratum
+                cls_counts_all <- table(dat$ubin[tr_idx_try])
+                support_vec <- setNames(rep(0, length(classes_all_global)), classes_all_global)
+                support_vec[names(cls_counts_all)] <- as.numeric(cls_counts_all)
+                
+                # Stage 1: MIN_PER_CLASS
+                ok_minpc <- names(support_vec)[support_vec >= minpc]
+                dropped_log[[length(dropped_log)+1L]] <- .log_drop(g, key, "after_minpc", classes_all_global, support_vec, ok_minpc, NA_integer_, note = lvl$tag)
+                if (length(ok_minpc) < 2) next
+                
+                # Stage 2: MIN_TRAIN_SUPPORT
+                min_support <- .min_train_support_def()
+                ok_support  <- names(support_vec)[support_vec >= max(minpc, min_support)]
+                ok_classes_try  <- intersect(ok_minpc, ok_support)
+                dropped_log[[length(dropped_log)+1L]] <- .log_drop(g, key, "after_support", classes_all_global, support_vec, ok_classes_try, NA_integer_, note = lvl$tag)
+                if (length(ok_classes_try) < 2) next
+                
+                # Stage 3: top-k cap
+                k_cap <- .max_k_cand_def()
+                if (!is.na(k_cap) && length(ok_classes_try) > k_cap) {
+                    ord <- names(sort(support_vec[ok_classes_try], decreasing = TRUE))
+                    ok_classes_try <- ord[seq_len(k_cap)]
+                }
+                dropped_log[[length(dropped_log)+1L]] <- .log_drop(g, key, "after_kcap", classes_all_global, support_vec, ok_classes_try, k_cap, note = lvl$tag)
+                if (length(ok_classes_try) < 2) next
+                
+                # success at this backoff level
+                tr_idx    <- tr_idx_try
+                ok_classes <- sort(ok_classes_try)
+                used_tag  <- lvl$tag
+                break
             }
-        }
-        
-        te_idx <- intersect(which(row_is_garbage), which(dat$ubin == g))
-        if (!length(te_idx)) next
-        
-        n_tr <- length(tr_all); n_te <- length(te_idx)
-        if (n_tr < 30) stop(sprintf("No-fallback: g=%s too few training rows (n_tr=%d < 30).", g, n_tr))
-        
-        # per-class counts on pooled training
-        cls_counts_all <- table(dat$ubin[tr_all])
-        
-        # Minimum per-class present for model viability
-        ok_classes <- names(cls_counts_all)[cls_counts_all >= minpc]
-        if (length(ok_classes) < 2) stop(sprintf("No-fallback: g=%s has <2 classes with >=%d rows.", g, minpc))
-        
-        # prune by minimum pooled support + optional top-k cap
-        min_support <- .min_train_support_def()
-        keep_cands  <- names(cls_counts_all)[cls_counts_all >= min_support]
-        ok_classes  <- intersect(ok_classes, keep_cands)
-        
-        k_cap <- .max_k_cand_def()
-        if (!is.na(k_cap) && length(ok_classes) > k_cap) {
-            ok_sorted <- names(sort(cls_counts_all[ok_classes], decreasing = TRUE))
-            ok_classes <- ok_sorted[seq_len(k_cap)]
-        }
-        
-        if (length(ok_classes) < 2) stop(sprintf("No-fallback: g=%s <2 viable classes after pruning.", g))
-        classes_all <- sort(intersect(classes_all, ok_classes))
-        
-        # Build feature matrices on balanced training+test subset
-        keep_idx <- sort(unique(c(tr_all, te_idx)))
-        X_local  <- build_X_for_rows(keep_idx)
-        
-        # Drop empty columns on training slice
-        nz <- if (ncol(X_local)) which(Matrix::colSums(X_local[match(tr_all, keep_idx), , drop = FALSE]) > 0) else integer(0)
-        if (!length(nz)) stop(sprintf("No-fallback: g=%s empty feature matrix after filtering.", g))
-        
-        # class-balanced training (undersample/oversample toward target)
-        target_per_class <- .target_per_class_def()
-        tr_by_class <- split(tr_all, dat$ubin[tr_all])
-        take <- unlist(lapply(tr_by_class, function(ix) {
-            n <- length(ix)
-            if (n >= target_per_class) sample(ix, target_per_class)
-            else c(ix, sample(ix, target_per_class - n, replace = TRUE))
-        }), use.names = FALSE)
-        tr_idx2 <- sort(unique(take))
-        
-        X_tr <- X_local[match(tr_idx2, keep_idx), nz, drop = FALSE]
-        X_te <- X_local[match(te_idx,  keep_idx), nz, drop = FALSE]
-        rm(X_local); gc(FALSE)
-        
-        y_tr <- factor(dat$ubin[tr_idx2], levels = sort(unique(ok_classes)))
-        
-        if (verbose) {
-            tbl <- sort(table(y_tr), decreasing = TRUE)
-            msg <- paste(head(paste(names(tbl), as.integer(tbl), sep=":"), 6), collapse=", ")
-            message(sprintf("[diag] g=%s n_tr=%d n_te=%d k=%d; top classes: %s",
-                            g, length(tr_idx2), n_te, length(levels(y_tr)), msg))
-        }
-        
-        # elastic net & lambda choice
-        fit <- suppressWarnings(tryCatch(
-            glmnet::cv.glmnet(
-                X_tr, y_tr,
-                family = "multinomial",
-                alpha  = .alpha_default(),
-                type.multinomial = "grouped",
-                nfolds = .cv_folds_default(),
-                nlambda = .nlambda_default(),
-                lambda.min.ratio = .lmr_default(),
-                standardize = FALSE,
-                parallel = FALSE
-            ),
-            error = function(e) NULL
-        ))
-        if (is.null(fit)) stop(sprintf("No-fallback: glmnet failed for g=%s.", g))
-        
-        lambda_choice <- .lambda_choice_default()
-        M_raw <- .extract_multinomial_probs(fit, X_te, classes_all, s = lambda_choice)
-        if (is.null(M_raw)) stop(sprintf("No-fallback: prediction NULL for g=%s.", g))
-        
-        shp <- .fix_prob_shape(M_raw, n_te = n_te, classes = classes_all,
-                               context = paste0("g=", g, ", dims_in=", paste(dim(M_raw), collapse="×")))
-        probs <- shp$M
-        rs0 <- rowSums(probs); rs0[rs0 == 0] <- 1; probs <- probs / rs0
-        
-        # --------- age×sex prior from TRAINING rows ----------
-        prior_getter <- .make_age_sex_prior_getter(
-            classes_all = classes_all,
-            tr_idx2     = tr_idx2,
-            age_bucket_vec = age_bucket_vec,
-            sex_vec        = sex_vec,
-            alpha0      = alpha0
-        )
-        age_te <- age_bucket_vec[te_idx]
-        sex_te <- sex_vec[te_idx]
-        
-        prior_mat <- matrix(NA_real_, nrow = length(te_idx), ncol = length(classes_all))
-        for (i in seq_along(te_idx)) prior_mat[i, ] <- prior_getter(age_te[i], sex_te[i])
-        colnames(prior_mat) <- classes_all
-        
-        # ---- Aggregate predicted mass to county×year×bin for DQ_overall ----
-        te_meta <- dat[te_idx, c(county_var, "year")]; colnames(te_meta) <- c("cnty", "year")
-        cls_summaries <- lapply(seq_along(classes_all), function(j) {
-            tibble(cnty = te_meta$cnty, year = te_meta$year, k = probs[, j]) %>%
-                group_by(cnty, year) %>% summarise(k = sum(k), .groups = "drop") %>%
-                mutate(bin = classes_all[j])
-        })
-        prob_counts_list[[length(prob_counts_list)+1L]] <- bind_rows(cls_summaries)
-        
-        # ====================== Per-record metrics (KL, entropy, JSD) ======================
-        eps <- .Machine$double.eps
-        
-        # (A) Posterior entropy for RI_post_only (optionally temperature-scaled)
-        #     tau > 1 → sharpen (lower entropy); tau < 1 → flatten (higher entropy)
-        probs_for_metrics <- probs
-        tau <- .tau_default()
-        if (!is.na(tau) && tau > 0 && tau != 1) {
-            probs_for_metrics <- probs_for_metrics ^ tau
-            probs_for_metrics <- probs_for_metrics / rowSums(probs_for_metrics)
-        }
-        H_post  <- rowSums(-probs_for_metrics * log(pmax(probs_for_metrics,  eps)))
-        k_cand  <- length(classes_all)
-        Hnorm_gc_by_kcand <- if (k_cand > 1) H_post / log(k_cand) else rep(0, length(H_post))
-        
-        # (B) KL(P || Q) for RI (no temperature)
-        P0 <- pmax(probs,     eps); P0 <- P0 / rowSums(P0)
-        Q0 <- pmax(prior_mat, eps); Q0 <- Q0 / rowSums(Q0)
-        KL_raw_vec  <- rowSums(P0 * (log(P0) - log(Q0)))
-        KL_norm_vec <- if (k_cand > 1) KL_raw_vec / log(k_cand) else rep(0, length(KL_raw_vec))
-        
-        # (C) NEW: Jensen–Shannon divergence (bounded); normalize to [0,1] by log(2)
-        M0 <- 0.5 * (P0 + Q0)
-        KL_PM <- rowSums(P0 * (log(P0) - log(pmax(M0, eps))))
-        KL_QM <- rowSums(Q0 * (log(Q0) - log(pmax(M0, eps))))
-        JSD_vec <- 0.5 * (KL_PM + KL_QM)               # nats, bounded by log 2
-        JSD_norm_vec <- JSD_vec / log(2)               # [0,1]
-        
-        metr <- tibble(
-            cnty = te_meta$cnty, year = te_meta$year,
-            sum_KL_norm           = KL_norm_vec,
-            sum_Hnorm_gc_by_kcand = Hnorm_gc_by_kcand,
-            sum_JSD_norm          = JSD_norm_vec,
-            one = 1L
-        ) %>%
-            group_by(cnty, year) %>%
-            summarise(
-                sum_KL_norm           = sum(sum_KL_norm,           na.rm = TRUE),
-                sum_Hnorm_gc_by_kcand = sum(sum_Hnorm_gc_by_kcand, na.rm = TRUE),
-                sum_JSD_norm          = sum(sum_JSD_norm,          na.rm = TRUE),
-                N_garbage             = sum(one),
-                .groups = "drop"
+            
+            # If training still failed, we now simply skip (no fallback)
+            if (!length(tr_idx) || length(ok_classes) < 2) {
+                dropped_log[[length(dropped_log)+1L]] <- .log_drop(
+                    g, key, "skipped_stratum", classes_all_global, support_vec, ok_classes, NA_integer_,
+                    note = "no_backoff_succeeded"
+                )
+                next
+            }
+            
+            if (verbose) {
+                tbl <- sort(table(dat$ubin[tr_idx]), decreasing = TRUE)
+                msg <- paste(head(paste(names(tbl), as.integer(tbl), sep=":"), 6), collapse=", ")
+                message(sprintf("[diag] g=%s stratum=%s TRAIN=%s n_tr=%d n_te=%d k=%d; top classes: %s",
+                                g, key, used_tag, length(tr_idx), n_te, length(ok_classes), msg))
+            }
+            
+            # Class-balanced training sample
+            target_per_class <- .target_per_class_def()
+            tr_by_class <- split(tr_idx, dat$ubin[tr_idx])
+            take <- unlist(lapply(tr_by_class[names(tr_by_class) %in% ok_classes], function(ix) {
+                n <- length(ix)
+                if (n >= target_per_class) sample(ix, target_per_class)
+                else c(ix, sample(ix, target_per_class - n, replace = TRUE))
+            }), use.names = FALSE)
+            tr_idx2 <- sort(unique(take))
+            if (!length(tr_idx2)) {
+                dropped_log[[length(dropped_log)+1L]] <- .log_drop(g, key, "skipped_stratum",
+                                                                   classes_all_global, support_vec, ok_classes, NA_integer_,
+                                                                   note = paste0("empty_after_balancing:", used_tag))
+                next
+            }
+            
+            # Build features
+            keep_idx <- sort(unique(c(tr_idx2, te_idx)))
+            X_local  <- .build_X_for_rows(keep_idx, cc_long)
+            nz <- if (ncol(X_local)) which(Matrix::colSums(X_local[match(tr_idx2, keep_idx), , drop = FALSE]) > 0) else integer(0)
+            if (!length(nz)) {
+                dropped_log[[length(dropped_log)+1L]] <- .log_drop(g, key, "skipped_stratum",
+                                                                   classes_all_global, support_vec, ok_classes, NA_integer_,
+                                                                   note = paste0("no_nz_features:", used_tag))
+                next
+            }
+            X_tr <- X_local[match(tr_idx2, keep_idx), nz, drop = FALSE]
+            X_te <- X_local[match(te_idx,  keep_idx), nz, drop = FALSE]
+            rm(X_local); gc(FALSE)
+            
+            y_tr <- factor(dat$ubin[tr_idx2], levels = ok_classes)
+            
+            fit <- suppressWarnings(tryCatch(
+                glmnet::cv.glmnet(
+                    X_tr, y_tr,
+                    family = "multinomial",
+                    alpha  = .alpha_default(),
+                    type.multinomial = "grouped",
+                    nfolds = .cv_folds_default(),
+                    nlambda = .nlambda_default(),
+                    lambda.min.ratio = .lmr_default(),
+                    standardize = FALSE,
+                    parallel = FALSE
+                ),
+                error = function(e) NULL
+            ))
+            if (is.null(fit)) {
+                dropped_log[[length(dropped_log)+1L]] <- .log_drop(g, key, "skipped_stratum",
+                                                                   classes_all_global, support_vec, ok_classes, NA_integer_,
+                                                                   note = paste0("glmnet_fail:", used_tag))
+                next
+            }
+            
+            lambda_choice <- .lambda_choice_default()
+            M_raw <- .extract_multinomial_probs(fit, X_te, ok_classes, s = lambda_choice)
+            if (is.null(M_raw)) {
+                dropped_log[[length(dropped_log)+1L]] <- .log_drop(g, key, "skipped_stratum",
+                                                                   classes_all_global, support_vec, ok_classes, NA_integer_,
+                                                                   note = paste0("predict_fail:", used_tag))
+                next
+            }
+            shp <- .fix_prob_shape(M_raw, n_te = n_te, classes = ok_classes,
+                                   context = paste0("g=", g, ", stratum=", key, ", dims_in=", paste(dim(M_raw), collapse="×")))
+            probs <- shp$M
+            rs0 <- rowSums(probs); rs0[rs0 == 0] <- 1; probs <- probs / rs0
+            
+            # Prior (for KL/JSD; respects effective mode)
+            prior_getter <- .make_prior_getter(
+                classes_all = ok_classes,
+                mode        = mode_eff,
+                cls_train   = as.character(dat$ubin[tr_idx2]),
+                age_tr      = as.character(age_q_all[tr_idx2]),
+                sex_tr      = as.character(dat$sex2[tr_idx2]),
+                alpha0      = alpha0
             )
-        metrics_list[[length(metrics_list)+1L]] <- metr
+            age_te_q <- age_q_all[te_idx]; sex_te <- dat$sex2[te_idx]
+            prior_mat <- matrix(NA_real_, nrow = length(te_idx), ncol = length(ok_classes))
+            for (i in seq_along(te_idx)) prior_mat[i, ] <- prior_getter(age_te_q[i], sex_te[i])
+            colnames(prior_mat) <- ok_classes
+            
+            # Aggregate to county×year×bin
+            te_meta <- dat[te_idx, c(county_var, "year")]; colnames(te_meta) <- c("cnty", "year")
+            cls_summaries <- lapply(seq_along(ok_classes), function(j) {
+                tibble(cnty = te_meta$cnty, year = te_meta$year, k = probs[, j]) %>%
+                    group_by(cnty, year) %>% summarise(k = sum(k), .groups = "drop") %>%
+                    mutate(bin = ok_classes[j])
+            })
+            prob_counts_list[[length(prob_counts_list)+1L]] <- bind_rows(cls_summaries)
+            
+            # Metrics
+            eps <- .Machine$double.eps
+            probs_for_metrics <- probs
+            tau <- .tau_default()
+            if (!is.na(tau) && tau > 0 && tau != 1) {
+                probs_for_metrics <- probs_for_metrics ^ tau
+                probs_for_metrics <- probs_for_metrics / rowSums(probs_for_metrics)
+            }
+            H_post  <- rowSums(-probs_for_metrics * log(pmax(probs_for_metrics,  eps)))
+            k_cand  <- length(ok_classes)
+            Hnorm_gc_by_kcand <- if (k_cand > 1) H_post / log(k_cand) else rep(0, length(H_post))
+            
+            P0 <- pmax(probs,     eps); P0 <- P0 / rowSums(P0)
+            Q0 <- pmax(prior_mat, eps); Q0 <- Q0 / rowSums(Q0)
+            KL_raw_vec  <- rowSums(P0 * (log(P0) - log(Q0)))
+            KL_norm_vec <- if (k_cand > 1) KL_raw_vec / log(k_cand) else rep(0, length(KL_raw_vec))
+            
+            M0 <- 0.5 * (P0 + Q0)
+            KL_PM <- rowSums(P0 * (log(P0) - log(pmax(M0, eps))))
+            KL_QM <- rowSums(Q0 * (log(Q0) - log(pmax(M0, eps))))
+            JSD_vec <- 0.5 * (KL_PM + KL_QM)
+            JSD_norm_vec <- JSD_vec / log(2)
+            
+            metr <- tibble(
+                cnty = te_meta$cnty, year = te_meta$year,
+                sum_KL_norm           = KL_norm_vec,
+                sum_Hnorm_gc_by_kcand = Hnorm_gc_by_kcand,
+                sum_JSD_norm          = JSD_norm_vec,
+                one = 1L
+            ) %>%
+                group_by(cnty, year) %>%
+                summarise(
+                    sum_KL_norm           = sum(sum_KL_norm,           na.rm = TRUE),
+                    sum_Hnorm_gc_by_kcand = sum(sum_Hnorm_gc_by_kcand, na.rm = TRUE),
+                    sum_JSD_norm          = sum(sum_JSD_norm,          na.rm = TRUE),
+                    N_garbage             = sum(one),
+                    .groups = "drop"
+                )
+            metrics_list[[length(metrics_list)+1L]] <- metr
+        } # end stratum loop
     } # end g loop
     
     prob_counts_all <- if (length(prob_counts_list)) bind_rows(prob_counts_list) else
         tibble(cnty = character(), year = numeric(), k = numeric(), bin = character())
     
-    # Final county×year×bin distribution = observed valid UCOD + redistributed garbage mass
+    # Observed valid UCOD + redistributed garbage mass
     cty_year_bin <- bind_rows(
-        base_counts_all %>% select(cnty, year, bin, k),
+        base_counts_agg %>% select(cnty, year, bin, k),
         prob_counts_all  %>% select(cnty, year, bin, k)
     ) %>%
         group_by(cnty, year, bin) %>%
@@ -555,14 +712,20 @@ compute_entropy_county_foreman <- function(
         group_by(cnty, year) %>%
         summarise(
             total      = sum(k),
-            DQ_overall = { p <- k / sum(k); .shannon_H(p) / log(K) },  # note: normalized by global K (valid bins in dictionaries)
+            DQ_overall = { p <- k / sum(k); .shannon_H(p) / log(length(unique(bin))) },
             .groups = "drop"
         ) %>%
         mutate(DQ_overall = pmax(0, pmin(1, DQ_overall)))
     
-    counts_cy <- dat %>% count(.data[[county_var]], year, name = "N_total", .drop = FALSE)
-    counts_cy2 <- counts_cy %>% rename(cnty = dplyr::all_of(county_var))
+    # --- NEW: % of certificates whose UCOD is in {g1,g2,g4,g5,g6,g7} ---
+    counts_total <- dat %>% count(.data[[county_var]], year, name = "N_total", .drop = FALSE) %>%
+        rename(cnty = dplyr::all_of(county_var))
+    counts_gsel  <- dat %>% mutate(is_sel = is_garb_pct) %>%
+        group_by(.data[[county_var]], year) %>%
+        summarise(N_garb_g1g2g4g5g6g7 = sum(is_sel, na.rm = TRUE), .groups = "drop") %>%
+        rename(cnty = dplyr::all_of(county_var))
     
+    # Per-record/garbage metrics
     metrics_sum <- if (length(metrics_list)) {
         bind_rows(metrics_list) %>%
             group_by(cnty, year) %>%
@@ -577,16 +740,18 @@ compute_entropy_county_foreman <- function(
         tibble(
             cnty = character(), year = numeric(),
             sum_KL_norm = numeric(), sum_Hnorm_gc_by_kcand = numeric(),
-            sum_JSD_norm = numeric(),
-            N_garbage = integer()
+            sum_JSD_norm = numeric(), N_garbage = integer()
         )
     }
     
-    out_perrecord <- counts_cy2 %>%
+    out_perrecord <- counts_total %>%
         left_join(metrics_sum,  by = c("cnty", "year")) %>%
+        left_join(counts_gsel,  by = c("cnty", "year")) %>%
         mutate(
             across(c(sum_KL_norm, sum_Hnorm_gc_by_kcand, sum_JSD_norm), ~ dplyr::coalesce(.x, 0)),
-            N_garbage   = dplyr::coalesce(N_garbage, 0L),
+            N_garbage             = dplyr::coalesce(N_garbage, 0L),
+            N_garb_g1g2g4g5g6g7   = dplyr::coalesce(N_garb_g1g2g4g5g6g7, 0L),
+            pct_garb_g1g2g4g5g6g7 = ifelse(N_total > 0, N_garb_g1g2g4g5g6g7 / N_total, NA_real_),
             RI          = dplyr::if_else(N_garbage > 0, sum_KL_norm / N_garbage, NA_real_),
             RI_post_only= dplyr::if_else(N_garbage > 0, 1 - (sum_Hnorm_gc_by_kcand / N_garbage), NA_real_),
             RI_jsd      = dplyr::if_else(N_garbage > 0, sum_JSD_norm / N_garbage, NA_real_)
@@ -596,26 +761,30 @@ compute_entropy_county_foreman <- function(
             RI_post_only= ifelse(is.na(RI_post_only),RI_post_only,pmax(0, pmin(1, RI_post_only))),
             RI_jsd      = ifelse(is.na(RI_jsd),      RI_jsd,      pmax(0, pmin(1, RI_jsd)))
         ) %>%
-        select(cnty, year, RI, RI_post_only, RI_jsd, N_garbage)
+        select(cnty, year, RI, RI_post_only, RI_jsd, N_garbage, N_total,
+               N_garb_g1g2g4g5g6g7, pct_garb_g1g2g4g5g6g7)
     
     out <- out_aggregate %>%
         left_join(out_perrecord, by = c("cnty", "year")) %>%
         rename(!!county_var := cnty)
     
-    # Optional probability diagnostics hook (currently empty)
-    if (length(diag_rows)) {
-        diag_df <- bind_rows(diag_rows)
-        if (!is.null(diag_dir)) {
+    # Diagnostics
+    if (length(dropped_log)) {
+        drop_df <- bind_rows(dropped_log)
+        ts <- format(Sys.time(), "%Y%m%d_%H%M%S")
+        f2 <- if (!is.null(diag_dir)) {
             if (!dir.exists(diag_dir)) dir.create(diag_dir, recursive = TRUE, showWarnings = FALSE)
-            ts <- format(Sys.time(), "%Y%m%d_%H%M%S")
-            f <- file.path(diag_dir, paste0("glmnet_prob_diag_", ts, ".csv"))
-            readr::write_csv(diag_df, f)
-            if (verbose) message("[diag] wrote probability diagnostics to: ", f)
+            file.path(diag_dir, paste0("dropped_classes_", ts, ".csv"))
+        } else {
+            file.path(getwd(), paste0("dropped_classes_", ts, ".csv"))
         }
-        attr(out, "prob_diag") <- diag_df
+        readr::write_csv(drop_df, f2)
+        if (verbose) message("[diag] wrote dropped-classes report to: ", f2)
+        attr(out, "dropped_classes") <- drop_df
     }
     
     out
 }
 
 
+        
