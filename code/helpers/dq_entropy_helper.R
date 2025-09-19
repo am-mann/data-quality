@@ -775,7 +775,7 @@ compute_entropy_county_foreman <- function(
             if (!dir.exists(diag_dir)) dir.create(diag_dir, recursive = TRUE, showWarnings = FALSE)
             file.path(diag_dir, paste0("dropped_classes_", ts, ".csv"))
         } else {
-            file.path(getwd(), paste0("dropped_classes_", ts, ".csv"))
+            file.path(getwd("output"), paste0("dropped_classes_", ts, ".csv"))
         }
         readr::write_csv(drop_df, f2)
         if (verbose) message("[diag] wrote dropped-classes report to: ", f2)
