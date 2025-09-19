@@ -15,8 +15,8 @@ suppressPackageStartupMessages({
 options(DQ_STRAT_MODE_BY_BIN = list())
 # Rarity & capacity
 options(
-    DQ_MIN_PER_CLASS      = 8L,
-    DQ_MIN_TRAIN_SUPPORT  = 10L,
+    DQ_MIN_PER_CLASS      = 10L,
+    DQ_MIN_TRAIN_SUPPORT  = 20L,
     DQ_TARGET_PER_CLASS   = 3000,
     DQ_POOL_YEARS         = 3L
 )
@@ -24,7 +24,7 @@ options(
 # ====== Option helpers ======
 .pool_years_default       <- function() as.integer(getOption("DQ_POOL_YEARS", 3L))
 .dirichlet_prior_default  <- function() as.numeric(getOption("DQ_DIRICHLET_PRIOR", 0.25))
-.min_per_class_default    <- function() as.integer(getOption("DQ_MIN_PER_CLASS", 8L))
+.min_per_class_default    <- function() as.integer(getOption("DQ_MIN_PER_CLASS", 10L))
 .max_train_per_class_def  <- function() as.integer(getOption("DQ_MAX_TRAIN_PER_CLASS", 3000L))
 .seed_default             <- function() as.integer(getOption("DQ_SEED", NA_integer_))
 .verbose_default          <- function() isTRUE(getOption("DQ_VERBOSE", TRUE))
@@ -38,7 +38,7 @@ options(
 .alpha_default            <- function() as.numeric(getOption("DQ_ALPHA", 0.7))
 .lambda_choice_default    <- function() as.character(getOption("DQ_LAMBDA_CHOICE","lambda.min"))
 .tau_default              <- function() as.numeric(getOption("DQ_POST_TAU", 0.75))
-.min_train_support_def    <- function() as.integer(getOption("DQ_MIN_TRAIN_SUPPORT", 10L))
+.min_train_support_def    <- function() as.integer(getOption("DQ_MIN_TRAIN_SUPPORT", 20L))
 .target_per_class_def     <- function() as.integer(getOption("DQ_TARGET_PER_CLASS", 3000L))
 
 # Per-bin stratification mode
@@ -768,7 +768,6 @@ compute_entropy_county_foreman <- function(
         left_join(out_perrecord, by = c("cnty", "year")) %>%
         rename(!!county_var := cnty)
     
-    # Diagnostics
     if (length(dropped_log)) {
         drop_df <- bind_rows(dropped_log)
         ts <- format(Sys.time(), "%Y%m%d_%H%M%S")
