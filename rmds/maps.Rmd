@@ -208,12 +208,9 @@ message("✓ Done. 4-panel maps saved to: ", output_dir)
 Map RI scores with light clustering
 ```{r}
 # ──────────────────────────────────────────────────────────────
-# Map RI and RI_post_only with temporally-stable light clusters
+# Map RI, RI_post_only, and RI_jsd (if available) with light clusters
 #   • Clustering uses n_cert as the "garbage count" proxy
 #   • Robust min across 4 windows; min per-cluster threshold = 150
-#   • Fixed color limits:
-#        RI          = [0.2, 0.4]
-#        RI_post_only = [0.05, 0.2]
 #   • Alaska & Hawaii included via state outlines
 # ──────────────────────────────────────────────────────────────
 
@@ -250,8 +247,14 @@ dq <- readr::read_csv(metrics_path, show_col_types = FALSE) %>%
     time_window = stringr::str_replace_all(time_window, "[\u2013\u2014]", "_")
   )
 
-stopifnot(all(c("RI","RI_post_only","n_cert") %in% names(dq)))
+# Required columns for this mapping step
+req_cols <- c("RI","RI_post_only","n_cert")
+stopifnot(all(req_cols %in% names(dq)))
 
+has_jsd <- "RI_jsd" %in% names(dq)
+if (!has_jsd) message("ℹ 'RI_jsd' not found in input; JSD maps will be skipped.")
+
+# Use n_cert as garbage proxy
 dq$gb_n <- suppressWarnings(as.numeric(dq$n_cert))
 dq$gb_n[is.na(dq$gb_n)] <- 0
 
@@ -264,7 +267,7 @@ ihme_map <- ihme_fips %>%
   ) %>%
   dplyr::distinct()
 
-# 3) Robust n_cert totals
+# 3) Robust n_cert totals across windows (min across 4)
 gb_by_window <- dq %>%
   dplyr::filter(!is.na(time_window)) %>%
   dplyr::group_by(county_ihme, time_window) %>%
@@ -322,13 +325,13 @@ build_ihme_groups_sf <- function(year) {
     dplyr::summarise(.groups = "drop")
 }
 
-# 5) Clustering
+# 5) Light clustering (min_gb = 150)
 ihme2020 <- build_ihme_groups_sf(2020) %>% sf::st_transform(albers_5070)
 adj_list <- sf::st_touches(ihme2020)
 neighbors_of <- setNames(lapply(seq_len(nrow(ihme2020)), function(i) ihme2020$county_ihme[adj_list[[i]]]),
                          ihme2020$county_ihme)
 
-min_gb <- 2000L   # cluster size threshold
+min_gb <- 2000L   # LIGHT threshold
 
 nodes_tbl <- ihme2020 %>%
   sf::st_drop_geometry() %>%
@@ -352,6 +355,7 @@ while (length(to_assign) > 0) {
     nbrs <- setdiff(intersect(nbrs, avail), cur)
     if (!length(nbrs)) break
     cand_totals <- total + gb_vec[nbrs]
+    # Grow toward threshold; if still under threshold, take the best grower; else take the closest to threshold
     best_idx <- if (any(cand_totals < min_gb)) which.max(cand_totals) else which.min(abs(cand_totals - min_gb))
     best <- nbrs[best_idx]
     new_total <- total + gb_vec[best]
@@ -371,7 +375,7 @@ while (length(to_assign) > 0) {
 
 cluster_map <- tibble::tibble(county_ihme = names(clusters), cluster_id = unname(clusters))
 
-# 6) Aggregate metrics
+# 6) Aggregate metrics (cluster × period means)
 agg_metric <- function(varname) {
   dq %>%
     dplyr::filter(!is.na(time_window)) %>%
@@ -384,8 +388,9 @@ agg_metric <- function(varname) {
                     fill = list(val = NA_real_, n_counties = 0L))
 }
 
-dq_cluster_RI <- agg_metric("RI") %>% dplyr::rename(RI = val)
+dq_cluster_RI   <- agg_metric("RI") %>% dplyr::rename(RI = val)
 dq_cluster_post <- agg_metric("RI_post_only") %>% dplyr::rename(RI_post_only = val)
+dq_cluster_jsd  <- if (has_jsd) agg_metric("RI_jsd") %>% dplyr::rename(RI_jsd = val) else NULL
 
 # 7) Shapes per period
 build_clusters_sf <- function(year) {
@@ -403,22 +408,24 @@ join_shapes <- function(metric_df) {
   lapply(names(shapefile_years), function(window) {
     year <- unname(shapefile_years[[window]])
     shape_all <- build_clusters_sf(year)
-    left_join(shape_all, dplyr::filter(metric_df, time_window == window), by = "cluster_id")
+    dplyr::left_join(shape_all, dplyr::filter(metric_df, time_window == window), by = "cluster_id")
   }) %>% setNames(names(shapefile_years))
 }
 
 joined_by_period_RI   <- join_shapes(dq_cluster_RI)
 joined_by_period_post <- join_shapes(dq_cluster_post)
+joined_by_period_jsd  <- if (!is.null(dq_cluster_jsd)) join_shapes(dq_cluster_jsd) else NULL
 
-# 8) Map helpers with different limits
-make_map_RI <- function(sf_data, title) {
-  states <- tigris::states(cb = TRUE, class = "sf") |>
-    sf::st_transform(crs_proj) |>
-    sf::st_make_valid()
+# 8) Map helpers (fixed limits)
+states_outline <- tigris::states(cb = TRUE, class = "sf") |>
+  sf::st_transform(crs_proj) |>
+  sf::st_make_valid()
+
+make_map_numeric <- function(sf_data, fill_col, limits, title) {
   ggplot() +
-    geom_sf(data = sf_data, aes(fill = RI), colour = NA) +
-    geom_sf(data = states, fill = NA, colour = "white", linewidth = 0.3) +
-    scale_fill_distiller(palette = "RdBu", limits = c(0.15, 0.3),
+    geom_sf(data = sf_data, aes(fill = .data[[fill_col]]), colour = NA) +
+    geom_sf(data = states_outline, fill = NA, colour = "white", linewidth = 0.3) +
+    scale_fill_distiller(palette = "RdBu", limits = limits,
                          oob = scales::squish, direction = 1,
                          na.value = "grey90") +
     coord_sf(xlim = c(-2500000, 2500000), ylim = c(-2200000, 730000), expand = FALSE) +
@@ -428,22 +435,9 @@ make_map_RI <- function(sf_data, title) {
           legend.text = element_text(size = 9))
 }
 
-make_map_post <- function(sf_data, title) {
-  states <- tigris::states(cb = TRUE, class = "sf") |>
-    sf::st_transform(crs_proj) |>
-    sf::st_make_valid()
-  ggplot() +
-    geom_sf(data = sf_data, aes(fill = RI_post_only), colour = NA) +
-    geom_sf(data = states, fill = NA, colour = "white", linewidth = 0.3) +
-    scale_fill_distiller(palette = "RdBu", limits = c(0.05, 0.15),
-                         oob = scales::squish, direction = 1,
-                         na.value = "grey90") +
-    coord_sf(xlim = c(-2500000, 2500000), ylim = c(-2200000, 730000), expand = FALSE) +
-    labs(title = title, fill = NULL) +
-    theme_void() +
-    theme(plot.title = element_text(size = 16, face = "bold", hjust = 0.5),
-          legend.text = element_text(size = 9))
-}
+make_map_RI   <- function(sf_data, title) make_map_numeric(sf_data, "RI", c(0.02, 0.05), title)
+make_map_post <- function(sf_data, title) make_map_numeric(sf_data, "RI_post_only", c(0.08, 0.12), title)
+make_map_jsd  <- function(sf_data, title) make_map_numeric(sf_data, "RI_jsd", c(0.02, 0.04), title)  # tweak if needed
 
 # 9) Save maps
 output_dir <- here::here("figures", "5yr_avg_stable")
@@ -467,7 +461,66 @@ combined_post <- (p_1999_post | p_2006_post) / (p_2013_post | p_2020_post)
 ggsave(file.path(output_dir, "RI_post_only_clustered_garbage150_4panel.png"),
        plot = combined_post, width = 12, height = 9, dpi = 320)
 
+# RI_jsd maps (if available)
+if (!is.null(joined_by_period_jsd)) {
+  p_1999_jsd <- make_map_jsd(joined_by_period_jsd[["1999_2005"]], "1999_2005")
+  p_2006_jsd <- make_map_jsd(joined_by_period_jsd[["2006_2012"]], "2006_2012")
+  p_2013_jsd <- make_map_jsd(joined_by_period_jsd[["2013_2019"]], "2013_2019")
+  p_2020_jsd <- make_map_jsd(joined_by_period_jsd[["2020_2022"]], "2020_2022")
+  combined_jsd <- (p_1999_jsd | p_2006_jsd) / (p_2013_jsd | p_2020_jsd)
+  ggsave(file.path(output_dir, "RI_jsd_clustered_garbage150_4panel.png"),
+         plot = combined_jsd, width = 12, height = 9, dpi = 320)
+} else {
+  message("⚠ Skipping JSD maps: 'RI_jsd' not present in input file.")
+}
+
 message("✓ Done. Maps saved to: ", output_dir)
+
+```
+Average KL-divergence overtime
+```{r}
+metrics_path_gz <- here::here("data","county_year_quality_metrics.csv.gz")
+metrics_path    <- if (file.exists(metrics_path_gz)) metrics_path_gz else here::here("data","county_year_quality_metrics.csv")
+dq <- readr::read_csv(metrics_path, show_col_types = FALSE)
+
+
+.wmean <- function(x, w) {
+  w <- ifelse(is.finite(w), w, NA_real_)
+  if (all(is.na(w)) || sum(w, na.rm = TRUE) == 0) return(NA_real_)
+  stats::weighted.mean(x, w, na.rm = TRUE)
+}
+
+ri_ts <- dq %>%
+  dplyr::filter(!is.na(year), year >= 1999, year <= 2022, is.finite(RI)) %>%
+  dplyr::group_by(year) %>%
+  dplyr::summarise(
+    wmean_RI  = .wmean(RI, N_garb_g1g2g4g5g6g7),  # weight by targeted garbage bins
+    n_ctyyr   = dplyr::n(),
+    .groups = "drop"
+  )
+
+# Save the underlying series
+readr::write_csv(ri_ts, file.path(output_dir, "RI_time_series_1999_2022.csv"))
+
+# Plot (weighted mean only)
+p_ri_ts <- ggplot(ri_ts, aes(x = year, y = wmean_RI)) +
+  geom_line(linewidth = 1) +
+  geom_point(size = 1.7) +
+  labs(
+    x = NULL, y = "Normalized K-L Divergence"
+  ) +
+  scale_x_continuous(breaks = seq(2000, 2022, by = 2)) +
+  theme_minimal(base_size = 12) +
+  theme(
+    panel.grid.minor = element_blank(),
+    plot.title = element_text(face = "bold")
+  )
+
+# Save figure
+ggsave(file.path(output_dir, "RI_time_series_1999_2022.png"),
+       plot = p_ri_ts, width = 8.5, height = 4.8, dpi = 320)
+
+p_ri_ts
 
 ```
 Make map of percentage missing overdoses with clusters (four panels)
@@ -816,7 +869,7 @@ suppressPackageStartupMessages({
 options(tigris_use_cache = TRUE, tigris_class = "sf", sf_use_s2 = TRUE)
 
 # ------------------------ PATHS ------------------------
-data_file       <- here("data",   "county_year_quality_metrics.csv.gz")
+data_file       <- here("data",   "county_year_quality_metrics.csv")
 membership_file <- here("output", "county_cluster_membership.csv.gz")
 philips_file    <- here("output", "cluster_metrics_ucr39_cstd.csv.gz")
 out_dir_figs    <- here("figures","5yr_avg_stable")
@@ -1105,6 +1158,129 @@ for (mcol in to_map) {
 
 message("✓ Done. Z-score CSV in: ", out_dir_scores, "  |  maps in: ", out_dir_figs)
 
+```
+Make new aggregate data quality index map with box plot
+```{r}
+# ──────────────────────────────────────────────────────────────
+# Two maps (1999–2005, 2020–2022) + county-by-state boxplot
+#   • Uses a single metric from z_tbl (default = "direction_score")
+#   • Saves: figures/5yr_avg_stable/two_maps_box_<metric>.png
+# ──────────────────────────────────────────────────────────────
+
+suppressPackageStartupMessages({ library(patchwork) })
+
+# ---- choose which metric to show (must exist in z_tbl)
+metric_to_plot <- "direction_score" 
+# examples: "direction_score", "z_prop_garbage", "z_prop_overd_unspec", "z_philips_cstd", "z_RI_cluster"
+
+metric_label <- dplyr::case_when(
+  metric_to_plot == "direction_score"      ~ "Aggregate data quality index (z)",
+  metric_to_plot == "z_prop_garbage"       ~ "Proportion garbage (z, higher is better)",
+  metric_to_plot == "z_prop_overd_unspec"  ~ "Overdose unspecified (z, higher is better)",
+  metric_to_plot == "z_philips_cstd"       ~ "Philips CSTD (z, higher is better)",
+  metric_to_plot == "z_RI_cluster"         ~ "RI (z, higher is better)",
+  TRUE ~ metric_to_plot
+)
+
+# ---------------- single-period map helper ----------------
+make_single_map <- function(period_key, mcol, lims, states_sf, membership_df, counties_sf_aug) {
+  cl_sf <- build_cluster_sf(period_key, membership_df, counties_sf_aug)
+  dat   <- z_tbl %>%
+    dplyr::filter(period == period_key) %>%
+    dplyr::select(cluster, value = !!rlang::sym(mcol))
+  map_sf <- cl_sf %>% dplyr::left_join(dat, by = "cluster")
+
+  ggplot2::ggplot() +
+    geom_sf(data = map_sf, aes(fill = value), colour = NA) +
+    geom_sf(data = states_sf, fill = NA, colour = "white", linewidth = 0.3) +
+    scale_fill_distiller(palette = "RdBu", direction = 1,
+                         limits = lims, oob = scales::squish, na.value = "grey90") +
+    coord_sf(xlim = c(-2500000, 2500000), ylim = c(-2200000, 730000), expand = FALSE) +
+    labs(title = gsub("_", "–", period_key), fill = NULL) +
+    theme_void(base_size = 11) +
+    theme(plot.title = element_text(hjust = 0.5, face = "bold"))
+}
+
+# ---------------- build common map limits (both periods) -------------
+periods_two <- c("1999_2005","2020_2022")
+vals_two <- purrr::map_dbl(1, ~0) # placeholder to appease R CMD check
+map_vals <- purrr::map_dfr(periods_two, function(win){
+  cl_sf <- build_cluster_sf(win, membership, counties_aug)
+  dat   <- z_tbl %>%
+    dplyr::filter(period == win) %>%
+    dplyr::select(cluster, value = !!rlang::sym(metric_to_plot))
+  cl_sf %>% dplyr::left_join(dat, by="cluster") %>% dplyr::transmute(value)
+})
+lims_sym <- compute_limits_symmetric(map_vals$value)
+
+# ---------------- make the two maps -----------------------
+pA <- make_single_map("1999_2005", metric_to_plot, lims_sym, states_tf, membership, counties_aug)
+pB <- make_single_map("2020_2022", metric_to_plot, lims_sym, states_tf, membership, counties_aug)
+
+# ---------------- county-level boxplot by state -----------
+# Lookup for state abbreviations
+states_info <- tigris::states(year = 2020, cb = TRUE, class = "sf") |>
+  sf::st_drop_geometry() |>
+  dplyr::select(STATEFP, STUSPS) %>% dplyr::rename(statefp = STATEFP, state = STUSPS)
+
+counties_lite <- counties_aug %>% sf::st_drop_geometry() %>% dplyr::select(county_ihme, statefp)
+
+# Build a county-level table for both periods by assigning each county its cluster's metric value
+build_county_values <- function(per){
+  mm <- membership %>% dplyr::filter(period == per) %>% dplyr::select(county_ihme, cluster)
+  zv <- z_tbl %>% dplyr::filter(period == per) %>% dplyr::select(cluster, value = !!rlang::sym(metric_to_plot))
+  mm %>%
+    dplyr::left_join(zv, by = "cluster") %>%
+    dplyr::left_join(counties_lite, by = "county_ihme") %>%
+    dplyr::left_join(states_info, by = "statefp") %>%
+    dplyr::mutate(period = per) %>%
+    dplyr::filter(!is.na(state), is.finite(value)) %>%
+    dplyr::select(state, county_ihme, period, value)
+}
+bx_df <- dplyr::bind_rows(build_county_values("1999_2005"),
+                          build_county_values("2020_2022"))
+
+# Rank states by declining post-period median
+state_order <- bx_df %>%
+  dplyr::filter(period == "2020_2022") %>%
+  dplyr::group_by(state) %>%
+  dplyr::summarise(med = median(value, na.rm=TRUE), .groups="drop") %>%
+  dplyr::arrange(dplyr::desc(med)) %>% dplyr::pull(state)
+
+territories <- c("PR","GU","VI","AS","MP")
+
+bx_df <- bx_df %>%
+  dplyr::filter(!state %in% territories)
+
+bx_df <- bx_df %>% dplyr::mutate(
+  state = factor(state, levels = state_order),
+  period = factor(period, levels = c("1999_2005","2020_2022"),
+                  labels = c("1999–2005","2020–2022"))
+)
+
+ylims_box <- c(-2, 2)
+
+pC <- ggplot2::ggplot(bx_df, aes(x = state, y = value, fill = period)) +
+  geom_hline(yintercept = 0, linetype = 3, linewidth = 0.3) +
+  geom_boxplot(width = 0.7, outlier.alpha = 0.4,
+               position = position_dodge2(width = 0.75, preserve = "single")) +
+  coord_cartesian(ylim = ylims_box) +
+  scale_fill_manual(values = c("#94bedf","#f2c879")) +
+  labs(x = "States (ranked by declining median county-level 2020-2022 aggregate data quality index)",
+       y = metric_label) +
+  theme_bw(base_size = 10) +
+  theme(
+    legend.position = "top",
+    axis.text.x = element_text(angle = 90, vjust = 0.5, hjust = 1),
+    panel.grid.minor = element_blank()
+  )
+
+combined <- (pA | pB) / pC + plot_layout(guides = "collect") +
+  plot_annotation(tag_levels = "A")
+
+base <- if (metric_to_plot == "direction_score") "direction_score" else sanitize(metric_to_plot)
+outfile <- file.path(out_dir_figs, paste0("two_maps_box_", base, ".png"))
+ggsave(outfile, combined, width = 11, height = 8.5, dpi = 320)
 ```
 Build public health spending
 ```{r}
@@ -1545,7 +1721,7 @@ make_quintile_breaks <- function(v) {
 labs_quint <- c("Q1 lowest","Q2","Q3","Q4","Q5 highest")
 
 # ---------- file paths (robust candidates) ----------
-data_candidates <- c(here("data","county_year_quality_metrics.csv.gz"),
+data_candidates <- c(here("data","county_year_quality_metrics.csv"),
                      here("data","county_year_quality_metrics.csv.gz"))
 membership_candidates <- c(here("output","county_cluster_membership.csv.gz"),
                            here("output","county_cluster_membership.csv"),
@@ -1824,8 +2000,8 @@ ts_reporting <- dir_long %>%
 
 p_rep <- ggplot(ts_reporting, aes(x = period, y = mean_direction, group = reporting_type, colour = reporting_type)) +
   geom_line(linewidth = 1.2) + geom_point(size = 2) +
-  labs(title = "Z-score sum (direction_score) by reporting type",
-       x = NULL, y = "Mean direction_score", colour = "Reporting type") +
+  labs(title = "Data quality by reporting type",
+       x = NULL, y = "Aggregate data quality score", colour = "Reporting type") +
   theme_bw(base_size = 12)
 
 print(p_rep)
@@ -1935,8 +2111,8 @@ if (!is.null(ph_q) && nrow(ph_q)) {
 
   p_ph <- ggplot(ts_ph, aes(period, mean_direction, group = ph_quint, colour = ph_quint)) +
     geom_line(linewidth = 1.2) + geom_point(size = 2) +
-    labs(title = "Z-score sum (direction_score) by public-health spend quintile",
-         x = NULL, y = "Mean direction_score", colour = "PH spend quintile") +
+    labs(title = "Data quality by public-health spending",
+         x = NULL, y = "Aggregate data quality score", colour = "PH spend quintile") +
     theme_bw(base_size = 12)
 
   print(p_ph)
@@ -2032,8 +2208,8 @@ if (!is.null(inc_q) && nrow(inc_q)) {
 
   p_inc <- ggplot(ts_inc, aes(period, mean_direction, group = inc_quint, colour = inc_quint)) +
     geom_line(linewidth = 1.2) + geom_point(size = 2) +
-    labs(title = "Z-score sum (direction_score) by income quintile",
-         x = NULL, y = "Mean direction_score", colour = "Income quintile") +
+    labs(title = "Data quality by income quintile",
+         x = NULL, y = "Aggregate data quality score", colour = "Income quintile") +
     theme_bw(base_size = 12)
 
   print(p_inc)
