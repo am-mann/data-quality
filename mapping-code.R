@@ -181,14 +181,14 @@ joined_by_period_A <- purrr::imap(
   }
 )
 
-make_map_A <- function(sf_data, var, title = NULL, palette = "RdBu") {
+make_map_A <- function(sf_data, var, title = NULL, palette = "Reds") {
   states <- tigris::states(cb = TRUE, class = "sf") |> st_transform(2163)
   fill_scale <- if (var == "prop_garbage") {
     scale_fill_distiller(palette = palette, limits = c(0.15, 0.4), oob = scales::squish, direction = -1, na.value = "grey90")
   } else if (var == "RI") {
     scale_fill_distiller(palette = palette, limits = c(0.15, 0.3), oob = scales::squish, direction = 1, na.value = "grey90")
   } else if (var == "DQ_overall") {
-    scale_fill_distiller(palette = palette, limits = c(0,0.9), oob = scales::squish, direction = 1, na.value = "grey90")
+    scale_fill_distiller(palette = "RdBlu", limits = c(0,0.9), oob = scales::squish, direction = 1, na.value = "grey90")
   } else if (startsWith(var, "pct_") || var == "overall_completeness_pct") {
     scale_fill_distiller(palette = palette, limits = c(0, 100), oob = scales::squish, direction = 1, na.value = "grey90")
   } else {
@@ -349,7 +349,7 @@ make_map_numeric <- function(sf_data, fill_col, limits, title) {
   ggplot() +
     geom_sf(data = sf_data, aes(fill = .data[[fill_col]]), colour = NA) +
     geom_sf(data = states_outline, fill = NA, colour = "white", linewidth = 0.3) +
-    scale_fill_distiller(palette = "RdBu", limits = limits,
+    scale_fill_distiller(palette = "Reds", limits = limits,
                          oob = scales::squish, direction = 1,
                          na.value = "grey90") +
     coord_sf(xlim = c(-2500000, 2500000), ylim = c(-2200000, 730000), expand = FALSE) +
@@ -525,7 +525,7 @@ joined_by_period_D <- purrr::imap(shapefile_years_D, function(year, window) {
   shape_all <- build_clusters_sf_D(year)
   dplyr::left_join(shape_all, dplyr::filter(dq_cluster_D, time_window == window), by = "cluster_id")
 })
-make_map_D <- function(sf_data, var = "pct_overd_miss", title = NULL, palette = "RdBu") {
+make_map_D <- function(sf_data, var = "pct_overd_miss", title = NULL, palette = "Reds") {
   states <- tigris::states(cb = TRUE, class = "sf") |> sf::st_transform(crs_proj)
   fill_scale <- scale_fill_distiller(palette = palette, limits = c(0, 0.6), oob = scales::squish, direction = -1, na.value = "grey90")
   ggplot() +
@@ -899,7 +899,7 @@ make_map_RI_two <- function(map_sf, title) {
     ggplot() +
         geom_sf(data = map_sf, aes(fill = RI_post_only), colour = NA) +
         geom_sf(data = states_outline, fill = NA, colour = "white", linewidth = 0.3) +
-        scale_fill_distiller(palette = "RdBu", limits = lims_RI,
+        scale_fill_distiller(palette = "Reds", limits = lims_RI,
                              oob = scales::squish, direction = 1, na.value = "grey90") +
         coord_sf(xlim = c(-2500000, 2500000), ylim = c(-2200000, 730000), expand = FALSE) +
         labs(title = title, fill = "RI") +
