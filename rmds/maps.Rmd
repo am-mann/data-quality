@@ -1224,6 +1224,19 @@ states_info <- tigris::states(year = 2020, cb = TRUE, class = "sf") |>
   dplyr::select(STATEFP, STUSPS) %>% dplyr::rename(statefp = STATEFP, state = STUSPS)
 
 counties_lite <- counties_aug %>% sf::st_drop_geometry() %>% dplyr::select(county_ihme, statefp)
+counties_lite <- counties_lite %>%
+  rename(county_ihme = fips) %>%
+  mutate(
+    county_ihme = str_pad(as.character(county_ihme), 5, pad = "0"),
+    statefp     = str_pad(as.character(statefp), 2, pad = "0")
+  )
+
+# 2) Quick sanity checks (optional but useful)
+cat("counties_lite names: ", paste(names(counties_lite), collapse = ", "), "\n")
+cat("example counties_lite rows:\n"); print(head(counties_lite))
+cat("Sample county_ihme in cluster_map but not in counties_lite (should be empty or small):\n")
+print(setdiff(cluster_map$county_ihme, counties_lite$county_ihme)[1:10])
+
 
 # Build a county-level table for both periods by assigning each county its cluster's metric value
 build_county_values <- function(per){
@@ -1621,17 +1634,17 @@ make_single_map <- function(period_key, lims, states_sf, membership_df, counties
 
   map_sf <- cl_sf %>% dplyr::left_join(dat, by = "cluster")
 
-  ggplot2::ggplot() +
-    geom_sf(data = map_sf, aes(fill = value), colour = NA) +
-    geom_sf(data = states_sf, fill = NA, colour = "white", linewidth = 0.3) +
-    scale_fill_viridis_c(option = "D",
-                         limits = lims, oob = scales::squish, na.value = "grey90") +
-    coord_sf(xlim = c(-2500000, 2500000),
-             ylim = c(-2200000,  730000),
-             expand = FALSE) +
-    labs(title = gsub("_", "–", period_key), fill = NULL) +
-    theme_void(base_size = 11) +
-    theme(plot.title = element_text(hjust = 0.5, face = "bold"))
+ggplot2::ggplot() +
+  geom_sf(data = map_sf, aes(fill = value), colour = NA) +
+  geom_sf(data = states_sf, fill = NA, colour = "white", linewidth = 0.3) +
+  scale_fill_distiller(palette = "Reds", direction = -1,
+                       limits = lims, oob = scales::squish, na.value = "grey90") +
+  coord_sf(xlim = c(-2500000, 2500000),
+           ylim = c(-2200000,  730000),
+           expand = FALSE) +
+  labs(title = gsub("_", "–", period_key), fill = NULL) +
+  theme_void(base_size = 11) +
+  theme(plot.title = element_text(hjust = 0.5, face = "bold"))
 }
 
 pA <- make_single_map("1999_2005", lims_info, states_tf, membership, counties_tf, metrics_two)
@@ -1694,7 +1707,6 @@ pC <- ggplot2::ggplot(bx_df, aes(x = state, y = value, fill = period)) +
   geom_boxplot(width = 0.7, outlier.alpha = 0.4,
                position = position_dodge2(width = 0.75, preserve = "single")) +
   # UCOD diversity is not necessarily 0–1; let ggplot choose sensible y scaling
-  scale_fill_manual(values = c("#94bedf","#f2c879")) +
   labs(x = "States (ranked by declining median county-level 2020–2022 UCOD 4-digit standardized diversity)",
        y = "UCOD 4-digit standardized diversity") +
   theme_bw(base_size = 10) +
@@ -1832,7 +1844,7 @@ counties_aug_fixed <- counties_aug_fixed %>%
 
   clusters_aug_sf <- counties_aug_fixed %>%
     select(county_ihme, geometry) %>%
-    inner_join(cluster_map, by = "county_ihme") %>%
+    inner_join(cluster_map, by = "county_ihme.x") %>%
     group_by(cluster_id) %>%
     summarise(geometry = sf::st_union(geometry), .groups = "drop") %>%
     sf::st_make_valid()
@@ -1840,6 +1852,23 @@ counties_aug_fixed <- counties_aug_fixed %>%
   counties_lite <- counties_aug_fixed %>%
     sf::st_drop_geometry() %>%
     select(county_ihme, statefp)
+  library(dplyr)
+library(stringr)
+
+# 1) Rename and normalise counties_lite so it contains county_ihme and 2-digit statefp
+counties_lite <- counties_lite %>%
+  rename(county_ihme = fips) %>%
+  mutate(
+    county_ihme = str_pad(as.character(county_ihme), 5, pad = "0"),
+    statefp     = str_pad(as.character(statefp), 2, pad = "0")
+  )
+
+# 2) Quick sanity checks (optional but useful)
+cat("counties_lite names: ", paste(names(counties_lite), collapse = ", "), "\n")
+cat("example counties_lite rows:\n"); print(head(counties_lite))
+cat("Sample county_ihme in cluster_map but not in counties_lite (should be empty or small):\n")
+print(setdiff(cluster_map$county_ihme, counties_lite$county_ihme)[1:10])
+
 }
 
 # 3) State labels (for box plot)
@@ -1853,17 +1882,22 @@ states_info <- tigris::states(year = 2020, cb = TRUE, class = "sf") %>%
 # Plot helpers
 # ──────────────────────────────────────────────────────────────
 
-# Map helper (Viridis "D", allow reversing)
 make_map <- function(map_sf, fill_col, title, lims, states_sf, reverse = FALSE) {
   ggplot() +
     geom_sf(data = map_sf, aes(fill = .data[[fill_col]]), colour = NA) +
     geom_sf(data = states_sf, fill = NA, colour = "white", linewidth = 0.3) +
-    scale_fill_viridis_c(option = "D", limits = lims, oob = scales::squish,
-                         direction = ifelse(reverse, -1, 1),
-                         na.value = "grey90") +
-    coord_sf(xlim = c(-2500000, 2500000),
-             ylim = c(-2200000,  730000),
-             expand = FALSE) +
+    scale_fill_distiller(
+      palette = "Reds",
+      limits = lims,
+      oob = scales::squish,
+      direction = 1,
+      na.value = "grey90"
+    ) +
+    coord_sf(
+      xlim = c(-2500000, 2500000),
+      ylim = c(-2200000,  730000),
+      expand = FALSE
+    ) +
     labs(title = title, fill = NULL) +
     theme_void(base_size = 11) +
     theme(plot.title = element_text(hjust = 0.5, face = "bold"))
@@ -1875,7 +1909,6 @@ make_boxplot <- function(bx_df, y_lab, percent_scale = FALSE, fixed_ylim = NULL)
     geom_hline(yintercept = 0, linetype = 3, linewidth = 0.3) +
     geom_boxplot(width = 0.7, outlier.alpha = 0.4,
                  position = position_dodge2(width = 0.75, preserve = "single")) +
-    scale_fill_manual(values = c("#94bedf","#b0d87e","#f2c879")) +
     labs(x = "States (ranked by declining median county-level 2020–2022)",
          y = y_lab) +
     # Center the legend over the panel area
@@ -1943,7 +1976,6 @@ make_three_period_map_box <- function(metric_col,
   }
   bx_df <- bind_rows(
     build_bx_df("1999_2005"),
-    build_bx_df("2013_2019"),
     build_bx_df("2020_2022")
   ) %>% filter(!state %in% territories)
 
@@ -4812,6 +4844,376 @@ ggsave(here("figures","income_timeseries","metrics_by_income_timeseries_4panel.p
 pA_garb; pA_overd; pA_det; pA_ri; pB1; pB2; pB3; pB4
 
 ```
+Validation: 4 metrics by excess COVID-19 deaths
+```{r}
+# Simplified validation summary: R^2 and means by ratioMeanUCD quintile
+suppressPackageStartupMessages({
+  library(dplyr); library(tidyr); library(readr); library(stringr); library(here)
+})
+
+dir.create(here("figures","covid_validation"), recursive = TRUE, showWarnings = FALSE)
+
+std_fips <- function(x) stringr::str_pad(as.character(x), 5, pad = "0")
+`%||%` <- function(a,b) if (!is.null(a) && length(a) && !is.na(a)) a else b
+safe_wmean <- function(x, w) {
+  xx <- ifelse(is.finite(x), x, NA_real_); ww <- ifelse(is.finite(w), w, NA_real_)
+  if (all(is.na(xx))) return(NA_real_)
+  if (all(is.na(ww)) || sum(ww, na.rm = TRUE) <= 0) return(mean(xx, na.rm = TRUE))
+  sum(xx * ww, na.rm = TRUE) / sum(ww, na.rm = TRUE)
+}
+labs_quint <- c("Q1 lowest","Q2","Q3","Q4","Q5 highest")
+make_quintile_breaks <- function(v) {
+  v <- v[is.finite(v)]; stopifnot(length(v) > 0)
+  qs <- quantile(v, probs = seq(0,1,0.2), na.rm = TRUE, names = FALSE, type = 7)
+  for (i in 2:length(qs)) if (qs[i] <= qs[i-1]) qs[i] <- qs[i-1] + .Machine$double.eps
+  qs[1] <- min(v) - 1e-9; qs[length(qs)] <- max(v) + 1e-9; qs
+}
+
+# --- prerequisites ---
+stopifnot(exists("cy"), exists("detail_long"))
+cy <- cy %>% mutate(county_ihme = std_fips(county_ihme))
+
+# find prop_garbage column
+find_col <- function(df, patterns) {
+  nms <- names(df); hit <- NULL
+  for (pat in patterns) { m <- nms[grepl(pat, tolower(nms))]; if (length(m)) { hit <- m[1]; break } }
+  hit %||% NA_character_
+}
+prop_garbage_col <- get0("prop_garbage_col") %||% find_col(
+  cy, c("\\bprop[_]?garbage\\b","garbage[_]?share","frac[_]?garbage",
+        "dq_rec_ig_frac_mean_garbage","foreman[_]?garbage","\\bgarbage\\b")
+)
+if (is.na(prop_garbage_col)) stop("prop_garbage column not found in `cy`.")
+
+# determine weight column if available
+w_col <- if (exists("pop_col") && !is.na(pop_col) && pop_col %in% names(cy)) as.character(pop_col) else NA_character_
+if (is.na(w_col) && "population" %in% names(cy)) w_col <- "population"
+if (is.na(w_col) && "n_cert"     %in% names(cy)) w_col <- "n_cert"
+w_label <- ifelse(!is.na(w_col), w_col, "UNWEIGHTED")
+
+# --- read estimatesMonthly.csv and compute mean ratio per county (Mar2020 - Aug2022) ---
+est_file <- here("data_raw", "estimatesMonthly.csv")
+if (!file.exists(est_file)) stop("Cannot find ", est_file)
+est_raw <- readr::read_csv(est_file, show_col_types = FALSE)
+
+ratio_col <- "ratioMedUCD"
+
+est_clean <- est_raw %>%
+  transmute(
+    county_ihme = std_fips(.data[["FIPSCode"]]),
+    year = suppressWarnings(as.integer(.data[["year"]])),
+    month = suppressWarnings(as.integer(.data[["month"]])),
+    ratioMeanUCD = suppressWarnings(as.numeric(.data[[ratio_col]]))
+  ) %>%
+  filter(!is.na(county_ihme), is.finite(year), is.finite(month), is.finite(ratioMeanUCD)) %>%
+  mutate(ym = year * 100L + month) %>%
+  filter(ym >= 202003L, ym <= 202208L)
+
+ratio_by_county <- est_clean %>%
+  group_by(county_ihme) %>%
+  summarise(ratioMeanUCD_avg = mean(ratioMeanUCD, na.rm = TRUE), .groups = "drop") %>%
+  filter(is.finite(ratioMeanUCD_avg))
+
+# quintiles of ratio
+qb_ratio <- make_quintile_breaks(ratio_by_county$ratioMeanUCD_avg)
+ratio_quint <- ratio_by_county %>%
+  mutate(ratio_q = cut(ratioMeanUCD_avg, breaks = qb_ratio, include.lowest = TRUE, right = FALSE, labels = labs_quint))
+
+# --- build county-level stable averages (weighted across years) ---
+# create detail_year if not present (same logic as your original script)
+if (!exists("detail_year")) {
+  detail_long <- detail_long %>% mutate(county_ihme = std_fips(county_ihme))
+  ucod_icd4_candidates <- c("detail_icd4_ucod","detail_ucod_icd4_cstd","detail_ucod_icd4","detail_icd4")
+  wide_hit <- intersect(ucod_icd4_candidates, names(detail_long))[1]
+  if (!is.na(wide_hit)) {
+    has_year <- "year" %in% names(detail_long)
+    detail_year <- detail_long %>% transmute(
+      county_ihme, year = if (has_year) suppressWarnings(as.integer(year)) else NA_integer_,
+      detail_icd4 = suppressWarnings(as.numeric(.data[[wide_hit]]))
+    )
+  } else {
+    stopifnot(all(c("metric","value") %in% names(detail_long)))
+    icd4_pat <- "(detail|diversity).*ucod.*icd\\s*[-_ ]?4|icd\\s*[-_ ]?4.*ucod"
+    dl <- detail_long %>% dplyr::filter(grepl(icd4_pat, tolower(metric)))
+    detail_year <- dl %>% transmute(
+      county_ihme, year = if ("year" %in% names(dl)) suppressWarnings(as.integer(year)) else NA_integer_,
+      detail_icd4 = suppressWarnings(as.numeric(value))
+    ) %>% group_by(county_ihme, year) %>% summarise(detail_icd4 = mean(detail_icd4, na.rm = TRUE), .groups = "drop")
+  }
+  detail_year <- detail_year %>% filter(is.finite(year), is.finite(detail_icd4)) %>% mutate(year = as.integer(year))
+}
+
+# weights per county-year (for aggregation)
+w_df <- cy %>%
+  transmute(county_ihme = std_fips(county_ihme), year,
+            weight = if (!is.na(w_col) && w_col %in% names(cy)) suppressWarnings(as.numeric(.data[[w_col]])) else NA_real_) %>%
+  filter(is.finite(year), year >= 1999, year <= 2022)
+
+# base selection
+base_sel <- cy %>%
+  transmute(county_ihme = std_fips(county_ihme), year,
+            prop_garbage   = suppressWarnings(as.numeric(.data[[prop_garbage_col]])),
+            ri             = if ("RI_post_only" %in% names(cy)) suppressWarnings(as.numeric(.data[["RI_post_only"]])) else NA_real_) %>%
+  left_join(w_df, by = c("county_ihme","year")) %>%
+  filter(year >= 1999, year <= 2022)
+
+# county-level stable averages (weighted across years)
+county_avg <- base_sel %>%
+  left_join(detail_year, by = c("county_ihme","year")) %>%
+  group_by(county_ihme) %>%
+  summarise(
+    prop_garbage = safe_wmean(prop_garbage, weight),
+    detail_icd4   = safe_wmean(detail_icd4,  weight),
+    ri            = safe_wmean(ri,           weight),
+    wt_sum = sum(weight, na.rm = TRUE),
+    .groups = "drop"
+  )
+
+# join ratio info
+county_avg <- county_avg %>% inner_join(ratio_quint, by = "county_ihme")
+
+# restrict to counties with finite metric & ratio
+metrics <- c("prop_garbage","detail_icd4","ri")
+valid_counties <- county_avg %>% filter(if_all(all_of(metrics), ~ TRUE)) # keep all; filter per-metric later
+
+# helper: fit (weighted if available) lm and return R^2 (summary()$r.squared)
+fit_r2 <- function(df, response_col, weight_col = "wt_sum") {
+  df2 <- df %>% filter(is.finite(.data[[response_col]]), is.finite(ratioMeanUCD_avg))
+  if (nrow(df2) < 3) return(NA_real_)
+  wvec <- if (weight_col %in% names(df2) & any(is.finite(df2[[weight_col]]) & df2[[weight_col]] > 0)) df2[[weight_col]] else NULL
+  fm <- if (is.null(wvec)) {
+    lm(as.formula(paste(response_col, "~ ratioMeanUCD_avg")), data = df2)
+  } else {
+    lm(as.formula(paste(response_col, "~ ratioMeanUCD_avg")), data = df2, weights = wvec)
+  }
+  s <- summary(fm)
+  # summary(lm) returns R^2 in $r.squared (even for weighted lm this is conventional)
+  s$r.squared
+}
+
+# Build summary table: for each metric, for Overall and each ratio quintile
+out_rows <- list()
+for (metric in metrics) {
+  # overall
+  r2_overall <- fit_r2(county_avg, metric)
+  mean_metric_overall <- safe_wmean(county_avg[[metric]], county_avg$wt_sum)
+  mean_prop_garbage_overall <- safe_wmean(county_avg$prop_garbage, county_avg$wt_sum)
+  n_overall <- sum(is.finite(county_avg[[metric]]) & is.finite(county_avg$ratioMeanUCD_avg))
+  out_rows[[length(out_rows)+1]] <- tibble::tibble(
+    metric = metric,
+    quintile = "Overall",
+    n_counties = n_overall,
+    mean_metric = mean_metric_overall,
+    mean_prop_garbage = mean_prop_garbage_overall,
+    R2 = r2_overall
+  )
+
+  # by quintile
+  for (q in labs_quint) {
+    sub <- county_avg %>% filter(ratio_q == q)
+    n_sub <- nrow(sub %>% filter(is.finite(.data[[metric]]), is.finite(ratioMeanUCD_avg)))
+    if (n_sub < 3) {
+      r2_q <- NA_real_
+    } else {
+      r2_q <- fit_r2(sub, metric)
+    }
+    out_rows[[length(out_rows)+1]] <- tibble::tibble(
+      metric = metric,
+      quintile = q,
+      n_counties = n_sub,
+      mean_metric = safe_wmean(sub[[metric]], sub$wt_sum),
+      mean_prop_garbage = safe_wmean(sub$prop_garbage, sub$wt_sum),
+      R2 = r2_q
+    )
+  }
+}
+
+summary_tbl <- dplyr::bind_rows(out_rows) %>%
+  mutate(
+    metric = dplyr::recode(metric,
+      prop_garbage = "Proportion garbage (UCOD)",
+      detail_icd4 = "Phillips detail (UCOD, ICD-4)",
+      ri = "Re-assignability Index (RI)"
+    )
+  ) %>%
+  arrange(metric, factor(quintile, levels = c("Overall", labs_quint)))
+
+# print nicely to console
+print(summary_tbl)
+
+# save CSV
+readr::write_csv(summary_tbl, here("figures","covid_validation","validation_summary_by_ratio_quintile.csv"))
+
+# also return the summary object invisibly if used in a script
+invisible(summary_tbl)
+
+```
+```{r}
+# Compute R2 + weighted correlation, p-value, CI for 3 metrics + aggregate
+suppressPackageStartupMessages({
+  library(dplyr); library(readr); library(stringr); library(here)
+})
+
+dir.create(here("figures","covid_validation"), recursive = TRUE, showWarnings = FALSE)
+
+# ---------- helpers ----------
+std_fips <- function(x) stringr::str_pad(as.character(x), 5, pad = "0")
+`%||%` <- function(a,b) if (!is.null(a) && length(a) && !is.na(a)) a else b
+safe_wmean <- function(x, w) {
+  xx <- ifelse(is.finite(x), x, NA_real_); ww <- ifelse(is.finite(w), w, NA_real_)
+  if (all(is.na(xx))) return(NA_real_)
+  if (all(is.na(ww)) || sum(ww, na.rm = TRUE) <= 0) return(mean(xx, na.rm = TRUE))
+  sum(xx * ww, na.rm = TRUE) / sum(ww, na.rm = TRUE)
+}
+safe_wvar <- function(x, w) {
+  xx <- ifelse(is.finite(x), x, NA_real_); ww <- ifelse(is.finite(w), w, NA_real_)
+  ok <- !is.na(xx) & !is.na(ww) & ww > 0
+  if (sum(ok) <= 1) return(NA_real_)
+  wm <- sum(ww[ok] * xx[ok]) / sum(ww[ok])
+  sum(ww[ok] * (xx[ok] - wm)^2) / sum(ww[ok])
+}
+safe_wsd <- function(x, w) sqrt(safe_wvar(x,w))
+
+# weighted Pearson correlation + Fisher CI/p-value
+w_pearson <- function(x, y, w = NULL) {
+  ok <- is.finite(x) & is.finite(y)
+  if (!is.null(w)) ok <- ok & is.finite(w) & (w > 0)
+  x <- x[ok]; y <- y[ok]; if (!is.null(w)) w <- w[ok]
+  n <- length(x); if (n < 4) return(c(r=NA,p=NA,lo=NA,hi=NA))
+  if (is.null(w) || length(w)==0) {
+    r <- cor(x, y)
+  } else {
+    wm <- function(z, w) sum(w*z)/sum(w)
+    xm <- wm(x,w); ym <- wm(y,w)
+    covw <- sum(w*(x-xm)*(y-ym))/sum(w)
+    sx <- sqrt(sum(w*(x-xm)^2)/sum(w)); sy <- sqrt(sum(w*(y-ym)^2)/sum(w))
+    r <- covw/(sx*sy)
+  }
+  # Fisher z-transform for CI and p
+  zr <- 0.5*log((1+r)/(1-r))
+  se <- 1/sqrt(n-3)
+  zcrit <- qnorm(0.975)
+  lo <- tanh(zr - zcrit*se); hi <- tanh(zr + zcrit*se)
+  tval <- r*sqrt((n-2)/(1-r^2))
+  pval <- 2*pt(-abs(tval), df=n-2)
+  c(r=r, p=pval, lo=lo, hi=hi)
+}
+
+# ---------- prerequisites ----------
+stopifnot(exists("cy"), exists("detail_long"))
+cy <- cy %>% mutate(county_ihme = std_fips(county_ihme))
+find_col <- function(df, patterns) {
+  nms <- names(df); for (pat in patterns) { m <- nms[grepl(pat, tolower(nms))]; if (length(m)) return(m[1]) }
+  NA_character_
+}
+prop_garbage_col <- get0("prop_garbage_col") %||%
+  find_col(cy, c("\\bprop[_]?garbage\\b","garbage[_]?share","frac[_]?garbage",
+                 "dq_rec_ig_frac_mean_garbage","foreman[_]?garbage","\\bgarbage\\b"))
+if (is.na(prop_garbage_col)) stop("prop_garbage column not found in `cy`.")
+w_col <- if (exists("pop_col") && !is.na(pop_col) && pop_col %in% names(cy)) as.character(pop_col) else NA_character_
+if (is.na(w_col) && "population" %in% names(cy)) w_col <- "population"
+if (is.na(w_col) && "n_cert" %in% names(cy)) w_col <- "n_cert"
+
+# ---------- read ratioMeanUCD ----------
+est <- read_csv(here("data_raw","estimatesMonthly.csv"), show_col_types=FALSE)
+ratio_col <- if ("ratioMeanUCD" %in% names(est)) "ratioMeanUCD" else
+  find_col(est, c("ratiomean","ratio_ucd","ratio_mean_ucd"))
+est_clean <- est %>%
+  transmute(county_ihme=std_fips(FIPSCode),
+            year=as.integer(year), month=as.integer(month),
+            ratioMeanUCD=as.numeric(.data[[ratio_col]])) %>%
+  mutate(ym=year*100L+month) %>%
+  filter(ym>=202003L, ym<=202208L, is.finite(ratioMeanUCD))
+ratio_by_county <- est_clean %>%
+  group_by(county_ihme) %>%
+  summarise(ratioMeanUCD_avg=mean(ratioMeanUCD,na.rm=TRUE),.groups="drop")
+
+# ---------- detail_year ----------
+if (!exists("detail_year")) {
+  detail_long <- detail_long %>% mutate(county_ihme = std_fips(county_ihme))
+  hit <- intersect(c("detail_icd4_ucod","detail_ucod_icd4_cstd","detail_ucod_icd4","detail_icd4"), names(detail_long))[1]
+  has_year <- "year" %in% names(detail_long)
+  detail_year <- detail_long %>% transmute(
+    county_ihme,
+    year = if (has_year) as.integer(year) else NA_integer_,
+    detail_icd4 = as.numeric(.data[[hit]])
+  ) %>% filter(is.finite(year), is.finite(detail_icd4))
+}
+
+# ---------- build county averages ----------
+w_df <- cy %>% transmute(county_ihme, year,
+                         weight=if (!is.na(w_col) && w_col %in% names(cy))
+                           as.numeric(.data[[w_col]]) else NA_real_)
+base_sel <- cy %>%
+  transmute(county_ihme, year,
+            prop_garbage=as.numeric(.data[[prop_garbage_col]]),
+            ri=if ("RI_post_only" %in% names(cy))
+              as.numeric(.data[["RI_post_only"]]) else NA_real_) %>%
+  left_join(w_df, by=c("county_ihme","year"))
+
+county_avg <- base_sel %>%
+  left_join(detail_year, by=c("county_ihme","year")) %>%
+  group_by(county_ihme) %>%
+  summarise(prop_garbage=safe_wmean(prop_garbage,weight),
+            detail_icd4=safe_wmean(detail_icd4,weight),
+            ri=safe_wmean(ri,weight),
+            wt_sum=sum(weight,na.rm=TRUE),
+            .groups="drop") %>%
+  inner_join(ratio_by_county, by="county_ihme")
+
+# ---------- compute R² + correlations ----------
+fit_r2 <- function(df, y) {
+  df2 <- df %>% filter(is.finite(.data[[y]]), is.finite(ratioMeanUCD_avg))
+  if (nrow(df2)<3) return(NA_real_)
+  if (any(is.finite(df2$wt_sum)&df2$wt_sum>0))
+    summary(lm(reformulate("ratioMeanUCD_avg",y),df2,weights=df2$wt_sum))$r.squared
+  else summary(lm(reformulate("ratioMeanUCD_avg",y),df2))$r.squared
+}
+
+metrics <- c("prop_garbage","detail_icd4","ri")
+
+get_stats <- function(df, m) {
+  df2 <- df %>% filter(is.finite(.data[[m]]), is.finite(ratioMeanUCD_avg))
+  n <- nrow(df2)
+  if (n<4) return(data.frame(metric=m,n_counties=n,R2=NA,correlation=NA,
+                             corr_sq=NA,p_value=NA,ci_lower=NA,ci_upper=NA))
+  w_ok <- any(is.finite(df2$wt_sum)&df2$wt_sum>0)
+  corrres <- if (w_ok) w_pearson(df2[[m]],df2$ratioMeanUCD_avg,df2$wt_sum)
+             else w_pearson(df2[[m]],df2$ratioMeanUCD_avg,NULL)
+  r2 <- fit_r2(df2,m)
+  data.frame(metric=m,n_counties=n,R2=r2,
+             correlation=corrres["r"],corr_sq=corrres["r"]^2,
+             p_value=corrres["p"],ci_lower=corrres["lo"],ci_upper=corrres["hi"])
+}
+
+results <- lapply(metrics,get_stats,df=county_avg) %>% bind_rows()
+
+# ---------- aggregate metric ----------
+for (m in metrics){
+  wm<-safe_wmean(county_avg[[m]],county_avg$wt_sum)
+  ws<-safe_wsd(county_avg[[m]],county_avg$wt_sum)
+  if(!is.finite(ws)||ws<=0) ws<-sd(county_avg[[m]],na.rm=TRUE)
+  county_avg[[paste0(m,"_z")]]<-(county_avg[[m]]-wm)/ws
+}
+county_avg$aggregate_z<-apply(county_avg[,paste0(metrics,"_z")],1,
+                              function(r) if(all(is.na(r))) NA else mean(r,na.rm=TRUE))
+
+results <- bind_rows(results,get_stats(county_avg,"aggregate_z"))
+
+# pretty labels
+results$metric <- recode(results$metric,
+  prop_garbage="Proportion garbage (UCOD)",
+  detail_icd4="Phillips detail (UCOD, ICD-4)",
+  ri="Re-assignability Index (RI)",
+  aggregate_z="Aggregate (mean weighted z)")
+
+# ---------- output ----------
+print(results)
+write_csv(results, here("figures","covid_validation","r2_summary_continuous_with_corr.csv"))
+invisible(results)
+
+```
+
 
 
 
