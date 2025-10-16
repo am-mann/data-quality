@@ -3,6 +3,7 @@ code/secrets.R
 data_private/mcod/*
 !data_private/mcod_sample/*
 data_raw/mcod/**
+figures/
 
 # General OS
 **.DS_Store
