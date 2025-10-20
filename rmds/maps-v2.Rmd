@@ -524,7 +524,7 @@ if (!("garb_k" %in% nms)) {
 }
 
 # Required vars
-need_vars <- c("county_ihme","period","overd_n","overd_miss_k","garb_k","n_cert","N_garbage","RI_post_only")
+need_vars <- c("county_ihme","period","garb_k","n_cert","N_garbage","RI_post_only")
 miss <- setdiff(need_vars, names(dy))
 if (length(miss)) stop("Missing required columns in data_file: ", paste(miss, collapse=", "))
 
@@ -535,8 +535,6 @@ cluster_core <- dy %>%
   dplyr::inner_join(membership, by = c("county_ihme","period")) %>%
   dplyr::group_by(period, cluster) %>%
   dplyr::summarise(
-    sum_overd_miss_k = sum(overd_miss_k, na.rm = TRUE),
-    sum_overd_n      = sum(overd_n,      na.rm = TRUE),
     sum_garb_k       = sum(garb_k,       na.rm = TRUE),
     sum_n_cert       = sum(n_cert,       na.rm = TRUE),
     sum_N_garbage    = sum(N_garbage,    na.rm = TRUE),
@@ -731,7 +729,6 @@ states_info <- tigris::states(year = 2020, cb = TRUE, class = "sf") |>
 
 counties_lite <- counties_aug %>% sf::st_drop_geometry() %>% dplyr::select(county_ihme, statefp)
 counties_lite <- counties_lite %>%
-  rename(county_ihme = fips) %>%
   mutate(
     county_ihme = str_pad(as.character(county_ihme), 5, pad = "0"),
     statefp     = str_pad(as.character(statefp), 2, pad = "0")
@@ -1152,7 +1149,7 @@ if (!exists("clusters_aug_sf") || !exists("counties_lite")) {
   counties_aug_fixed <- counties_aug_fixed %>% mutate(statefp = str_pad(as.character(statefp), 2, pad = "0"))
 
 counties_aug_fixed <- counties_aug_fixed %>%
-  left_join(ihme_map, by = c("fips" = "GEOID"), suffix = c(".orig", ".map")) %>%
+  left_join(ihme_map, by = "fips", suffix = c(".orig", ".map")) %>%
   mutate(
     county_ihme = coalesce(county_ihme.orig, county_ihme.map, fips)
   ) %>%
@@ -1170,16 +1167,11 @@ counties_aug_fixed <- counties_aug_fixed %>%
   counties_lite <- counties_aug_fixed %>%
     sf::st_drop_geometry() %>%
     select(county_ihme, statefp)
-  library(dplyr)
-library(stringr)
 
-# 1) Rename and normalise counties_lite so it contains county_ihme and 2-digit statefp
+
 counties_lite <- counties_lite %>%
   rename(county_ihme = fips) %>%
-  mutate(
-    county_ihme = str_pad(as.character(county_ihme), 5, pad = "0"),
-    statefp     = str_pad(as.character(statefp), 2, pad = "0")
-  )
+  mutate(county_ihme = str_pad(as.character(county_ihme), 5, pad = "0"))
 
 # 2) Quick sanity checks (optional but useful)
 cat("counties_lite names: ", paste(names(counties_lite), collapse = ", "), "\n")
