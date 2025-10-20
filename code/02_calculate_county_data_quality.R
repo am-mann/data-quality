@@ -312,9 +312,6 @@ if (PARALLELIZE) {
     suppressPackageStartupMessages({ library(future); library(furrr) })
     plan(multisession, workers = max(1, N_WORKERS))
     county_year_all <- purrr::map_dfr(parquet_files, summarise_year_file)
-}
-    )
-    plan(sequential)
 } else {
     county_year_all <- purrr::map_dfr(parquet_files, summarise_year_file)
 }
@@ -326,6 +323,6 @@ if (WRITE_ONE_CSV) {
     message("Rows written to dataset dir: ", WRITE_DATASET_DIR)
 }
 
-#BASE_DIR = Path("/Users/amymann/Documents/Data Quality Project/data/parquet")
+# BASE_DIR = Path("/Users/amymann/Documents/Data Quality Project/data/parquet")
 # read_parquet(here("data_private/mcod_sample/mcod_1999.parquet"))
-#read_parquet("/Users/amymann/Documents/Data Quality Project/data/parquet/mort2020.parquet")
+d <- read_parquet("/Users/amymann/Documents/Data Quality Project/data/parquet/mort1999.parquet")

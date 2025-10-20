@@ -27,7 +27,6 @@ suppressPackageStartupMessages({
     library(here); library(DBI); library(duckdb); library(glue)
 })
 
-# ---------------- PARAMETERS ----------------
 min_deaths <- 2000L
 periods <- list(
     "1999_2005" = 1999:2005,
@@ -53,7 +52,7 @@ UCR39_COL  <- "ucr39"
 crs_proj  <- 5070
 threads   <- max(1L, parallel::detectCores() - 1L)
 
-# ---------------- FIPS patch (edit as you find legacy codes) ----------------
+# ---------------- FIPS patch ----------------
 fips_patch <- c(
     "02201" = "02158", "02232" = "02275", "02261" = "02164",
     "02270" = "02158", "02280" = "02105", "02282" = "02195", "02290" = "02122",
@@ -305,7 +304,6 @@ build_year_spatial_pref_earlier_geoid_fallback <- function(yr, crs_proj = 5070, 
     list(requested_year = yr, year_used = year_used, counties_sf = counties_sf, centroid_mat = centroid_mat, nbrs_list = nbrs_list)
 }
 
-# ---------------- build period spatials & temporally-stable FIPS (intersection) ----------------
 period_spatial_list <- list()
 for (pname in names(periods)) {
     yrs <- periods[[pname]]

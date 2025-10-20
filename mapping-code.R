@@ -350,7 +350,7 @@ make_map_numeric <- function(sf_data, fill_col, limits, title) {
     geom_sf(data = sf_data, aes(fill = .data[[fill_col]]), colour = NA) +
     geom_sf(data = states_outline, fill = NA, colour = "white", linewidth = 0.3) +
     scale_fill_distiller(palette = "Reds", limits = limits,
-                         oob = scales::squish, direction = 1,
+                         oob = scales::squish, direction = -1,
                          na.value = "grey90") +
     coord_sf(xlim = c(-2500000, 2500000), ylim = c(-2200000, 730000), expand = FALSE) +
     labs(title = title, fill = NULL) +
@@ -900,7 +900,7 @@ make_map_RI_two <- function(map_sf, title) {
         geom_sf(data = map_sf, aes(fill = RI_post_only), colour = NA) +
         geom_sf(data = states_outline, fill = NA, colour = "white", linewidth = 0.3) +
         scale_fill_distiller(palette = "Reds", limits = lims_RI,
-                             oob = scales::squish, direction = 1, na.value = "grey90") +
+                             oob = scales::squish, direction = -1, na.value = "grey90") +
         coord_sf(xlim = c(-2500000, 2500000), ylim = c(-2200000, 730000), expand = FALSE) +
         labs(title = title, fill = "RI") +
         theme_void(base_size = 11) +

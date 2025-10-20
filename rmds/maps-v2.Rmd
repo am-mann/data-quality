@@ -3,208 +3,6 @@ title: "Mapping Notebook"
 output: html_notebook
 ---
 
-Temporality stable groupings
-```{r}
-# ──────────────────────────────────────────────────────────────
-# 5-year average maps by temporally-stable IHME groups 
-# ──────────────────────────────────────────────────────────────
-
-# 0) Packages & options
-required <- c("sf","tigris","readr","dplyr","stringr","purrr","ggplot2","here","scales","patchwork")
-missing <- setdiff(required, rownames(installed.packages()))
-if (length(missing)) install.packages(missing)
-invisible(lapply(required, library, character.only = TRUE))
-options(tigris_use_cache = TRUE, tigris_class = "sf")
-
-`%||%` <- function(a, b) if (!is.null(a)) a else b
-
-# 1) Variables to map (no transformations will be applied)
-vars_to_map <- c(
-  "prop_garbage", "DQ_rec_ig_frac_mean_garbage", "DQ_overall", "DQ_rec_ig_abs_mean", "foreman_garbage", "RI"
-)
-
-# 2) Load your county-year data (as-is); add time windows only
-dq <- readr::read_csv(here::here("data","county_year_quality_metrics.csv"), show_col_types = FALSE) %>%
-  dplyr::mutate(
-    year        = as.integer(year),
-    county_ihme = stringr::str_pad(as.character(county_ihme), 5, pad = "0"),
-    time_window = dplyr::case_when(
-      year >= 1999 & year <= 2005 ~ "1999–2005",
-      year >= 2006 & year <= 2012 ~ "2006–2012",
-      year >= 2013 & year <= 2019 ~ "2013–2019",
-      year >= 2020 & year <= 2022 ~ "2020–2022",
-      TRUE ~ NA_character_
-    )
-  )
-
-# Keep only variables that actually exist; no conversions
-vars_present <- intersect(vars_to_map, names(dq))
-if (!length(vars_present)) stop("None of vars_to_map exist in dq. Check column names.")
-vars_missing <- setdiff(vars_to_map, vars_present)
-if (length(vars_missing)) message("Skipping missing vars: ", paste(vars_missing, collapse = ", "))
-
-# 3) 5-year averages by temporally-stable group (means of existing cols only)
-dq_avg <- dq %>%
-  dplyr::group_by(county_ihme, time_window) %>%
-  dplyr::summarise(
-    dplyr::across(dplyr::all_of(vars_present), ~ mean(.x, na.rm = TRUE)),
-    n_years = dplyr::n(),
-    .groups = "drop"
-  )
-
-# 4) Crosswalk for temporality-stable shapes (dissolve multi-GEOID groups)
-load(here::here("data_raw","ihme_fips.rda"))  # provides ihme_fips
-ihme_map <- ihme_fips %>%
-  dplyr::transmute(
-    GEOID       = stringr::str_pad(orig_fips, 5, pad = "0"),
-    county_ihme = stringr::str_pad(ihme_fips, 5, pad = "0")
-  ) %>%
-  dplyr::distinct()
-
-# 5) Build shapes per period & join averages
-crs_proj <- 2163
-shapefile_years <- c("1999–2005"=2000, "2006–2012"=2010, "2013–2019"=2019, "2020–2022"=2020)
-
-st_shift <- function(x, offset) { sf::st_geometry(x) <- sf::st_geometry(x) + offset; x }
-st_scale <- function(x, factor) { ctr <- sf::st_centroid(sf::st_union(x)); sf::st_geometry(x) <- (sf::st_geometry(x) - ctr) * factor + ctr; x }
-
-# ——— Normalizer: ensure a 5-digit GEOID exists, with robust fallbacks ———
-normalize_geoid <- function(sf, year) {
-  nms <- names(sf)
-
-  geoid_col <- grep("^GEOID", nms, value = TRUE)[1]
-  if (!is.na(geoid_col)) {
-    message("[", year, "] Using GEOID column: ", geoid_col)
-    sf <- dplyr::rename(sf, GEOID = !!rlang::sym(geoid_col))
-    sf$GEOID <- stringr::str_pad(as.character(sf$GEOID), 5, pad = "0")
-    return(sf)
-  }
-
-  state_col  <- grep("^STATE.*FP$", nms, value = TRUE)[1]
-  county_col <- grep("^COUNTY.*FP$", nms, value = TRUE)[1]
-  if (!is.na(state_col) && !is.na(county_col)) {
-    message("[", year, "] Constructing GEOID from ", state_col, " + ", county_col)
-    sf$GEOID <- paste0(
-      stringr::str_pad(as.character(sf[[state_col]]),  2, pad = "0"),
-      stringr::str_pad(as.character(sf[[county_col]]), 3, pad = "0")
-    )
-    return(sf)
-  }
-
-  combo_col <- grep("^CNTYIDFP$", nms, value = TRUE)[1]
-  if (!is.na(combo_col)) {
-    message("[", year, "] Using combined ID column: ", combo_col, " as GEOID")
-    sf <- dplyr::rename(sf, GEOID = !!rlang::sym(combo_col))
-    sf$GEOID <- stringr::str_pad(as.character(sf$GEOID), 5, pad = "0")
-    return(sf)
-  }
-
-  stop("No GEOID-compatible columns found in shapefile for year ", year,
-       ". Columns were: ", paste(nms, collapse = ", "))
-}
-
-# ——— Build groups: normalize → transform → dissolve by county_ihme ———
-build_groups_sf <- function(year) {
-  counties_raw <- tigris::counties(year = year, cb = TRUE, class = "sf") %>%
-    sf::st_zm(drop = TRUE, what = "ZM")
-
-  counties_norm <- normalize_geoid(counties_raw, year) %>%  # ← normalize FIRST
-    sf::st_transform(crs_proj)
-
-  groups_sf <- counties_norm %>%
-    dplyr::left_join(ihme_map, by = "GEOID") %>%
-    dplyr::mutate(county_ihme = dplyr::coalesce(county_ihme, GEOID)) %>%
-    dplyr::group_by(county_ihme) %>%
-    dplyr::summarise(.groups = "drop")  # st_union here
-
-  # AK / HI layout (unchanged)
-  alaska   <- groups_sf %>% dplyr::filter(substr(county_ihme,1,2)=="02") %>%
-    { ctr <- sf::st_centroid(sf::st_union(.)); sf::st_geometry(.) <- (sf::st_geometry(.) - ctr)*0.40 + ctr; . } %>%
-    { sf::st_geometry(.) <- sf::st_geometry(.) + c(1300000, -4900000); . } %>%
-    sf::st_set_crs(crs_proj)
-  hawaii   <- groups_sf %>% dplyr::filter(substr(county_ihme,1,2)=="15") %>%
-    { ctr <- sf::st_centroid(sf::st_union(.)); sf::st_geometry(.) <- (sf::st_geometry(.) - ctr)*1.50 + ctr; . } %>%
-    { sf::st_geometry(.) <- sf::st_geometry(.) + c(5200000, -1400000); . } %>%
-    sf::st_set_crs(crs_proj)
-  mainland <- groups_sf %>% dplyr::filter(!substr(county_ihme,1,2) %in% c("02","15"))
-
-  dplyr::bind_rows(mainland, alaska, hawaii)
-}
-
-joined_by_period <- purrr::imap(
-  shapefile_years,
-  function(year, window) {
-    shape_all <- build_groups_sf(year)
-    dplyr::left_join(shape_all, dplyr::filter(dq_avg, time_window == window), by = "county_ihme")
-  }
-)
-
-# 6) make_map — now shows titles; we pass ONLY period strings when calling
-make_map <- function(sf_data, var, title = NULL, palette = "RdBu") {
-  states <- tigris::states(cb = TRUE, class = "sf") |> st_transform(2163)
-
-  fill_scale <- if (var == "prop_garbage") {
-    scale_fill_distiller(palette = palette, limits = c(0.15, 0.4), oob = scales::squish, direction = -1, na.value = "grey90")
-  } else if (var == "prop_light") {
-    scale_fill_distiller(palette = palette, limits = c(0.20, 0.40), oob = scales::squish, direction = -1, na.value = "grey90")
-  } else if (var == "pct_overd_miss") {
-    scale_fill_distiller(palette = palette, limits = c(0, 0.75), oob = scales::squish, direction = -1, na.value = "grey90")
-  } else if (var == "direction_score") {
-    scale_fill_distiller(palette = palette, limits = c(-1,1.5), oob = scales::squish, direction = -1, na.value = "grey90")
-  } else if (var == "DQ_overall") {
-    scale_fill_distiller(palette = palette, limits = c(0,0.9), oob = scales::squish, direction = 1, na.value = "grey90")
-  } else if (var == "pct_acc_miss") {
-    scale_fill_distiller(palette = palette, limits = c(0, 0.75), oob = scales::squish, direction = -1, na.value = "grey90")
-  } else if (var == "pct_mandeath_comp_k") {
-    scale_fill_distiller(palette = palette, limits = c(5, 20), oob = scales::squish, direction = 1, na.value = "grey90")
-  } else if (var %in% c("pct_age_comp_k", "pct_sex_comp_k", "pct_race_comp_k")) {
-    scale_fill_distiller(palette = palette, limits = c(99.5, 100), oob = scales::squish, direction = 1, na.value = "grey90")
-  } else if (var == "RI") {
-    scale_fill_distiller(palette = palette, limits = c(0.15, 0.3), oob = scales::squish, direction = 1, na.value = "grey90")
-  } else if (var == "pct_gc_N19") {
-    scale_fill_distiller(palette = palette, limits = c(0, 0.025), oob = scales::squish, direction = -1, na.value = "grey90")
-  } else if (var == "pct_gc_J80") {
-    scale_fill_distiller(palette = palette, limits = c(0, 0.005), oob = scales::squish, direction = -1, na.value = "grey90")
-  } else if (startsWith(var, "pct_") || var == "overall_completeness_pct") {
-    scale_fill_distiller(palette = palette, limits = c(0, 100), oob = scales::squish, direction = 1, na.value = "grey90")
-  } else {
-    scale_fill_distiller(palette = palette, oob = scales::squish, na.value = "grey90", direction = -1)
-  }
-
-  ggplot() +
-    geom_sf(data = sf_data, aes(fill = .data[[var]]), colour = NA) +
-    geom_sf(data = states, fill = NA, colour = "white", linewidth = 0.3) +
-    fill_scale +
-    coord_sf(xlim = c(-2500000, 2500000),
-             ylim = c(-2200000, 730000),
-             expand = FALSE) +
-    labs(title = title %||% "", fill = NULL) +
-    theme_void() +
-    theme(
-      plot.title = element_text(size = 14, face = "bold", hjust = 0.5),  # ← SHOW titles
-      legend.text = element_text(size = 9)
-    )
-}
-
-# 7) Save ONLY 4-panel maps (one panel per time window)
-output_dir <- here::here("figures","5yr_avg_stable")
-dir.create(output_dir, showWarnings = FALSE, recursive = TRUE)
-
-purrr::walk(vars_present, function(var) {
-  p_1999 <- make_map(joined_by_period[["1999–2005"]], var, "1999–2005")
-  p_2006 <- make_map(joined_by_period[["2006–2012"]], var, "2006–2012")
-  p_2013 <- make_map(joined_by_period[["2013–2019"]], var, "2013–2019")
-  p_2020 <- make_map(joined_by_period[["2020–2022"]], var, "2020–2022")
-
-  combined <- (p_1999 | p_2006) / (p_2013 | p_2020)
-
-  ggsave(filename = file.path(output_dir, paste0(var, "_4panel.png")),
-         plot = combined, width = 12, height = 9, dpi = 320)
-})
-
-message("✓ Done. 4-panel maps saved to: ", output_dir)
-
-```
 Map RI scores with light clustering
 ```{r}
 # ──────────────────────────────────────────────────────────────
@@ -325,57 +123,101 @@ build_ihme_groups_sf <- function(year) {
     dplyr::summarise(.groups = "drop")
 }
 
-# 5) Light clustering (min_gb = 150)
-ihme2020 <- build_ihme_groups_sf(2020) %>% sf::st_transform(albers_5070)
-adj_list <- sf::st_touches(ihme2020)
-neighbors_of <- setNames(lapply(seq_len(nrow(ihme2020)), function(i) ihme2020$county_ihme[adj_list[[i]]]),
-                         ihme2020$county_ihme)
+# --------------------------
+# Section 5 (clustering) - Build cluster_map from merged all_county_groupings.csv
+# --------------------------
 
-min_gb <- 2000L   # LIGHT threshold
+# Candidate merged file locations (should already be produced earlier in script)
+merged_candidates <- c(
+  here::here("data_raw","all_county_groupings.csv"),
+  here::here("data","all_county_groupings.csv"),
+  here::here("all_county_groupings.csv")
+)
+merged_file <- merged_candidates[file.exists(merged_candidates)][1]
+if (is.na(merged_file) || length(merged_file) == 0) {
+  stop("Could not find merged all_county_groupings.csv. Expected at one of: ",
+       paste(merged_candidates, collapse = ", "))
+}
+message("Reading merged file for cluster assignments: ", merged_file)
 
-nodes_tbl <- ihme2020 %>%
-  sf::st_drop_geometry() %>%
-  dplyr::select(county_ihme) %>%
-  dplyr::left_join(robust_tbl, by = "county_ihme") %>%
-  dplyr::mutate(robust_gb = dplyr::coalesce(robust_gb, 0))
+# Read merged CSV as character
+merged_df <- readr::read_csv(merged_file, col_types = readr::cols(.default = "c"), show_col_types = FALSE)
 
-gb_vec    <- setNames(nodes_tbl$robust_gb, nodes_tbl$county_ihme)
-to_assign <- names(gb_vec)
-clusters  <- setNames(rep(NA_character_, length(gb_vec)), to_assign)
-cid <- 1L
+# Ensure we have a cluster-id column: prefer "CS Area Code", else try "County Set Name"
+if (!("CS Area Code" %in% names(merged_df)) && !("County Set Name" %in% names(merged_df))) {
+  stop("Merged file must contain a 'CS Area Code' or 'County Set Name' column (filled down).",
+       "\nPlease run the cleaning step that fills down group headers before this step.")
+}
+cluster_col_name <- if ("CS Area Code" %in% names(merged_df)) "CS Area Code" else "County Set Name"
 
-while (length(to_assign) > 0) {
-  seed  <- to_assign[which.max(gb_vec[to_assign])]
-  cur   <- seed
-  total <- gb_vec[seed]
-  avail <- setdiff(to_assign, seed)
-
-  repeat {
-    nbrs <- unique(unlist(neighbors_of[cur], use.names = FALSE))
-    nbrs <- setdiff(intersect(nbrs, avail), cur)
-    if (!length(nbrs)) break
-    cand_totals <- total + gb_vec[nbrs]
-    # Grow toward threshold; if still under threshold, take the best grower; else take the closest to threshold
-    best_idx <- if (any(cand_totals < min_gb)) which.max(cand_totals) else which.min(abs(cand_totals - min_gb))
-    best <- nbrs[best_idx]
-    new_total <- total + gb_vec[best]
-    if (is.na(new_total)) break
-    if (new_total <= min_gb * 1.6 || total < min_gb) {
-      cur   <- c(cur, best)
-      total <- new_total
-      avail <- setdiff(avail, best)
-      if (total >= min_gb) break
-    } else break
-  }
-
-  clusters[cur] <- paste0("CL", cid)
-  to_assign <- setdiff(to_assign, cur)
-  cid <- cid + 1L
+# Ensure FIPS column exists
+if (!("FIPS" %in% names(merged_df))) {
+  stop("Merged file must contain a 'FIPS' column with county FIPS values (may be empty for header rows).")
 }
 
-cluster_map <- tibble::tibble(county_ihme = names(clusters), cluster_id = unname(clusters))
+# Keep only rows with non-empty FIPS (these are county member rows)
+members <- merged_df %>%
+  dplyr::mutate(
+    FIPS_raw = stringr::str_trim(as.character(FIPS)),
+    FIPS_digits = ifelse(FIPS_raw == "" | is.na(FIPS_raw), NA_character_, gsub("[^0-9]", "", FIPS_raw)),
+    FIPS5 = ifelse(is.na(FIPS_digits), NA_character_, stringr::str_pad(FIPS_digits, width = 5, side = "left", pad = "0")),
+    cluster_id = stringr::str_trim(as.character(.data[[cluster_col_name]]))
+  ) %>%
+  dplyr::filter(!is.na(FIPS5) & FIPS5 != "" & !is.na(cluster_id) & cluster_id != "") %>%
+  dplyr::select(FIPS5, cluster_id) %>%
+  dplyr::rename(raw_fips = FIPS5)
 
-# 6) Aggregate metrics (cluster × period means)
+# Map raw_fips -> county_ihme using ihme_map if present, otherwise treat raw_fips as county_ihme
+if (exists("ihme_map")) {
+  # ihme_map expected to have columns GEOID and county_ihme (from earlier load)
+  if (!("GEOID" %in% names(ihme_map)) || !("county_ihme" %in% names(ihme_map))) {
+    # if ihme_map is the raw object format (orig_fips / ihme_fips), coerce accordingly
+    if (exists("ihme_fips") && all(c("orig_fips","ihme_fips") %in% names(ihme_fips))) {
+      xwalk <- ihme_fips %>%
+        dplyr::transmute(GEOID = stringr::str_pad(as.character(orig_fips), 5, pad = "0"),
+                         county_ihme = stringr::str_pad(as.character(ihme_fips), 5, pad = "0"))
+    } else {
+      stop("ihme_map present but does not have expected structure. Please ensure ihme_fips / ihme_map is loaded correctly.")
+    }
+  } else {
+    xwalk <- ihme_map %>% dplyr::transmute(GEOID = stringr::str_pad(as.character(GEOID), 5, pad = "0"),
+                                          county_ihme = stringr::str_pad(as.character(county_ihme), 5, pad = "0"))
+  }
+
+  members2 <- members %>%
+    dplyr::left_join(xwalk, by = c("raw_fips" = "GEOID")) %>%
+    dplyr::mutate(county_ihme = dplyr::coalesce(county_ihme, raw_fips)) %>%
+    dplyr::select(county_ihme, cluster_id)
+} else {
+  # No crosswalk available; use raw FIPS as county_ihme
+  members2 <- members %>%
+    dplyr::mutate(county_ihme = raw_fips) %>%
+    dplyr::select(county_ihme, cluster_id)
+}
+
+# Build cluster_map and sanity-checks
+cluster_map <- members2 %>%
+  dplyr::mutate(county_ihme = stringr::str_pad(as.character(county_ihme), 5, pad = "0"),
+                cluster_id = as.character(cluster_id)) %>%
+  dplyr::distinct(county_ihme, cluster_id)
+
+if (nrow(cluster_map) == 0) stop("No valid county->cluster mappings found in merged file.")
+
+# Check for counties mapped to >1 cluster (shouldn't happen)
+dup_check <- cluster_map %>%
+  dplyr::group_by(county_ihme) %>%
+  dplyr::summarise(n = dplyr::n(), clusters = paste(sort(unique(cluster_id)), collapse = ";"), .groups = "drop") %>%
+  dplyr::filter(n > 1)
+
+if (nrow(dup_check) > 0) {
+  stop("Found counties assigned to multiple clusters (first 20 shown):\n", paste0(utils::capture.output(head(dup_check, 20)), collapse = "\n"),
+       "\nPlease fix the merged CSV so each county FIPS appears under only one CS Area Code.")
+}
+
+# --------------------------
+#  Section 6 
+# --------------------------
+
 agg_metric <- function(varname) {
   dq %>%
     dplyr::filter(!is.na(time_window)) %>%
@@ -521,334 +363,6 @@ ggsave(file.path(output_dir, "RI_time_series_1999_2022.png"),
        plot = p_ri_ts, width = 8.5, height = 4.8, dpi = 320)
 
 p_ri_ts
-
-```
-Make map of percentage missing overdoses with clusters (four panels)
-```{r}
-# ──────────────────────────────────────────────────────────────
-# Map pct_overd_miss with temporally-stable clusters (IHME groups)
-# Changes requested:
-#   • min_overd = 30
-#   • Prefer in-state neighbors; cross state only if needed
-# ──────────────────────────────────────────────────────────────
-
-# 0) Packages & options
-required <- c("sf","tigris","readr","dplyr","stringr","purrr","ggplot2",
-              "here","scales","igraph","tidyr","tibble","patchwork")
-missing <- setdiff(required, rownames(installed.packages()))
-if (length(missing)) install.packages(missing)
-invisible(lapply(required, library, character.only = TRUE))
-options(tigris_use_cache = TRUE, tigris_class = "sf")
-sf::sf_use_s2(FALSE)
-
-`%||%` <- function(a, b) if (!is.null(a)) a else b
-
-# Small helper to get a simple mode (most frequent value)
-mode_val <- function(x) {
-  ux <- na.omit(x)
-  if (!length(ux)) return(NA_character_)
-  names(sort(table(ux), decreasing = TRUE))[1]
-}
-
-# 1) Windows & inputs
-periods_list <- list(
-  "1999_2005" = 1999:2005,
-  "2006_2012" = 2006:2012,
-  "2013_2019" = 2013:2019,
-  "2020_2022" = 2020:2022
-)
-periods_vec <- names(periods_list)
-
-dq <- readr::read_csv(here::here("data","county_year_quality_metrics.csv"),
-                      show_col_types = FALSE) %>%
-  dplyr::mutate(
-    year        = as.integer(year),
-    county_ihme = stringr::str_pad(as.character(county_ihme), 5, pad = "0"),
-    time_window = dplyr::case_when(
-      year >= 1999 & year <= 2005 ~ "1999_2005",
-      year >= 2006 & year <= 2012 ~ "2006_2012",
-      year >= 2013 & year <= 2019 ~ "2013_2019",
-      year >= 2020 & year <= 2022 ~ "2020_2022",
-      TRUE ~ NA_character_
-    )
-  )
-
-stopifnot(all(c("overd_n","pct_overd_miss") %in% names(dq)))
-
-# 2) IHME crosswalk (temporality-stable groups)
-load(here::here("data_raw","ihme_fips.rda"))  # -> ihme_fips
-ihme_map <- ihme_fips %>%
-  dplyr::transmute(
-    GEOID       = stringr::str_pad(as.character(orig_fips), 5, pad = "0"),
-    county_ihme = stringr::str_pad(as.character(ihme_fips), 5, pad = "0")
-  ) %>%
-  dplyr::distinct()
-
-# 3) Robust overdose totals per IHME group
-overd_by_window <- dq %>%
-  dplyr::filter(!is.na(time_window)) %>%
-  dplyr::group_by(county_ihme, time_window) %>%
-  dplyr::summarise(overd = sum(overd_n, na.rm = TRUE), .groups = "drop")
-
-overd_wide <- overd_by_window %>%
-  tidyr::pivot_wider(names_from = time_window, values_from = overd, values_fill = 0)
-
-for (w in periods_vec) if (!w %in% names(overd_wide)) overd_wide[[w]] <- 0
-
-robust_tbl <- overd_wide %>%
-  dplyr::mutate(
-    robust_overd = pmin(`1999_2005`,`2006_2012`,`2013_2019`,`2020_2022`, na.rm = TRUE)
-  ) %>%
-  dplyr::transmute(county_ihme, robust_overd = as.numeric(robust_overd))
-
-# 4) Shapefile helpers
-crs_proj <- 2163
-shapefile_years <- c("1999_2005"=2000, "2006_2012"=2010, "2013_2019"=2019, "2020_2022"=2020)
-
-normalize_geoid <- function(sf, year) {
-  nms <- names(sf)
-  geoid_col <- grep("^GEOID", nms, value = TRUE)[1]
-  if (!is.na(geoid_col)) {
-    sf <- dplyr::rename(sf, GEOID = !!rlang::sym(geoid_col))
-    sf$GEOID <- stringr::str_pad(as.character(sf$GEOID), 5, pad = "0")
-    return(sf)
-  }
-  state_col  <- grep("^STATE.*FP$", nms, value = TRUE)[1]
-  county_col <- grep("^COUNTY.*FP$", nms, value = TRUE)[1]
-  if (!is.na(state_col) && !is.na(county_col)) {
-    sf$GEOID <- paste0(
-      stringr::str_pad(as.character(sf[[state_col]]),  2, pad = "0"),
-      stringr::str_pad(as.character(sf[[county_col]]), 3, pad = "0")
-    )
-    return(sf)
-  }
-  combo_col <- grep("^CNTYIDFP$", nms, value = TRUE)[1]
-  if (!is.na(combo_col)) {
-    sf <- dplyr::rename(sf, GEOID = !!rlang::sym(combo_col))
-    sf$GEOID <- stringr::str_pad(as.character(sf$GEOID), 5, pad = "0")
-    return(sf)
-  }
-  stop("No GEOID-compatible columns found in shapefile for year ", year)
-}
-
-# Build IHME group polygons and keep a dominant state per group
-build_ihme_groups_sf <- function(year) {
-  counties_raw <- tigris::counties(year = year, cb = TRUE, class = "sf") %>%
-    sf::st_zm(drop = TRUE, what = "ZM")
-  counties_norm <- normalize_geoid(counties_raw, year) %>%
-    sf::st_transform(crs_proj)
-
-  counties_norm %>%
-    dplyr::left_join(ihme_map, by = "GEOID") %>%
-    dplyr::mutate(
-      county_ihme = dplyr::coalesce(county_ihme, GEOID),
-      STATEFP = as.character(STATEFP)
-    ) %>%
-    dplyr::group_by(county_ihme) %>%
-    dplyr::summarise(
-      state = mode_val(STATEFP),   # dominant state by membership count
-      .groups = "drop"
-    )
-}
-
-# 5) Adjacency & greedy clustering (state-aware; min_overd = 30)
-ihme2020 <- build_ihme_groups_sf(2020) %>% sf::st_transform(5070)
-adj_list <- sf::st_touches(ihme2020)
-neighbors_of <- setNames(
-  lapply(seq_len(nrow(ihme2020)), function(i) ihme2020$county_ihme[adj_list[[i]]]),
-  ihme2020$county_ihme
-)
-
-# Lookup of dominant state per IHME group
-state_of <- setNames(ihme2020$state, ihme2020$county_ihme)
-
-# Lower threshold as requested
-min_overd <- 50L
-
-nodes_tbl <- ihme2020 %>%
-  sf::st_drop_geometry() %>%
-  dplyr::select(county_ihme, state) %>%
-  dplyr::left_join(robust_tbl, by = "county_ihme") %>%
-  dplyr::mutate(robust_overd = dplyr::coalesce(robust_overd, 0))
-
-overd_vec <- setNames(nodes_tbl$robust_overd, nodes_tbl$county_ihme)
-to_assign <- names(overd_vec)
-clusters  <- setNames(rep(NA_character_, length(overd_vec)), to_assign)
-cid <- 1L
-
-while (length(to_assign) > 0) {
-  seed       <- to_assign[which.max(overd_vec[to_assign])]
-  home_state <- state_of[seed]
-  cur        <- seed
-  total      <- overd_vec[seed]
-  avail      <- setdiff(to_assign, seed)
-
-  repeat {
-    nbrs_all <- unique(unlist(neighbors_of[cur], use.names = FALSE))
-    nbrs_all <- setdiff(intersect(nbrs_all, avail), cur)
-
-    if (!length(nbrs_all)) break
-
-    # Prefer in-state neighbors; cross only if no in-state remain and we're still < min_overd
-    nbrs_in_state   <- nbrs_all[state_of[nbrs_all] == home_state]
-    nbrs_candidates <- if (length(nbrs_in_state)) nbrs_in_state else nbrs_all
-
-    cand_totals <- total + overd_vec[nbrs_candidates]
-
-    # If still below target, maximize growth; else, minimize overshoot
-    if (all(cand_totals < min_overd)) {
-      best <- nbrs_candidates[which.max(cand_totals)]
-    } else {
-      best <- nbrs_candidates[which.min(abs(cand_totals - min_overd))]
-    }
-
-    new_total <- total + overd_vec[best]
-    if (is.na(new_total)) break
-
-    allow_cross <- (!length(nbrs_in_state)) && (total < min_overd)
-
-    # Guard against runaway growth (1.6× tolerance), but allow while under target or allowed to cross
-    if (new_total <= min_overd * 1.6 || total < min_overd || allow_cross) {
-      cur   <- c(cur, best)
-      total <- new_total
-      avail <- setdiff(avail, best)
-      if (total >= min_overd) break
-    } else break
-  }
-
-  clusters[cur] <- paste0("CL", cid)
-  to_assign <- setdiff(to_assign, cur)
-  cid <- cid + 1L
-}
-
-# 6) Post-processing: absorb undersized clusters, preferring same-state
-centroids <- sf::st_centroid(ihme2020) %>%
-  dplyr::mutate(county_ihme = ihme2020$county_ihme)
-xy <- sf::st_coordinates(centroids)[,c("X","Y"), drop=FALSE]; rownames(xy) <- centroids$county_ihme
-
-cluster_sum <- tapply(overd_vec[names(clusters)], clusters, sum, na.rm = TRUE)
-small <- names(cluster_sum)[cluster_sum < min_overd]
-big   <- names(cluster_sum)[cluster_sum >= min_overd]
-
-# Dominant state per cluster (by member count)
-cluster_state <- vapply(unique(na.omit(clusters)), function(clid) {
-  memb_states <- state_of[names(clusters)[clusters == clid]]
-  mode_val(memb_states)
-}, FUN.VALUE = character(1L))
-names(cluster_state) <- unique(na.omit(clusters))
-
-if (length(small) && length(big)) {
-  get_center <- function(cid) {
-    memb <- names(clusters)[clusters == cid]
-    colMeans(xy[memb,,drop=FALSE])
-  }
-  small_xy <- t(vapply(small, get_center, numeric(2L)))
-  big_xy   <- t(vapply(big,   get_center, numeric(2L)))
-
-  choose_target <- function(candidates, i_row) {
-    if (!length(candidates)) return(NA_character_)
-    dif <- t(big_xy[, candidates, drop = FALSE]) -
-      matrix(small_xy[i_row, ], nrow = length(candidates), ncol = 2, byrow = TRUE)
-    candidates[which.min(rowSums(dif * dif))]
-  }
-
-  for (i in seq_along(small)) {
-    s_id    <- small[i]
-    s_state <- cluster_state[s_id]
-    same_state_big <- big[cluster_state[big] == s_state]
-    target <- choose_target(same_state_big, i)
-    if (is.na(target)) target <- choose_target(big, i)  # fallback: any state
-    members <- names(clusters)[clusters == s_id]
-    clusters[members] <- target
-  }
-}
-
-cluster_map <- tibble::tibble(
-  county_ihme = names(clusters),
-  cluster_id  = unname(clusters)
-)
-
-# 7) Check threshold per window (reflects 30)
-check_df <- overd_by_window %>%
-  dplyr::inner_join(cluster_map, by = "county_ihme") %>%
-  dplyr::group_by(cluster_id, time_window) %>%
-  dplyr::summarise(overdoses = sum(overd, na.rm = TRUE), .groups = "drop")
-if (any(check_df$overdoses < min_overd, na.rm = TRUE)) {
-  warning("Some clusters are still < 30 overdoses in a window. Consider tweaking heuristics.")
-}
-
-# 8) Aggregate pct_overd_miss to cluster×window with NA→0 (same as your original)
-dq_cluster <- dq %>%
-  dplyr::filter(!is.na(time_window)) %>%
-  dplyr::inner_join(cluster_map, by = "county_ihme") %>%
-  dplyr::group_by(cluster_id, time_window) %>%
-  dplyr::summarise(
-    pct_overd_miss = mean(tidyr::replace_na(pct_overd_miss, 0)),
-    n_counties     = dplyr::n_distinct(county_ihme),
-    .groups = "drop"
-  ) %>%
-  tidyr::complete(cluster_id, time_window = periods_vec,
-                  fill = list(pct_overd_miss = 0, n_counties = 0L))
-
-# 9) Shapes per period (group polygons by cluster for each year-vintage)
-build_clusters_sf <- function(year) {
-  base <- build_ihme_groups_sf(year)
-  base %>%
-    dplyr::left_join(cluster_map, by = "county_ihme") %>%
-    dplyr::filter(!is.na(cluster_id)) %>%
-    dplyr::group_by(cluster_id) %>%
-    dplyr::summarise(.groups = "drop") %>%
-    sf::st_transform(crs_proj)
-}
-
-joined_by_period <- purrr::imap(shapefile_years, function(year, window) {
-  shape_all <- build_clusters_sf(year)
-  dplyr::left_join(shape_all,
-                   dplyr::filter(dq_cluster, time_window == window),
-                   by = "cluster_id")
-})
-
-# 10) Map helper — preserves your “pretty” title style
-make_map <- function(sf_data, var = "pct_overd_miss", title = NULL, palette = "RdBu") {
-  states <- tigris::states(cb = TRUE, class = "sf") |> sf::st_transform(crs_proj)
-  fill_scale <- scale_fill_distiller(
-    palette = palette,
-    limits = if (var == "pct_overd_miss") c(0, 0.6) else NULL,
-    oob = scales::squish,
-    direction = -1,
-    na.value = "grey90"
-  )
-  ggplot() +
-    geom_sf(data = sf_data, aes(fill = .data[[var]]), colour = NA) +
-    geom_sf(data = states, fill = NA, colour = "white", linewidth = 0.3) +
-    fill_scale +
-    coord_sf(xlim = c(-2500000, 2500000),
-             ylim = c(-2200000, 730000),
-             expand = FALSE) +
-    labs(title = title %||% "", fill = NULL) +
-    theme_void() +
-    theme(
-      plot.title = element_text(size = 16, face = "bold", hjust = 0.5),
-      legend.text = element_text(size = 9)
-    )
-}
-
-# 11) Save combined 2×2 with PERIOD-ONLY panel titles
-output_dir <- here::here("figures", "5yr_avg_stable")
-dir.create(output_dir, showWarnings = FALSE, recursive = TRUE)
-
-p_1999 <- make_map(joined_by_period[["1999_2005"]], "pct_overd_miss", "1999_2005")
-p_2006 <- make_map(joined_by_period[["2006_2012"]], "pct_overd_miss", "2006_2012")
-p_2013 <- make_map(joined_by_period[["2013_2019"]], "pct_overd_miss", "2013_2019")
-p_2020 <- make_map(joined_by_period[["2020_2022"]], "pct_overd_miss", "2020_2022")
-
-combined <- (p_1999 | p_2006) / (p_2013 | p_2020)
-
-ggsave(filename = file.path(output_dir, "pct_overd_miss_4panel.png"),
-       plot = combined, width = 12, height = 9, dpi = 320)
-
-message("✓ Done. Single 4-panel map saved to: ",
-        file.path(output_dir, "pct_overd_miss_4panel.png"))
 
 ```
 Make map of z-scores
@@ -1027,7 +541,6 @@ cluster_core <- dy %>%
     sum_n_cert       = sum(n_cert,       na.rm = TRUE),
     sum_N_garbage    = sum(N_garbage,    na.rm = TRUE),
     num_RI_weighted  = sum(n_cert * RI_post_only, na.rm = TRUE),
-    prop_overd_unspec = safe_div(sum_overd_miss_k, sum_overd_n),
     prop_garbage      = safe_div(sum_garb_k,       sum_n_cert),
     RI_cluster        = safe_div(num_RI_weighted,  sum_N_garbage),
     .groups = "drop"
@@ -1087,7 +600,7 @@ metrics_clu <- cluster_core %>%
   dplyr::arrange(period, cluster) %>%
   dplyr::mutate(cluster = as.character(cluster), period = as.character(period))
 
-score_vars  <- c("prop_overd_unspec","philips_cstd","RI_cluster","prop_garbage")
+score_vars  <- c("philips_cstd","RI_cluster","prop_garbage")
 global_means <- vapply(score_vars, function(v) mean(metrics_clu[[v]], na.rm = TRUE), numeric(1))
 global_sds   <- vapply(score_vars, function(v)  sd(metrics_clu[[v]], na.rm = TRUE), numeric(1))
 global_sds[!is.finite(global_sds) | global_sds == 0] <- NA_real_
@@ -1101,7 +614,6 @@ z_tbl <- metrics_clu %>%
   # Flip signs: higher z = better (less garbage / fewer unspecified overdoses)
   dplyr::mutate(
     z_prop_garbage      = -z_prop_garbage,
-    z_prop_overd_unspec = -z_prop_overd_unspec
   ) %>%
   dplyr::mutate(
     direction_score = rowMeans(dplyr::across(starts_with("z_")), na.rm = TRUE)
@@ -1136,7 +648,7 @@ make_faceted_map <- function(stacked_sf, fill_col, lims, states_sf) {
     theme(strip.text = element_text(size = 12, face = "bold"), legend.text = element_text(size = 9), plot.title = element_blank())
 }
 
-to_map <- c("z_RI_cluster","z_prop_overd_unspec","z_prop_garbage","z_philips_cstd","direction_score")
+to_map <- c("z_RI_cluster","z_prop_garbage","z_philips_cstd","direction_score")
 
 for (mcol in to_map) {
   message("Assembling 4-panel for metric: ", mcol)
@@ -1166,17 +678,12 @@ Make new aggregate data quality index map with box plot
 #   • Uses a single metric from z_tbl (default = "direction_score")
 #   • Saves: figures/5yr_avg_stable/two_maps_box_<metric>.png
 # ──────────────────────────────────────────────────────────────
-
 suppressPackageStartupMessages({ library(patchwork) })
-
-# ---- choose which metric to show (must exist in z_tbl)
 metric_to_plot <- "direction_score" 
-# examples: "direction_score", "z_prop_garbage", "z_prop_overd_unspec", "z_philips_cstd", "z_RI_cluster"
 
 metric_label <- dplyr::case_when(
   metric_to_plot == "direction_score"      ~ "Aggregate data quality index (z)",
   metric_to_plot == "z_prop_garbage"       ~ "Proportion garbage (z, higher is better)",
-  metric_to_plot == "z_prop_overd_unspec"  ~ "Overdose unspecified (z, higher is better)",
   metric_to_plot == "z_philips_cstd"       ~ "Philips CSTD (z, higher is better)",
   metric_to_plot == "z_RI_cluster"         ~ "RI (z, higher is better)",
   TRUE ~ metric_to_plot
@@ -1218,7 +725,6 @@ pA <- make_single_map("1999_2005", metric_to_plot, lims_sym, states_tf, membersh
 pB <- make_single_map("2020_2022", metric_to_plot, lims_sym, states_tf, membership, counties_aug)
 
 # ---------------- county-level boxplot by state -----------
-# Lookup for state abbreviations
 states_info <- tigris::states(year = 2020, cb = TRUE, class = "sf") |>
   sf::st_drop_geometry() |>
   dplyr::select(STATEFP, STUSPS) %>% dplyr::rename(statefp = STATEFP, state = STUSPS)
@@ -1294,194 +800,6 @@ combined <- (pA | pB) / pC + plot_layout(guides = "collect") +
 base <- if (metric_to_plot == "direction_score") "direction_score" else sanitize(metric_to_plot)
 outfile <- file.path(out_dir_figs, paste0("two_maps_box_", base, ".png"))
 ggsave(outfile, combined, width = 11, height = 8.5, dpi = 320)
-```
-Make new overdose maps with box plot
-```{r}
-# ──────────────────────────────────────────────────────────────
-# Two maps (1999–2005, 2020–2022) + box plot for pct_overd_miss
-#   • Uses your temporally-stable clusters in `cluster_map` (county_ihme → cluster_id)
-#   • EXACT FIPS→IHME processing (ihme_fips.rda; coalesce(county_ihme, fips))
-#   • AK/HI identical to your aggregate maps (uses counties_aug & states_tf)
-#   • Viridis "D"; fixed limits 0–60%
-#   • Fills missing cluster×period values to avoid grey patches
-#   • Saves → figures/5yr_avg_stable/two_maps_box_pct_overd_miss.png
-# Prereqs in memory: dq (with time_window & pct_overd_miss), cluster_map, counties_aug, states_tf
-# ──────────────────────────────────────────────────────────────
-
-suppressPackageStartupMessages({
-  library(dplyr); library(ggplot2); library(sf); library(scales)
-  library(patchwork); library(here); library(stringr); library(readr); library(tidyr); library(tigris)
-})
-
-options(tigris_use_cache = TRUE, tigris_class = "sf")
-
-# ---- sanity checks for required objects ----
-if (!exists("dq"))          stop("Object `dq` not found (needs columns county_ihme, time_window, pct_overd_miss).")
-if (!exists("cluster_map")) stop("Object `cluster_map` not found (must have columns county_ihme, cluster_id).")
-if (!exists("counties_aug"))stop("Object `counties_aug` not found (AK/HI-shifted county polygons used in your maps).")
-if (!exists("states_tf"))   stop("Object `states_tf` not found (AK/HI-shifted state polygons used in your maps).")
-
-periods_two <- c("1999_2005","2020_2022")
-territories <- c("PR","GU","VI","AS","MP")
-lims_map <- c(0, 0.60)
-
-# ── 0) IHME crosswalk: orig county FIPS (GEOID) -> IHME group (county_ihme) ──
-#     This mirrors your working code (ihme_fips.rda → ihme_map with GEOID & county_ihme).
-load(here::here("data_raw","ihme_fips.rda"))  # provides: ihme_fips
-ihme_map <- ihme_fips %>%
-  transmute(
-    GEOID       = str_pad(as.character(orig_fips), 5, pad = "0"),
-    county_ihme = str_pad(as.character(ihme_fips), 5, pad = "0")
-  ) %>%
-  distinct()
-
-# ── 1) Harmonize counties_aug keys and add IHME group like your code does ──
-#     Expect counties_aug to have `fips` and `statefp`; fallbacks if needed.
-counties_aug_fixed <- counties_aug
-
-# ensure we have a 5-digit FIPS column
-if ("fips" %in% names(counties_aug_fixed)) {
-  counties_aug_fixed <- counties_aug_fixed %>% mutate(fips = str_pad(as.character(fips), 5, pad = "0"))
-} else if ("GEOID" %in% names(counties_aug_fixed)) {
-  counties_aug_fixed <- counties_aug_fixed %>% mutate(fips = str_pad(as.character(GEOID), 5, pad = "0"))
-} else {
-  stop("`counties_aug` must have either 'fips' or 'GEOID'.")
-}
-
-# ensure we have statefp as 2-char
-if (!"statefp" %in% names(counties_aug_fixed)) {
-  if ("STATEFP" %in% names(counties_aug_fixed)) {
-    counties_aug_fixed <- counties_aug_fixed %>% mutate(statefp = as.character(STATEFP))
-  } else stop("`counties_aug` must have 'statefp' or 'STATEFP'.")
-}
-counties_aug_fixed <- counties_aug_fixed %>%
-  mutate(statefp = str_pad(as.character(statefp), 2, pad = "0"))
-
-counties_aug_fixed <- counties_aug_fixed %>%
-  left_join(ihme_map, by = c("fips" = "GEOID"), suffix = c(".orig", ".map")) %>%
-  mutate(
-    county_ihme = coalesce(county_ihme.orig, county_ihme.map, fips)
-  ) %>%
-  select(-county_ihme.orig, -county_ihme.map)
-
-# ── 2) Build cluster polygons from counties_aug_fixed → IHME → cluster_id ──
-clusters_aug_sf <- counties_aug_fixed %>%
-  inner_join(cluster_map, by = "county_ihme") %>%     # county_ihme -> cluster_id
-  group_by(cluster_id) %>%
-  summarise(geometry = sf::st_union(geometry), .groups = "drop") %>%
-  sf::st_make_valid()
-
-# warn if any clusters in cluster_map still lack polygons
-cl_missing_poly <- setdiff(sort(unique(cluster_map$cluster_id)),
-                           sort(unique(clusters_aug_sf$cluster_id)))
-if (length(cl_missing_poly)) {
-  warning("No polygons for ", length(cl_missing_poly), " clusters (e.g., ",
-          paste(utils::head(cl_missing_poly, 5), collapse = ", "),
-          "). Check crosswalk and counties_aug coverage.")
-}
-
-# ── 3) Compute cluster×period values and COMPLETE missing cells to avoid grey ──
-all_clusters <- sort(unique(cluster_map$cluster_id))
-pct_cluster <- dq %>%
-  filter(!is.na(time_window)) %>%
-  select(county_ihme, time_window, pct_overd_miss) %>%
-  inner_join(cluster_map, by = "county_ihme") %>%            # keep only IHME in clusters
-  group_by(cluster_id, time_window) %>%
-  summarise(pct_overd_miss = mean(pct_overd_miss, na.rm = TRUE), .groups = "drop") %>%
-  tidyr::complete(
-    cluster_id = all_clusters,
-    time_window = periods_two,
-    fill = list(pct_overd_miss = 0)                           # fill to guarantee coverage
-  )
-
-# ── 4) Build map layers (double-guard NA→0 after join) ──
-map_1999 <- clusters_aug_sf %>%
-  left_join(filter(pct_cluster, time_window == "1999_2005"), by = "cluster_id") %>%
-  mutate(pct_overd_miss = coalesce(pct_overd_miss, 0))
-
-map_2020 <- clusters_aug_sf %>%
-  left_join(filter(pct_cluster, time_window == "2020_2022"), by = "cluster_id") %>%
-  mutate(pct_overd_miss = coalesce(pct_overd_miss, 0))
-
-# ── 5) Plot helpers ──
-make_map <- function(map_sf, title, lims) {
-  ggplot() +
-    geom_sf(data = map_sf, aes(fill = pct_overd_miss), colour = NA) +
-    geom_sf(data = states_tf, fill = NA, colour = "white", linewidth = 0.3) +  # EXACT overlay, AK/HI included
-    scale_fill_viridis_c(
-      option = "D", limits = lims, oob = scales::squish, na.value = "grey90",direction=-1,
-      labels = scales::percent_format(accuracy = 1)
-    ) +
-    coord_sf(xlim = c(-2500000, 2500000), ylim = c(-2200000, 730000), expand = FALSE) +
-    labs(title = title, fill = NULL) +
-    theme_void(base_size = 11) +
-    theme(plot.title = element_text(hjust = 0.5, face = "bold"))
-}
-
-pA <- make_map(map_1999, "1999–2005", lims_map)
-pB <- make_map(map_2020, "2020–2022", lims_map)
-
-# ── 6) Box plot: assign each county its cluster’s period value, then aggregate by state ──
-states_info <- tigris::states(year = 2020, cb = TRUE, class = "sf") %>%
-  st_drop_geometry() %>%
-  select(STATEFP, STUSPS) %>%
-  rename(statefp = STATEFP, state = STUSPS) %>%
-  mutate(statefp = str_pad(as.character(statefp), 2, pad = "0"))
-
-counties_lite <- counties_aug_fixed %>%
-  st_drop_geometry() %>%
-  select(county_ihme, statefp)
-
-build_county_values <- function(per) {
-  zv <- pct_cluster %>%
-    filter(time_window == per) %>%
-    select(cluster_id, value = pct_overd_miss)
-  cluster_map %>%                                # county_ihme -> cluster_id
-    left_join(zv, by = "cluster_id") %>%
-    left_join(counties_lite, by = "county_ihme") %>%
-    left_join(states_info,  by = "statefp") %>%
-    transmute(state, county_ihme, period = per, value) %>%
-    filter(!is.na(state), is.finite(value))
-}
-
-bx_df <- bind_rows(
-  build_county_values("1999_2005"),
-  build_county_values("2020_2022")
-) %>% filter(!state %in% territories)
-
-state_order <- bx_df %>%
-  filter(period == "2020_2022") %>%
-  group_by(state) %>%
-  summarise(med = median(value, na.rm = TRUE), .groups = "drop") %>%
-  arrange(desc(med)) %>% pull(state)
-
-bx_df <- bx_df %>%
-  mutate(
-    state  = factor(state, levels = state_order),
-    period = factor(period, levels = c("1999_2005","2020_2022"),
-                    labels = c("1999–2005","2020–2022"))
-  )
-
-pC <- ggplot(bx_df, aes(x = state, y = value, fill = period)) +
-  geom_hline(yintercept = 0, linetype = 3, linewidth = 0.3) +
-  geom_boxplot(width = 0.7, outlier.alpha = 0.4,
-               position = position_dodge2(width = 0.75, preserve = "single")) +
-  coord_cartesian(ylim = lims_map) +
-  scale_y_continuous(labels = percent_format(accuracy = 1)) +
-  scale_fill_manual(values = c("#94bedf","#f2c879")) +
-  labs(x = "States (ranked by declining median county-level 2020–2022 % missing overdoses)",
-       y = "Percent missing overdoses") +
-  theme_bw(base_size = 10) +
-  theme(legend.position = "top",
-        axis.text.x = element_text(angle = 90, vjust = 0.5, hjust = 1),
-        panel.grid.minor = element_blank())
-
-# ── 7) Save figure ──
-dir.create(here::here("figures","5yr_avg_stable"), recursive = TRUE, showWarnings = FALSE)
-combined <- (pA | pB) / pC + plot_layout(guides = "collect") + plot_annotation(tag_levels = "A")
-ggsave(here::here("figures","5yr_avg_stable","two_maps_box_pct_overd_miss.png"),
-       combined, width = 11, height = 8.5, dpi = 320)
-
 ```
 Make new level of detail maps with box plots
 ```{r}
@@ -3442,35 +2760,47 @@ if (exists("inc_q") && is.data.frame(inc_q) && nrow(inc_q)) {
 ```
 COD standardized diversity maps
 ```{r}
-# ──────────────────────────────────────────────────────────────
-# COD standardized diversity — clusters (ONE 4-panel per metric)
-#   • Panels: 1999–2004, 2005–2010, 2011–2017, 2018–2022
-#   • AK/HI resized & shifted
-#   • No top title; facet strips show period
-#   • Outputs → figures/5yr_avg_stable/<metric>_4panel.png
-# ──────────────────────────────────────────────────────────────
-
+# Full corrected script: COD standardized diversity maps (temporally-stable, IHME-aware)
+# ---------------------------------------------------------------------------------
 suppressPackageStartupMessages({
-  library(readr);  library(dplyr);  library(stringr); library(tidyr);  library(tibble)
-  library(ggplot2); library(sf);     library(tigris);  library(scales); library(here)
+  library(readr); library(dplyr); library(stringr); library(tidyr); library(tibble)
+  library(ggplot2); library(sf); library(tigris); library(scales); library(here)
   library(purrr)
 })
-
 options(tigris_use_cache = TRUE, tigris_class = "sf", sf_use_s2 = TRUE)
-
-# ------------------------ paths -------------------------------
-metrics_file    <- here("output", "cluster_metrics_ucr39_cstd.csv.gz")
-membership_file <- here("output", "county_cluster_membership.csv.gz")
-out_dir_base    <- here("figures", "5yr_avg_stable")  # <-- flat output here
-dir.create(out_dir_base, recursive = TRUE, showWarnings = FALSE)
-
-# -------------------- projection ------------------------------
 crs_proj <- 2163
 
-# --------------------- stable periods -------------------------
-period_levels <- c("1999_2005","2006_2012","2013_2019","2020_2022")
+# helper: safe %||% (used for deterministic duplicate resolution)
+`%||%` <- function(a, b) {
+  if (is.null(a) || length(a) == 0 || (length(a) == 1 && is.na(a))) b else a
+}
 
-# ------------------------ helpers -----------------------------
+# ------------------------ paths & inputs -------------------------------
+metrics_file    <- here("output", "cluster_metrics_ucr39_cstd.csv.gz")
+membership_file <- here("output", "county_cluster_membership.csv.gz")
+merged_candidates <- c(
+  here("data_raw","all_county_groupings.csv"),
+  here("data","all_county_groupings.csv"),
+  here("all_county_groupings.csv")
+)
+merged_file <- merged_candidates[file.exists(merged_candidates)][1]
+if (is.na(merged_file) || length(merged_file) == 0) stop("Cannot find merged all_county_groupings.csv; please provide it.")
+ihme_rda <- here("data_raw", "ihme_fips.rda")  # optional crosswalk (may not exist)
+out_dir_base <- here("figures", "5yr_avg_stable")
+dir.create(out_dir_base, recursive = TRUE, showWarnings = FALSE)
+
+period_levels <- c("1999_2005","2006_2012","2013_2019","2020_2022")
+shapefile_years <- c("1999_2005"=2000, "2006_2012"=2010, "2013_2019"=2019, "2020_2022"=2020)
+
+# ------------------------ helpers & normalizers -------------------------
+sanitize <- function(x) {
+  x %>% str_replace_all("[^A-Za-z0-9]+", "_") %>% str_replace_all("^_+|_+$", "") %>% tolower()
+}
+normalize_id <- function(x) {
+  x %>% as.character() %>% stringr::str_trim() %>%
+    stringr::str_replace_all("[^A-Za-z0-9]+", "_") %>%
+    stringr::str_replace_all("^_+|_+$", "") %>% tolower()
+}
 compute_limits <- function(x) {
   x <- x[is.finite(x)]
   if (!length(x)) return(list(lims = c(0, 1), diverging = FALSE))
@@ -3483,92 +2813,351 @@ compute_limits <- function(x) {
   }
 }
 
-sanitize <- function(x) {
-  x %>% str_replace_all("[^A-Za-z0-9]+", "_") %>% str_replace_all("^_+|_+$", "") %>% tolower()
+# ----------------- IHME crosswalk (optional) ---------------------------
+ihme_map <- NULL
+if (file.exists(ihme_rda)) {
+  load(ihme_rda) # may create ihme_fips or ihme_map
+  if (exists("ihme_fips") && all(c("orig_fips","ihme_fips") %in% names(ihme_fips))) {
+    ihme_map <- ihme_fips %>% transmute(GEOID = stringr::str_pad(as.character(orig_fips), width = 5, pad = "0"),
+                                        county_ihme = stringr::str_pad(as.character(ihme_fips), width = 5, pad = "0")) %>% distinct()
+  } else if (exists("ihme_map") && all(c("GEOID","county_ihme") %in% names(ihme_map))) {
+    ihme_map <- ihme_map %>% transmute(GEOID = stringr::str_pad(as.character(GEOID), width = 5, pad = "0"),
+                                       county_ihme = stringr::str_pad(as.character(county_ihme), width = 5, pad = "0"))
+  } else {
+    message("Loaded ihme_rda but could not coerce expected structure; proceeding without ihme_map.")
+    ihme_map <- NULL
+  }
 }
 
-st_shift <- function(sf_obj, shift = c(0, 0)) { st_geometry(sf_obj) <- st_geometry(sf_obj) + shift; sf_obj }
-st_scale <- function(sf_obj, scale = 1) {
-  centroid <- st_centroid(st_union(sf_obj))
-  st_geometry(sf_obj) <- (st_geometry(sf_obj) - centroid) * scale + centroid
-  sf_obj
+# ----------------- functions to build canonical counties & clusters -----
+build_counties_2163_resized_with_ihme <- function(year = 2020, ihme_map = NULL) {
+  us_counties <- tigris::counties(year = year, cb = TRUE, class = "sf") %>%
+    sf::st_zm(drop = TRUE, what = "ZM") %>%
+    sf::st_make_valid() %>%
+    sf::st_transform(crs_proj)
+
+  # ensure a GEOID column
+  nms <- names(us_counties)
+  geoid_col <- grep("^GEOID", nms, value = TRUE)[1]
+  if (!is.na(geoid_col)) {
+    us_counties$GEOID <- as.character(us_counties[[geoid_col]])
+  } else {
+    st_col <- grep("^STATE.*FP$", nms, value = TRUE)[1]
+    co_col <- grep("^COUNTY.*FP$", nms, value = TRUE)[1]
+    if (!is.na(st_col) && !is.na(co_col)) {
+      us_counties$GEOID <- paste0(
+        stringr::str_pad(as.character(us_counties[[st_col]]), width = 2, pad = "0"),
+        stringr::str_pad(as.character(us_counties[[co_col]]), width = 3, pad = "0")
+      )
+    } else if ("CNTYIDFP" %in% nms) {
+      us_counties$GEOID <- as.character(us_counties$CNTYIDFP)
+    } else {
+      stop("Could not find GEOID fields in counties shapefile")
+    }
+  }
+  us_counties <- us_counties %>% mutate(GEOID = stringr::str_pad(as.character(GEOID), width = 5, pad = "0"))
+
+  # attach IHME mapping (if available)
+  if (!is.null(ihme_map)) {
+    ihme_df <- ihme_map %>% transmute(GEOID = stringr::str_pad(as.character(GEOID), width = 5, pad = "0"),
+                                      county_ihme = stringr::str_pad(as.character(county_ihme), width = 5, pad = "0"))
+    us_counties <- us_counties %>% left_join(ihme_df, by = "GEOID") %>% mutate(county_ihme = coalesce(county_ihme, GEOID))
+  } else {
+    us_counties <- us_counties %>% mutate(county_ihme = GEOID)
+  }
+
+  # NOTE: previous code repositioned AK/HI; to avoid depending on custom helpers
+  # (st_scale/st_shift) we keep the raw projection here. If you want repositioning,
+  # reintroduce st_scale/st_shift implementations or add manual transforms.
+
+  # collapse any GEOIDs that map to same county_ihme
+  us_counties %>%
+    group_by(county_ihme) %>%
+    summarise(geometry = sf::st_union(geometry), .groups = "drop") %>%
+    sf::st_make_valid() %>%
+    sf::st_transform(crs_proj)
 }
 
-build_counties_2163_resized <- function() {
-  us_counties <- tigris::counties(year = 2020, cb = TRUE, class = "sf") |>
-    sf::st_transform(crs_proj) |>
-    dplyr::select(GEOID, STATEFP, geometry)
-
-  mainland <- us_counties |> dplyr::filter(!STATEFP %in% c("02","15"))
-  alaska   <- us_counties |> dplyr::filter(STATEFP == "02") |>
-                st_scale(0.33) |>
-                st_shift(c(1100000, -4700000)) |>
-                sf::st_set_crs(crs_proj)
-  hawaii   <- us_counties |> dplyr::filter(STATEFP == "15") |>
-                st_scale(1)  |>
-                st_shift(c(5000000, -1100000)) |>
-                sf::st_set_crs(crs_proj)
-
-  dplyr::bind_rows(mainland, alaska, hawaii) |>
-    dplyr::rename(fips = GEOID, statefp = STATEFP) |>
-    sf::st_make_valid()
-}
-
-build_states_2163_resized <- function() {
-  us_states <- tigris::states(year = 2020, cb = TRUE, class = "sf") |>
-    sf::st_transform(crs_proj) |>
-    dplyr::select(STATEFP, geometry)
-
-  mainland <- us_states |> dplyr::filter(!STATEFP %in% c("02","15"))
-  alaska   <- us_states |> dplyr::filter(STATEFP == "02") |>
-                st_scale(0.33) |>
-                st_shift(c(1100000, -4700000)) |>
-                sf::st_set_crs(crs_proj)
-  hawaii   <- us_states |> dplyr::filter(STATEFP == "15") |>
-                st_scale(1)  |>
-                st_shift(c(5000000, -1100000)) |>
-                sf::st_set_crs(crs_proj)
-
-  dplyr::bind_rows(mainland, alaska, hawaii) |>
-    sf::st_make_valid()
-}
-
-build_cluster_sf <- function(period_key, membership_df, counties_sf) {
+# build cluster polygons from membership (joins by county_ihme)
+# NOTE: ensure returned polygon sf has column 'cluster' (not 'membership_cluster') to match downstream joins
+build_cluster_sf_from_membership <- function(period_key, membership_df, counties_sf) {
   mm <- membership_df %>%
-    dplyr::filter(.data$period == period_key) %>%
-    dplyr::transmute(fips = stringr::str_pad(as.character(fips), 5, pad = "0"),
-                     cluster = as.character(cluster)) %>%
-    dplyr::distinct()
+    filter(period == period_key) %>%
+    transmute(county_ihme = stringr::str_pad(as.character(fips), width = 5, pad = "0"),
+              membership_cluster = normalize_id(cluster)) %>%
+    distinct()
+
   if (!nrow(mm)) stop("No membership rows for period: ", period_key)
 
   counties_sf %>%
-    dplyr::inner_join(mm, by = "fips") %>%
-    dplyr::group_by(cluster) %>%
-    dplyr::summarise(geometry = sf::st_union(geometry), .groups = "drop") %>%
+    left_join(mm, by = "county_ihme") %>%
+    filter(!is.na(membership_cluster)) %>%
+    group_by(membership_cluster) %>%
+    summarise(geometry = sf::st_union(geometry), .groups = "drop") %>%
+    rename(cluster = membership_cluster) %>%   # IMPORTANT: name as 'cluster' for downstream joins
     sf::st_make_valid()
 }
 
-# ------------------------- load data --------------------------
-message("Reading metrics: ", metrics_file)
+# state outlines builder
+build_states_2163_resized <- function(year = 2020) {
+  us_states <- tigris::states(year = year, cb = TRUE, class = "sf") %>%
+    sf::st_transform(crs_proj) %>%
+    sf::st_make_valid()
+  # no repositioning here; return as-is
+  us_states
+}
+
+# ------------------------ read inputs ------------------------------
+message("Reading COD metrics: ", metrics_file)
 metrics <- readr::read_csv(metrics_file, show_col_types = FALSE) %>%
-  dplyr::mutate(cluster = as.character(cluster), period = as.character(period))
+  mutate(cluster = as.character(cluster), period = as.character(period))
 
-message("Reading membership: ", membership_file)
+message("Reading membership file: ", membership_file)
 membership <- readr::read_csv(membership_file, show_col_types = FALSE) %>%
-  dplyr::mutate(cluster = as.character(cluster),
-                period  = as.character(period),
-                fips    = stringr::str_pad(as.character(fips), 5, pad = "0"))
+  mutate(cluster = as.character(cluster), period = as.character(period),
+         fips = stringr::str_pad(as.character(fips), width = 5, pad = "0"))
 
-# Prepare transformed geographies ONCE
-counties_tf <- build_counties_2163_resized()
-states_tf   <- build_states_2163_resized()
+message("Reading merged cluster mapping: ", merged_file)
+merged_df <- readr::read_csv(merged_file, col_types = readr::cols(.default = "c"), show_col_types = FALSE)
 
-# Metric columns & usable periods
-metric_cols <- names(metrics)[vapply(metrics, is.numeric, logical(1))]
-metric_cols <- setdiff(metric_cols, c("fips", "GEOID", "STATEFP", "COUNTYFP"))
-periods_all <- intersect(period_levels, unique(metrics$period))
+cluster_col_name <- if ("CS Area Code" %in% names(merged_df)) "CS Area Code" else if ("County Set Name" %in% names(merged_df)) "County Set Name" else stop("Merged file missing required header column ('CS Area Code' or 'County Set Name').")
+if (!("FIPS" %in% names(merged_df))) stop("Merged file must contain a 'FIPS' column.")
 
-# ----------------------- faceted maps -------------------------
+# Build initial cluster_map from merged file (map raw_fips -> county_ihme if ihme_map present)
+members <- merged_df %>%
+  mutate(FIPS_raw = stringr::str_trim(as.character(FIPS)),
+         FIPS_digits = ifelse(FIPS_raw==""|is.na(FIPS_raw), NA_character_, gsub("[^0-9]", "", FIPS_raw)),
+         FIPS5 = ifelse(is.na(FIPS_digits), NA_character_, stringr::str_pad(FIPS_digits, width = 5, pad = "0")),
+         cluster_id = stringr::str_trim(as.character(.data[[cluster_col_name]]))) %>%
+  filter(!is.na(FIPS5) & FIPS5 != "" & !is.na(cluster_id) & cluster_id != "") %>%
+  select(FIPS5, cluster_id) %>%
+  rename(raw_fips = FIPS5)
+
+if (!is.null(ihme_map)) {
+  cluster_map_raw <- members %>%
+    left_join(ihme_map, by = c("raw_fips" = "GEOID")) %>%
+    mutate(county_ihme = coalesce(county_ihme, raw_fips)) %>%
+    select(county_ihme, cluster_id)
+} else {
+  cluster_map_raw <- members %>% mutate(county_ihme = raw_fips) %>% select(county_ihme, cluster_id)
+}
+
+cluster_map <- cluster_map_raw %>%
+  mutate(county_ihme = stringr::str_pad(as.character(county_ihme), width = 5, pad = "0"),
+         cluster_id = normalize_id(cluster_id)) %>%
+  distinct(county_ihme, cluster_id)
+
+if (nrow(cluster_map) == 0) stop("No valid county->cluster mappings found in merged file.")
+
+# ---------------- detect & resolve duplicates deterministically ------------
+dup_summary <- cluster_map %>%
+  group_by(county_ihme) %>%
+  summarise(n = n(), clusters = paste(sort(unique(cluster_id)), collapse = ";"), .groups = "drop") %>%
+  filter(n > 1)
+
+if (nrow(dup_summary) > 0) {
+  message("Found ", nrow(dup_summary), " counties assigned to multiple candidate clusters. Preparing deterministic resolution...")
+
+  membership_ids <- membership %>% mutate(cluster = normalize_id(as.character(cluster))) %>% pull(cluster) %>% unique()
+  metrics_ids    <- if ("cluster" %in% names(metrics)) metrics %>% mutate(cluster = normalize_id(as.character(cluster))) %>% pull(cluster) %>% unique() else character(0)
+
+  dup_audit_path <- file.path(out_dir_base, "dup_county_cluster_candidates_full.csv")
+  readr::write_csv(cluster_map %>% semi_join(dup_summary, by = "county_ihme"), dup_audit_path)
+
+  resolutions <- cluster_map %>%
+    semi_join(dup_summary, by = "county_ihme") %>%
+    group_by(county_ihme) %>%
+    summarise(candidate_clusters = list(sort(unique(cluster_id))), .groups = "drop") %>%
+    rowwise() %>%
+    mutate(
+      candidate_vec = candidate_clusters[[1]],
+      pick_membership = (sort(intersect(candidate_vec, membership_ids))[1]) %||% NA_character_,
+      pick_metrics = (sort(intersect(candidate_vec, metrics_ids))[1]) %||% NA_character_,
+      pick_majority = {
+        tmp <- cluster_map %>% filter(county_ihme == county_ihme) %>% group_by(cluster_id) %>% summarise(cnt = n(), .groups = "drop") %>% arrange(desc(cnt), cluster_id)
+        if (nrow(tmp) > 0) tmp$cluster_id[1] else NA_character_
+      },
+      resolved_cluster = coalesce(pick_membership, pick_metrics, pick_majority, candidate_vec[1])
+    ) %>%
+    ungroup() %>%
+    select(county_ihme, resolved_cluster, pick_membership, pick_metrics, pick_majority, candidate_clusters)
+
+  res_path <- file.path(out_dir_base, "dup_county_cluster_resolutions.csv")
+  resolutions_csv <- resolutions %>% mutate(candidates = vapply(candidate_clusters, function(x) paste(x, collapse=";"), FUN.VALUE = ""))
+  readr::write_csv(resolutions_csv %>% select(county_ihme, candidates, resolved_cluster, pick_membership, pick_metrics, pick_majority), res_path)
+
+  resolved_map <- resolutions %>% transmute(county_ihme = county_ihme, cluster_id = resolved_cluster)
+  nondup_map <- cluster_map %>% filter(!county_ihme %in% resolutions$county_ihme)
+  cluster_map <- bind_rows(nondup_map, resolved_map) %>% distinct(county_ihme, cluster_id)
+
+  if (any(duplicated(cluster_map$county_ihme))) stop("Duplicates remain in cluster_map after resolution — aborting.")
+  message("Resolved duplicates; cluster_map now has ", nrow(cluster_map), " rows and ", length(unique(cluster_map$cluster_id)), " unique stable clusters.")
+} else {
+  message("No duplicate county -> cluster candidates found; proceeding.")
+}
+
+# ------------------- Build metrics_clustered (county-level) -----------------------
+membership <- membership %>% mutate(fips = stringr::str_pad(as.character(fips), width = 5, pad = "0"))
+metrics <- metrics %>% mutate(cluster = if ("cluster" %in% names(.)) normalize_id(cluster) else cluster)
+
+attach_stable_cluster <- function(df, fips_col = "fips") {
+  df %>%
+    mutate(!!fips_col := stringr::str_pad(as.character(.data[[fips_col]]), width = 5, pad = "0")) %>%
+    left_join(cluster_map, by = setNames("county_ihme", fips_col))
+}
+
+if ("fips" %in% names(metrics) || "GEOID" %in% names(metrics) || "county_ihme" %in% names(metrics)) {
+  if (!("fips" %in% names(metrics))) {
+    if ("GEOID" %in% names(metrics)) metrics <- metrics %>% mutate(fips = stringr::str_pad(as.character(GEOID), width = 5, pad = "0"))
+    else if ("county_ihme" %in% names(metrics)) metrics <- metrics %>% mutate(fips = stringr::str_pad(as.character(county_ihme), width = 5, pad = "0"))
+  } else {
+    metrics <- metrics %>% mutate(fips = stringr::str_pad(as.character(fips), width = 5, pad = "0"))
+  }
+
+  metrics_clustered <- metrics %>%
+    attach_stable_cluster("fips") %>%
+    filter(!is.na(cluster_id)) %>%
+    mutate(cluster_id = normalize_id(cluster_id))
+
+  message("metrics contained county fips; joined to temporally-stable cluster_map. Rows kept: ", nrow(metrics_clustered))
+
+} else {
+  message("metrics does not contain county fips; expanding cluster-level metrics via membership (period + cluster -> fips).")
+
+  if (!("cluster" %in% names(metrics)) && ("cluster_id" %in% names(metrics))) metrics <- metrics %>% rename(cluster = cluster_id)
+  if (!("cluster" %in% names(metrics))) stop("metrics does not contain 'cluster' (or 'cluster_id'). Cannot expand to counties.")
+  if (!("period" %in% names(metrics))) stop("metrics must contain 'period' to join to membership.")
+
+  metrics <- metrics %>% mutate(cluster = normalize_id(cluster))
+  metric_cols_cluster <- setdiff(names(metrics), c("cluster","period"))
+
+  metrics_expanded <- membership %>%
+    select(period, cluster, fips) %>%
+    mutate(cluster = normalize_id(cluster)) %>%
+    left_join(metrics, by = c("period", "cluster"))
+
+  metrics_clustered <- metrics_expanded %>%
+    attach_stable_cluster("fips") %>%
+    filter(!is.na(cluster_id)) %>%
+    mutate(cluster_id = normalize_id(cluster_id))
+
+  message("Expanded cluster-level metrics to ", nrow(metrics_expanded), " county rows; ", nrow(metrics_clustered),
+          " matched temporally-stable cluster_map (", round(100 * nrow(metrics_clustered) / max(1, nrow(metrics_expanded)), 1), "%).")
+
+  unmapped_rows <- metrics_expanded %>% filter(!fips %in% cluster_map$county_ihme)
+  if (nrow(unmapped_rows) > 0) {
+    message("Warning: ", nrow(unmapped_rows), " expanded membership rows did not map to temporally-stable cluster_map. Writing CSV to inspect.")
+    readr::write_csv(unmapped_rows, file.path(out_dir_base, "unmapped_expanded_membership_rows.csv"))
+  }
+}
+
+if (nrow(metrics_clustered) == 0) stop("No metrics rows joined to cluster_map. Check fips / county_ihme / membership alignment.")
+
+# -------------------- prepare geographies (IHME-aware counties) ------------
+counties_tf <- build_counties_2163_resized_with_ihme(year = 2020, ihme_map = ihme_map)
+states_tf   <- build_states_2163_resized(year = 2020)
+
+# Diagnostic: which referenced county ids are missing from counties_tf?
+counties_geo_ids <- {
+  if ("county_ihme" %in% names(counties_tf)) ids <- counties_tf$county_ihme
+  else if ("GEOID" %in% names(counties_tf)) ids <- counties_tf$GEOID
+  else ids <- counties_tf[[1]]
+  unique(stringr::str_pad(as.character(ids), width = 5, pad = "0"))
+}
+
+membership_fips <- membership %>% pull(fips) %>% unique() %>% stringr::str_pad(width = 5, pad = "0")
+clustermap_fips <- cluster_map %>% pull(county_ihme) %>% unique() %>% stringr::str_pad(width = 5, pad = "0")
+metrics_fips    <- character(0)
+if ("fips" %in% names(metrics)) metrics_fips <- metrics %>% pull(fips) %>% unique() %>% stringr::str_pad(width = 5, pad = "0")
+if ("county_ihme" %in% names(metrics)) metrics_fips <- union(metrics_fips, metrics %>% pull(county_ihme) %>% unique() %>% stringr::str_pad(width = 5, pad = "0"))
+all_referenced <- unique(c(clustermap_fips, membership_fips, metrics_fips))
+missing_in_geo <- setdiff(all_referenced, counties_geo_ids)
+
+if (length(missing_in_geo) > 0) {
+  message("Counties referenced but missing from counties_tf (n = ", length(missing_in_geo), "). Writing CSV.")
+  readr::write_csv(tibble(missing_fips = missing_in_geo), file.path(out_dir_base, "missing_counties_in_geo.csv"))
+} else {
+  message("No referenced counties missing from counties_tf.")
+}
+
+# ----------------- hotfix: try remapping deleted/renamed FIPS -----------------
+# Known deletions / replacements (extend this list as you discover others)
+remap_deleted_fips <- list(
+  # Valdez-Cordova (deleted 2019-01-02) -> Chugach (02063) + Copper River (02066)
+  "02261" = c("02063", "02066")
+  # add more mappings here if needed
+)
+
+# Helper: get county geometry for a FIPS code (year = 2020 used here to match counties_tf)
+get_county_geom <- function(fip5, year = 2020) {
+  tmp <- tigris::counties(year = year, cb = TRUE, class = "sf") %>%
+    sf::st_zm(drop = TRUE, what = "ZM") %>%
+    mutate(GEOID = stringr::str_pad(as.character(GEOID), width = 5, pad = "0")) %>%
+    filter(GEOID == fip5)
+  if (nrow(tmp) == 0) return(NULL)
+  tmp %>% sf::st_transform(crs_proj) %>% sf::st_make_valid()
+}
+
+# Hotfix: append any missing GEOIDs from tigris (safe - only appends)
+if (length(missing_in_geo) > 0) {
+  for (mf in missing_in_geo) {
+    mf <- stringr::str_pad(as.character(mf), width = 5, pad = "0")
+    if (!(mf %in% counties_tf$county_ihme)) {
+      message("Attempting to hotfix missing county ", mf, " from tigris / remap table.")
+      tmp <- get_county_geom(mf, year = 2020)
+
+      if (is.null(tmp) || nrow(tmp) == 0) {
+        # Try remap to replacement FIPS if available
+        if (!is.null(remap_deleted_fips[[mf]])) {
+          replacements <- remap_deleted_fips[[mf]]
+          message("  No geometry for ", mf, ". Will try to build from replacements: ", paste(replacements, collapse = ", "))
+          parts <- lapply(replacements, function(rf) get_county_geom(rf, year = 2020))
+          parts <- parts[!vapply(parts, is.null, logical(1))]
+
+          if (length(parts) == 0) {
+            warning("  Could not fetch replacement geometries for ", mf, ".")
+          } else {
+            # union replacement geometries to create an approximation of old county
+            unioned <- do.call(rbind, parts) %>% group_by(1) %>% summarise(geometry = sf::st_union(geometry), .groups = "drop")
+            unioned <- sf::st_as_sf(unioned)
+            unioned$county_ihme <- mf
+            unioned <- unioned %>% select(county_ihme, geometry)
+            counties_tf <- counties_tf %>% filter(!(county_ihme %in% mf)) %>% bind_rows(unioned) %>% sf::st_make_valid()
+            message("  Constructed geometry for ", mf, " by unioning replacements; appended to counties_tf.")
+          }
+        } else {
+          warning("  No replacement mapping known for ", mf, " and tigris returned no geometry.")
+        }
+      } else {
+        # append direct geometry
+        tmp2 <- tmp %>% transmute(county_ihme = GEOID, geometry = geometry) %>% sf::st_as_sf()
+        counties_tf <- counties_tf %>% filter(!(county_ihme %in% mf)) %>% bind_rows(tmp2) %>% sf::st_make_valid()
+        message("  Appended ", mf, " to counties_tf from tigris.")
+      }
+    }
+  }
+
+  # recompute counties_geo_ids after append attempts
+  counties_geo_ids <- {
+    if ("county_ihme" %in% names(counties_tf)) ids <- counties_tf$county_ihme
+    else if ("GEOID" %in% names(counties_tf)) ids <- counties_tf$GEOID
+    else ids <- counties_tf[[1]]
+    unique(stringr::str_pad(as.character(ids), width = 5, pad = "0"))
+  }
+  missing_in_geo <- setdiff(all_referenced, counties_geo_ids)
+  if (length(missing_in_geo) > 0) {
+    message("Still missing counties after hotfix: ", paste(missing_in_geo, collapse = ", "))
+    readr::write_csv(tibble(still_missing = missing_in_geo), file.path(out_dir_base, "still_missing_counties_after_hotfix.csv"))
+  }
+}
+
+# ensure county_ihme column exists
+if (!("county_ihme" %in% names(counties_tf))) {
+  if ("GEOID" %in% names(counties_tf)) counties_tf <- counties_tf %>% mutate(county_ihme = GEOID)
+  else counties_tf <- counties_tf %>% mutate(county_ihme = stringr::str_pad(as.character(row_number()), width = 5, pad = "0"))
+}
+
+# ----------------------- faceted map function --------------------------
 make_faceted_map <- function(stacked_sf, fill_col, lims, diverging, states_sf) {
   ggplot() +
     geom_sf(data = stacked_sf, aes(fill = .data[[fill_col]]), colour = NA) +
@@ -3580,47 +3169,75 @@ make_faceted_map <- function(stacked_sf, fill_col, lims, diverging, states_sf) {
       oob = scales::squish,
       na.value = "grey90"
     ) +
-    coord_sf(
-      xlim = c(-2500000, 2500000),
-      ylim = c(-2200000,  730000),
-      expand = FALSE
-    ) +
-    labs(fill = NULL) +                # no legend title
-    facet_wrap(~ period, ncol = 2) +   # 4 panels labeled by period
+    coord_sf(xlim = c(-2500000, 2500000), ylim = c(-2200000,  730000), expand = FALSE) +
+    labs(fill = NULL) +
+    facet_wrap(~ period, ncol = 2) +
     theme_void() +
-    theme(
-      strip.text = element_text(size = 12, face = "bold"),
-      legend.text = element_text(size = 9),
-      plot.title = element_blank()     # <-- ensure no top title
-    )
+    theme(strip.text = element_text(size = 12, face = "bold"),
+          legend.text = element_text(size = 9),
+          plot.title = element_blank())
 }
 
-# For each metric: stack 4 periods → one 4-panel PNG
+# metric columns (numeric)
+metric_cols <- names(metrics)[vapply(metrics, is.numeric, logical(1))]
+metric_cols <- setdiff(metric_cols, c("fips", "GEOID", "STATEFP", "COUNTYFP"))
+periods_all <- intersect(period_levels, unique(metrics_clustered$period))
+
+# ----------------- Main: produce 4-panel maps for each metric -----------------
+message("Starting assembly of 4-panel COD diversity maps using temporally-stable groupings...")
+
+# Precompute stable mapping for convenience: fips -> cluster_id
+stable_fips_to_cluster <- cluster_map %>% rename(fips = county_ihme) %>% mutate(fips = stringr::str_pad(as.character(fips), width = 5, pad = "0"))
+
 for (mcol in metric_cols) {
   message("Assembling 4-panel for metric: ", mcol)
 
-  lims_info <- compute_limits(metrics[[mcol]])
-
-  # Build cluster polygons per period, join metric, and stack
   stacked_sf <- map_dfr(periods_all, function(win) {
-    cl_sf <- build_cluster_sf(win, membership, counties_tf)
+    cl_sf <- build_cluster_sf_from_membership(win, membership, counties_tf)
 
-    dat <- metrics %>%
-      dplyr::filter(period == win) %>%
-      dplyr::select(cluster, !!rlang::sym(mcol)) %>%
-      dplyr::rename(value = !!rlang::sym(mcol))
+    dat <- metrics_clustered %>%
+      filter(period == win) %>%
+      group_by(cluster_id) %>%
+      summarise(value = mean(.data[[mcol]], na.rm = TRUE), .groups = "drop")
 
-    sf_cl <- cl_sf %>% dplyr::left_join(dat, by = "cluster")
+    member_map <- membership %>%
+      filter(period == win) %>%
+      transmute(fips = stringr::str_pad(as.character(fips), width = 5, pad = "0"),
+                membership_cluster = normalize_id(cluster)) %>%
+      left_join(stable_fips_to_cluster, by = "fips")  # yields cluster_id
+
+    map_cluster_to_stable <- member_map %>%
+      filter(!is.na(cluster_id)) %>%
+      group_by(membership_cluster, cluster_id) %>%
+      summarise(n = n(), .groups = "drop") %>%
+      group_by(membership_cluster) %>%
+      arrange(membership_cluster, desc(n), cluster_id) %>%
+      slice_head(n = 1) %>%
+      ungroup() %>%
+      transmute(cluster = membership_cluster, cluster_id = normalize_id(cluster_id))
+
+    missing_map_members <- setdiff(unique(member_map$membership_cluster), map_cluster_to_stable$cluster)
+    if (length(missing_map_members) > 0) {
+      message("  Note: ", length(missing_map_members), " membership clusters in period ", win, " have no temporally-stable mapping (examples up to 10):")
+      print(utils::head(missing_map_members, 10))
+      readr::write_csv(member_map %>% filter(membership_cluster %in% missing_map_members),
+                       file.path(out_dir_base, paste0("unmapped_membership_clusters_", win, ".csv")))
+    }
+
+    # left_join expects cl_sf to have 'cluster' column (we ensure that in build_cluster_sf_from_membership)
+    sf_cl <- cl_sf %>% left_join(map_cluster_to_stable, by = "cluster") %>% left_join(dat, by = "cluster_id")
     sf_cl$period <- win
     sf_cl
   }) %>%
-    dplyr::mutate(period = factor(period, levels = period_levels))
+    mutate(period = factor(period, levels = period_levels))
 
   vals <- stacked_sf$value[is.finite(stacked_sf$value)]
   if (!length(vals) || length(unique(vals)) == 1) {
     message("  Skipping ", mcol, ": no finite variance across periods.")
     next
   }
+
+  lims_info <- compute_limits(stacked_sf$value)
 
   p <- make_faceted_map(
     stacked_sf = stacked_sf,
@@ -3635,6 +3252,16 @@ for (mcol in metric_cols) {
   message("  Saved: ", fout)
 }
 
+# Coverage summary
+coverage_df <- membership %>%
+  mutate(fips = stringr::str_pad(as.character(fips), width = 5, pad = "0"),
+         membership_cluster = normalize_id(cluster)) %>%
+  left_join(cluster_map, by = c("fips" = "county_ihme")) %>%
+  group_by(period, membership_cluster) %>%
+  summarise(n_counties = n(), n_mapped = sum(!is.na(cluster_id)), pct_mapped = 100 * n_mapped / n_counties, .groups = "drop")
+
+readr::write_csv(coverage_df, file.path(out_dir_base, "membership_to_stable_coverage_summary.csv"))
+message("Wrote coverage summary: ", file.path(out_dir_base, "membership_to_stable_coverage_summary.csv"))
 message("Done. 4-panel maps in: ", out_dir_base)
 
 ```
