@@ -325,4 +325,4 @@ if (WRITE_ONE_CSV) {
 
 # BASE_DIR = Path("/Users/amymann/Documents/Data Quality Project/data/parquet")
 # read_parquet(here("data_private/mcod_sample/mcod_1999.parquet"))
-d <- read_parquet("/Users/amymann/Documents/Data Quality Project/data/parquet/mort1999.parquet")
+# d <- read_parquet("/Users/amymann/Documents/Data Quality Project/data/parquet/mort1999.parquet")

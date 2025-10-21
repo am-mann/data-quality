@@ -21,27 +21,23 @@ options(
     DQ_POOL_YEARS         = 3L
 )
 
-# ====== Option helpers ======
 .pool_years_default       <- function() as.integer(getOption("DQ_POOL_YEARS", 3L))
 .dirichlet_prior_default  <- function() as.numeric(getOption("DQ_DIRICHLET_PRIOR", 0.25))
 .min_per_class_default    <- function() as.integer(getOption("DQ_MIN_PER_CLASS", 10L))
 .max_train_per_class_def  <- function() as.integer(getOption("DQ_MAX_TRAIN_PER_CLASS", 3000L))
 .seed_default             <- function() as.integer(getOption("DQ_SEED", NA_integer_))
-.verbose_default          <- function() isTRUE(getOption("DQ_VERBOSE", TRUE))
+.verbose_default          <- function() isTRUE(getOption("DQ_VERBOSE", FALSE))
 .diag_dir_default         <- function() { x <- getOption("DQ_DIAG_DIR", NULL); if (is.character(x) && nzchar(x)) x else NULL }
 .has_glmnet               <- function() requireNamespace("glmnet", quietly = TRUE)
-# +++ NEW: detect doParallel
 .has_doParallel           <- function() requireNamespace("doParallel", quietly = TRUE)
 .cv_folds_default         <- function() as.integer(getOption("DQ_CV_FOLDS", 3L))
 .nlambda_default          <- function() as.integer(getOption("DQ_NLAMBDA", 60L))
 .lmr_default              <- function() as.numeric(getOption("DQ_LAMBDA_MIN_RATIO", 0.05))
 .alpha_default            <- function() as.numeric(getOption("DQ_ALPHA", 0.7))
 .lambda_choice_default    <- function() as.character(getOption("DQ_LAMBDA_CHOICE","lambda.min"))
-.tau_default              <- function() as.numeric(getOption("DQ_POST_TAU", 0.75))
+.tau_default              <- function() as.numeric(getOption("DQ_POST_TAU", 1))
 .min_train_support_def    <- function() as.integer(getOption("DQ_MIN_TRAIN_SUPPORT", 20L))
 .target_per_class_def     <- function() as.integer(getOption("DQ_TARGET_PER_CLASS", 3000L))
-
-# Per-bin stratification mode
 .strat_mode_for_bin <- function(g) {
     per <- getOption("DQ_STRAT_MODE_BY_BIN", NULL)
     mode <- if (is.list(per) && !is.null(per[[g]])) as.character(per[[g]]) else "age_sex"
@@ -343,7 +339,6 @@ compute_entropy_county_foreman <- function(
     diag_dir <- .diag_dir_default()
     diag_rows <- list(); on.exit({gc()}, add = TRUE)
     
-    # +++ NEW: register parallel backend if available
     if (.has_doParallel()) {
         cores <- parallel::detectCores()
         doParallel::registerDoParallel(cores = cores)
@@ -467,7 +462,6 @@ compute_entropy_county_foreman <- function(
     prob_counts_list <- list()
     metrics_list     <- list()
     
-    # ============================ per garbage bin ============================
     for (g in garbage_bins) {
         targets_raw <- targets_by_g[[g]]; if (is.null(targets_raw) || !length(targets_raw)) next
         classes_all_global <- sort(intersect(targets_raw, valid_bins)); if (!length(classes_all_global)) next
@@ -550,7 +544,6 @@ compute_entropy_county_foreman <- function(
                 break
             }
             
-            # If training still failed, we now simply skip (no fallback)
             if (!length(tr_idx) || length(ok_classes) < 2) {
                 dropped_log[[length(dropped_log)+1L]] <- .log_drop(
                     g, key, "skipped_stratum", classes_all_global, support_vec, ok_classes,
@@ -665,12 +658,12 @@ compute_entropy_county_foreman <- function(
             }
             H_post  <- rowSums(-probs_for_metrics * log(pmax(probs_for_metrics,  eps)))
             k_cand  <- length(ok_classes)
-            Hnorm_gc_by_kcand <- if (k_cand > 1) H_post / log(k_cand) else rep(0, length(H_post))
+            Hnorm_gc_by_kcand <- if (k_cand > 1) H_post / log(k_cand) else NA
             
             P0 <- pmax(probs,     eps); P0 <- P0 / rowSums(P0)
             Q0 <- pmax(prior_mat, eps); Q0 <- Q0 / rowSums(Q0)
             KL_raw_vec  <- rowSums(P0 * (log(P0) - log(Q0)))
-            KL_norm_vec <- if (k_cand > 1) KL_raw_vec / log(k_cand) else rep(0, length(KL_raw_vec))
+            KL_norm_vec <- if (k_cand > 1) KL_raw_vec / log(k_cand) else NA
             
             M0 <- 0.5 * (P0 + Q0)
             KL_PM <- rowSums(P0 * (log(P0) - log(pmax(M0, eps))))
@@ -768,19 +761,19 @@ compute_entropy_county_foreman <- function(
         left_join(out_perrecord, by = c("cnty", "year")) %>%
         rename(!!county_var := cnty)
     
-    if (length(dropped_log)) {
-        drop_df <- bind_rows(dropped_log)
-        ts <- format(Sys.time(), "%Y%m%d_%H%M%S")
-        f2 <- if (!is.null(diag_dir)) {
-            if (!dir.exists(diag_dir)) dir.create(diag_dir, recursive = TRUE, showWarnings = FALSE)
-            file.path(diag_dir, paste0("dropped_classes_", ts, ".csv"))
-        } else {
-            file.path(getwd("output"), paste0("dropped_classes_", ts, ".csv"))
-        }
-        readr::write_csv(drop_df, f2)
-        if (verbose) message("[diag] wrote dropped-classes report to: ", f2)
-        attr(out, "dropped_classes") <- drop_df
-    }
+    #if (length(dropped_log)) {
+    #    drop_df <- bind_rows(dropped_log)
+    #    ts <- format(Sys.time(), "%Y%m%d_%H%M%S")
+    #    f2 <- if (!is.null(diag_dir)) {
+    #        if (!dir.exists(diag_dir)) dir.create(diag_dir, recursive = TRUE, showWarnings = FALSE)
+    #        file.path(diag_dir, paste0("dropped_classes_", ts, ".csv"))
+    #    } else {
+    #        file.path(here("output"), paste0("dropped_classes_", ts, ".csv"))
+    #    }
+    #    readr::write_csv(drop_df, f2)
+    #    if (verbose) message("[diag] wrote dropped-classes report to: ", f2)
+    #    attr(out, "dropped_classes") <- drop_df
+    #}
     
     out
 }

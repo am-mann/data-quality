@@ -78,7 +78,6 @@ normalize_fips <- function(x) {
     x
 }
 
-# ---------------- local shapefile option (optional) ----------------
 local_shapefile_dir <- here::here("data_raw", "tigris_counties_local")
 if (!dir.exists(local_shapefile_dir)) local_shapefile_dir <- NULL
 

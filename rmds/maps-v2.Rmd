@@ -277,9 +277,9 @@ make_map_numeric <- function(sf_data, fill_col, limits, title) {
           legend.text = element_text(size = 9))
 }
 
-make_map_RI   <- function(sf_data, title) make_map_numeric(sf_data, "RI", c(0.02, 0.05), title)
-make_map_post <- function(sf_data, title) make_map_numeric(sf_data, "RI_post_only", c(0.08, 0.12), title)
-make_map_jsd  <- function(sf_data, title) make_map_numeric(sf_data, "RI_jsd", c(0.02, 0.04), title)  # tweak if needed
+make_map_RI   <- function(sf_data, title) make_map_numeric(sf_data, "RI", c(0.018, 0.04), title)
+make_map_post <- function(sf_data, title) make_map_numeric(sf_data, "RI_post_only", c(0.15, 0.25), title)
+make_map_jsd  <- function(sf_data, title) make_map_numeric(sf_data, "RI_jsd", c(0.015, 0.03), title)  # tweak if needed
 
 # 9) Save maps
 output_dir <- here::here("figures", "5yr_avg_stable")
