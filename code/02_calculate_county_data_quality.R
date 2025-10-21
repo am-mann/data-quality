@@ -150,7 +150,8 @@ summarise_year_file <- function(file) {
     
     # Ensure demo columns & year
     for (v in setdiff(key_demo_vars, names(ds))) ds[[v]] <- NA_character_
-    if (!"year" %in% names(ds) || all(is.na(ds$year))) ds$year <- this_year
+    if (!"year" %in% names(ds)) ds$year <- this_year
+    ds$year <- as.integer(dplyr::coalesce(ds$year, this_year))
     if (this_year < 2004) ds$educ2003 <- NA_character_
     demo_vars <- if (this_year < 2004) setdiff(key_demo_vars, "educ2003") else key_demo_vars
     if (this_year %in% 2021:2022) demo_vars <- union(setdiff(demo_vars, "race"), "racer40")
