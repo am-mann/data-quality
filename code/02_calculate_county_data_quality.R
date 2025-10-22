@@ -31,7 +31,7 @@ suppressPackageStartupMessages({
 })
 
 PARALLELIZE <- TRUE
-N_WORKERS   <- 8
+N_WORKERS   <- 12
 WRITE_ONE_CSV     <- TRUE 
 out_csv           <- here("data", "county_year_quality_metrics.csv.gz")
 
@@ -69,11 +69,14 @@ rename_record_cols <- function(df) {
 }
 
 # -------- paths --------
-parquet_dir <- if (dir.exists(here("data_private", "mcod"))) {
-    here("data_private", "mcod")
+if (dir.exists(here("data_private", "mcod"))) {
+    parquet_dir <- here("data_private", "mcod")
 } else if (dir.exists(here("data_private", "mcod_sample"))) {
-    here("data_private", "mcod_sample")
-} else stop("Neither data_private/mcod nor data_private/mcod_sample exists.")
+    parquet_dir <- here("data_private", "mcod_sample")
+    PARALLELIZE <- FALSE
+} else {
+    stop("Neither data_private/mcod nor data_private/mcod_sample exists.")
+}
 
 dictionary_dir <- here("data_raw", "cause-codes")
 county_var     <- "county_ihme"
@@ -310,14 +313,23 @@ if (!is.null(years_wanted)) {
 }
 
 if (PARALLELIZE) {
-    suppressPackageStartupMessages({ library(future); library(furrr) })
-    plan(multisession, workers = max(1, N_WORKERS))
-    county_year_all <- purrr::map_dfr(parquet_files, summarise_year_file)
+    future::plan(future::multisession(workers = max(1, N_WORKERS)))
+    county_year_all <- furrr::future_map_dfr(
+        parquet_files,
+        summarise_year_file,
+        .options = furrr::furrr_options(
+            seed = TRUE,
+            packages = c("arrow", 
+                         "tidyr", "forcats", "Matrix", "glmnet", "readxl", "stringr", "readr", "dplyr")
+        )
+    )
+    future::plan(future::sequential())
 } else {
     county_year_all <- purrr::map_dfr(parquet_files, summarise_year_file)
 }
 
 if (WRITE_ONE_CSV) {
+    dir.create(dirname(out_csv))
     readr::write_csv(county_year_all, out_csv)
     message("County-year quality metrics written: ", out_csv)
 } else {
