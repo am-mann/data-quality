@@ -1,25 +1,3 @@
-# --------------------------------------------------------------
-# ANACONDA detail metric
-# Date: August 18, 2025
-#
-# This script is an implementation of "detail" metric from the Phillips ANACONDA paper.
-# Because most counties have far too few deaths for this metric, they were put into clusters 
-# using the US cluster groups. Then for clusters with less than 2000 deaths adjacent ones were merged until reaching 2000 
-# across all time periods
-# The code computes Shannon entropy over GBD cause categories and converts them to the 
-# effective number of causes of death. It then standardizes to 2000 deaths by taking a sample of 2000
-# when there is more than 2000 deaths. 
-#
-# The only difference between this metric and Phillips' is that they use
-# reference size as the sample size at which all populations reach 95% sample completeness. 
-# Unfortunately, our clusters are too small for that to be feasible, but plots (see slides) 
-# show that large cluster size effects seem to drop-off around 2000 deaths making it a justifiable reference size. 
-# Phillips et al note in their paper that size based rarefaction is appropriate for small places. 
-#
-# It is standardized by ucr39 cause of death categories.
-#
-# --------------------------------------------------------------
-
 suppressPackageStartupMessages({
     library(fs); library(readr); library(dplyr); library(stringr)
     library(purrr); library(tidyr); library(tibble)
@@ -27,30 +5,27 @@ suppressPackageStartupMessages({
     library(here); library(DBI); library(duckdb); library(glue)
 })
 
-min_deaths <- 2000L
+min_deaths <- 1500L
 periods <- list(
     "1999_2005" = 1999:2005,
     "2006_2012" = 2006:2012,
     "2013_2019" = 2013:2019,
     "2020_2022" = 2020:2022
 )
-
 out_dir   <- here("output"); dir_create(out_dir)
 diag_out_dir <- here("output","debug_missing_fips_diagnostics"); dir_create(diag_out_dir, recurse = TRUE)
 parquet_dir <- if (dir_exists(here("data_private","mcod"))) here("data_private","mcod") else here("data_private","mcod_sample")
-
 garbage_csv <- here("data_raw","cause-codes","gbd_garbage_codes_without_overdose.csv")
 stopifnot(file.exists(garbage_csv))
-
-log_msg <- function(...) cat(format(Sys.time(), "%H:%M:%S"), "│", paste0(..., collapse=""), "\n")
 CLAMP_0_100 <- TRUE
 .clamp100 <- function(x){ if(!CLAMP_0_100) return(x); y <- x; y[x<0]<-0; y[x>100]<-100; y }
-
 county_var <- "county_ihme"
 UCR39_COL  <- "ucr39"
-
 crs_proj  <- 5070
 threads   <- max(1L, parallel::detectCores() - 1L)
+
+# whether to require strict temporally-stable intersection for global mapping
+use_intersection_for_global <- TRUE
 
 # ---------------- FIPS patch ----------------
 fips_patch <- c(
@@ -68,19 +43,17 @@ apply_fips_patch <- function(f){
     mapped <- ifelse(is.na(mapped), NA_character_, stringr::str_pad(mapped, 5, pad = "0"))
     mapped
 }
-
 normalize_fips <- function(x) {
-    x <- as.character(x)
-    x <- stringr::str_trim(x)
+    x <- as.character(x); x <- stringr::str_trim(x)
     x <- gsub("[^0-9]", "", x)
     x[x == ""] <- NA_character_
     x <- ifelse(is.na(x), NA_character_, stringr::str_pad(x, width = 5, side = "left", pad = "0"))
     x
 }
 
+# ---------------- shapefile helpers ----------------
 local_shapefile_dir <- here::here("data_raw", "tigris_counties_local")
 if (!dir.exists(local_shapefile_dir)) local_shapefile_dir <- NULL
-
 try_read_local_shapefile <- function(year) {
     if (is.null(local_shapefile_dir)) return(NULL)
     pattern <- paste0("cb_", year, "_us_county_")
@@ -89,8 +62,6 @@ try_read_local_shapefile <- function(year) {
     if (length(shp) == 0) return(NULL)
     tryCatch(sf::st_read(shp[1], quiet = TRUE), error = function(e) NULL)
 }
-
-# ---------------- GEOID helper ----------------
 ensure_geoid <- function(sf_obj) {
     nm <- names(sf_obj)
     if ("GEOID" %in% nm) return(sf_obj)
@@ -109,7 +80,7 @@ ensure_geoid <- function(sf_obj) {
     stop("Shapefile lacks GEOID / STATEFP+COUNTYFP columns and cannot auto-construct GEOID.")
 }
 
-# ---------------- Robust tigris cache & optional downloader ----------------
+# ---------------- tigris cache config ----------------
 options(tigris_use_cache = TRUE)
 tigris_cache_dir <- here::here("data_raw","tigris_cache")
 if (!dir.exists(tigris_cache_dir)) dir.create(tigris_cache_dir, recursive = TRUE)
@@ -134,52 +105,33 @@ download_census_cb <- function(year, dest_dir = here::here("data_raw","tigris_co
             }
         }, silent = TRUE)
     }
-    message("All download attempts failed for year ", year, ". Please place shapefile into ", dest_dir, " manually.")
     FALSE
 }
 
-# ---------------- Robust spatial builder (bidirectional fallback + cache + local) ----------------
 build_year_spatial_pref_earlier_geoid_fallback <- function(yr, crs_proj = 5070, fallback_window = 10, min_year = 1990) {
     sf::sf_use_s2(FALSE)
-    
     safe_normalize_counties <- function(counties_sf) {
         if (!inherits(counties_sf, "sf")) stop("safe_normalize_counties needs an sf object")
         if (nrow(counties_sf) == 0) stop("empty sf object provided")
         if (is.null(sf::st_geometry(counties_sf))) stop("no geometry column")
-        if ("st_zm" %in% ls(getNamespace("sf"), all.names = TRUE)) {
-            try({
-                geom <- sf::st_geometry(counties_sf)
-                sf::st_geometry(counties_sf) <- sf::st_zm(geom, drop = TRUE, what = "ZM")
-            }, silent = TRUE)
-        }
         try({
-            is_empty <- sf::st_is_empty(counties_sf)
-            if (any(is_empty, na.rm = TRUE)) counties_sf <- counties_sf[!is_empty, , drop = FALSE]
+            geom <- sf::st_geometry(counties_sf)
+            if ("st_zm" %in% ls(getNamespace("sf"), all.names = TRUE)) sf::st_geometry(counties_sf) <- sf::st_zm(geom, drop = TRUE, what = "ZM")
         }, silent = TRUE)
-        try({
-            counties_sf <- sf::st_cast(counties_sf, "MULTIPOLYGON", warn = FALSE)
-        }, silent = TRUE)
-        try({
-            geoms_valid <- sf::st_make_valid(sf::st_geometry(counties_sf))
-            sf::st_geometry(counties_sf) <- geoms_valid
-        }, silent = TRUE)
-        try({
-            keep_idx <- which(!is.na(sf::st_geometry(counties_sf)) & !sf::st_is_empty(sf::st_geometry(counties_sf)))
-            if (length(keep_idx) == 0) stop("No valid geometries after normalization")
-            if (length(keep_idx) < nrow(counties_sf)) counties_sf <- counties_sf[keep_idx, , drop = FALSE]
-        }, silent = TRUE)
+        try({ counties_sf <- counties_sf[!sf::st_is_empty(sf::st_geometry(counties_sf)), , drop = FALSE] }, silent = TRUE)
+        try({ counties_sf <- sf::st_cast(counties_sf, "MULTIPOLYGON", warn = FALSE) }, silent = TRUE)
+        try({ geoms_valid <- sf::st_make_valid(sf::st_geometry(counties_sf)); sf::st_geometry(counties_sf) <- geoms_valid }, silent = TRUE)
+        keep_idx <- which(!is.na(sf::st_geometry(counties_sf)) & !sf::st_is_empty(sf::st_geometry(counties_sf)))
+        if (length(keep_idx) == 0) stop("No valid geometries after normalization")
+        if (length(keep_idx) < nrow(counties_sf)) counties_sf <- counties_sf[keep_idx, , drop = FALSE]
         counties_sf
     }
-    
     safe_st_transform <- function(x, crs_proj) {
         out <- tryCatch(sf::st_transform(x, crs_proj), error = function(e) e)
         if (!inherits(out, "error")) return(out)
-        message("    safe_st_transform: initial st_transform failed: ", out$message)
         try({
             x2 <- sf::st_make_valid(x)
-            if ("st_zm" %in% ls(getNamespace("sf"), all.names = TRUE)) {
-                sf::st_geometry(x2) <- sf::st_zm(sf::st_geometry(x2), drop = TRUE, what = "ZM")
-            }
+            if ("st_zm" %in% ls(getNamespace("sf"), all.names = TRUE)) sf::st_geometry(x2) <- sf::st_zm(sf::st_geometry(x2), drop = TRUE, what = "ZM")
             out2 <- tryCatch(sf::st_transform(x2, crs_proj), error = function(e) e)
             if (!inherits(out2, "error")) return(out2)
         }, silent = TRUE)
@@ -190,7 +142,6 @@ build_year_spatial_pref_earlier_geoid_fallback <- function(yr, crs_proj = 5070, 
         }, silent = TRUE)
         stop("safe_st_transform: unable to transform geometry to target CRS (", crs_proj, ")")
     }
-    
     try_download_tigris <- function(y) {
         tryCatch({
             message("    trying tigris::counties(cb=TRUE, year=", y, ") via HTTPS...")
@@ -202,25 +153,18 @@ build_year_spatial_pref_earlier_geoid_fallback <- function(yr, crs_proj = 5070, 
             NULL
         })
     }
-    
-    try_local <- function(year) {
-        try_read_local_shapefile(year)
-    }
-    
+    try_local <- function(year) try_read_local_shapefile(year)
     local_sf <- try_local(yr)
     year_used <- NA_integer_
     if (!is.null(local_sf)) {
-        counties_sf <- local_sf
-        year_used <- yr
+        counties_sf <- local_sf; year_used <- yr
     } else {
         counties_sf <- try_download_tigris(yr)
         if (!is.null(counties_sf)) year_used <- yr
-        
         if (is.null(counties_sf)) {
             years_before <- seq(from = yr - 1, to = max(min_year, yr - fallback_window), by = -1)
             years_after  <- seq(from = yr + 1, to = yr + fallback_window, by = 1)
-            nmax <- max(length(years_before), length(years_after))
-            interleaved <- c()
+            nmax <- max(length(years_before), length(years_after)); interleaved <- c()
             for (i in seq_len(nmax)) {
                 if (i <= length(years_before)) interleaved <- c(interleaved, years_before[i])
                 if (i <= length(years_after))  interleaved <- c(interleaved,  years_after[i])
@@ -233,7 +177,6 @@ build_year_spatial_pref_earlier_geoid_fallback <- function(yr, crs_proj = 5070, 
                 if (!is.null(lf)) { counties_sf <- lf; year_used <- y2; break }
             }
         }
-        
         if (is.null(counties_sf)) {
             try({
                 message("    attempting tigris cache-only read for year ", yr, " ...")
@@ -250,55 +193,28 @@ build_year_spatial_pref_earlier_geoid_fallback <- function(yr, crs_proj = 5070, 
             }
         }
     }
-    
-    if (is.null(counties_sf) || nrow(counties_sf) == 0) {
-        stop("Failed to obtain county shapefile for year ", yr, " or nearby fallback years. Provide a local shapefile.")
-    }
-    
+    if (is.null(counties_sf) || nrow(counties_sf) == 0) stop("Failed to obtain county shapefile for year ", yr, " or nearby fallback years. Provide a local shapefile.")
     counties_sf <- tryCatch({ ensure_geoid(counties_sf) }, error = function(e) { stop(e$message) })
     counties_sf <- counties_sf %>% mutate(GEOID = as.character(GEOID), GEOID = stringr::str_pad(GEOID, 5, pad = "0")) %>% dplyr::select(GEOID, geometry)
-    
-    counties_sf <- tryCatch({
-        safe_normalize_counties(counties_sf)
-    }, error = function(e) {
-        message("    Warning: geometry normalization failed: ", e$message, " — proceeding with raw shapefile (may fail later).")
-        counties_sf
-    })
-    
-    counties_proj <- tryCatch({
-        safe_st_transform(counties_sf, crs_proj)
-    }, error = function(e) {
-        message("    safe_st_transform ultimately failed: ", e$message)
-        stop("st_transform failed and recovery attempts exhausted for year ", yr)
-    })
-    
-    adj <- tryCatch({
-        sf::st_touches(counties_proj)
-    }, error = function(e) {
-        message("    st_touches failed: ", e$message, " — trying st_intersects() as fallback")
-        tryCatch(sf::st_intersects(counties_proj), error = function(e2) stop("st_intersects also failed: ", e2$message))
-    })
-    
+    counties_sf <- tryCatch({ safe_normalize_counties(counties_sf) }, error = function(e) { message("    Warning: geometry normalization failed: ", e$message, " — proceeding with raw shapefile (may fail later)."); counties_sf })
+    counties_proj <- tryCatch({ safe_st_transform(counties_sf, crs_proj) }, error = function(e) { message("    safe_st_transform ultimately failed: ", e$message); stop("st_transform failed and recovery attempts exhausted for year ", yr) })
+    adj <- tryCatch({ sf::st_touches(counties_proj) }, error = function(e) { message("    st_touches failed: ", e$message, " — trying st_intersects() as fallback"); tryCatch(sf::st_intersects(counties_proj), error = function(e2) stop("st_intersects also failed: ", e2$message)) })
     edge_df <- tibble::tibble(from = rep(counties_sf$GEOID, lengths(adj)),
                               to   = counties_sf$GEOID[unlist(adj)]) %>% filter(from < to)
     g <- tryCatch(igraph::graph_from_data_frame(edge_df, directed = FALSE, vertices = counties_sf$GEOID),
                   error = function(e) stop("igraph construction failed: ", e$message))
     nbrs_list <- setNames(lapply(V(g)$name, function(v) names(neighbors(g, v, mode="all"))), V(g)$name)
-    
     county_centroids <- tryCatch({
         sf::st_centroid(counties_proj) %>% mutate(GEOID = counties_sf$GEOID) %>% dplyr::select(GEOID, geometry)
     }, error = function(e) {
         stop("st_centroid failed: ", e$message)
     })
-    
     coords <- tryCatch(sf::st_coordinates(county_centroids), error = function(e) stop("st_coordinates failed: ", e$message))
     centroid_mat <- coords[, c("X","Y"), drop = FALSE]; rownames(centroid_mat) <- county_centroids$GEOID
-    
     tryCatch({
         readr::write_csv(tibble::tibble(requested_year = yr, year_used = year_used),
                          file.path(diag_out_dir, paste0("year_lookup_", yr, ".csv")))
     }, silent = TRUE)
-    
     message("    spatial built for requested year ", yr, "; year used: ", year_used)
     list(requested_year = yr, year_used = year_used, counties_sf = counties_sf, centroid_mat = centroid_mat, nbrs_list = nbrs_list)
 }
@@ -314,32 +230,31 @@ for (pname in names(periods)) {
         } else {
             y_use <- y
         }
-        
         message("  building spatial for year ", y, " (effective shapefile year: ", y_use, ")")
         build_year_spatial_pref_earlier_geoid_fallback(y_use, crs_proj = crs_proj, fallback_window = 10, min_year = 1990)
-    })    
+    })
     names(year_objs) <- as.character(yrs)
     fips_by_year <- lapply(year_objs, function(x) rownames(x$centroid_mat))
-    stable_fips <- Reduce(intersect, fips_by_year)
     readr::write_csv(tibble::tibble(year = as.character(yrs), n_counties = vapply(fips_by_year, length, integer(1))),
                      file.path(diag_out_dir, paste0("period_year_counts_", pname, ".csv")))
-    readr::write_csv(tibble::tibble(stable_fips = stable_fips),
-                     file.path(diag_out_dir, paste0("temporally_stable_fips_", pname, ".csv")))
+    stable_fips <- Reduce(intersect, fips_by_year)
+    readr::write_csv(tibble::tibble(stable_fips = stable_fips), file.path(diag_out_dir, paste0("temporally_stable_fips_", pname, ".csv")))
     period_spatial_list[[pname]] <- list(years = yrs, year_objs = year_objs, stable_fips = stable_fips)
     message("  temporally-stable counties for ", pname, ": ", length(stable_fips))
 }
 
-# ---------------- Build ONE global cluster mapping (≥ min_deaths aggregated across all periods) ----------------
-message("Building global cluster mapping with ≥", min_deaths, " deaths aggregated across all periods")
 
-# canonical year for centroids/adjacency: earliest available year among retrieved year_objs
-all_year_objs <- unlist(lapply(period_spatial_list, function(p) names(p$year_objs)))
-all_years_sorted <- sort(unique(all_year_objs))
-if (length(all_years_sorted) == 0) stop("No year objects available in period_spatial_list — spatial build failed.")
-canonical_year_for_global <- all_years_sorted[1]
-message("Using canonical year for centroids/adjacency: ", canonical_year_for_global)
-
-# obtain year_obj that contains canonical_year_for_global
+# canonical year candidates (from period_spatial_list)
+all_year_objs <- sort(unique(unlist(lapply(period_spatial_list, function(p) names(p$year_objs)))))
+if (length(all_year_objs) == 0) stop("No year objects available in period_spatial_list — spatial build failed.")
+# choose canonical year as the one with most centroid rows across available year_objs
+year_counts <- integer(length(all_year_objs)); names(year_counts) <- all_year_objs
+for (yr in all_year_objs) {
+    for (p in period_spatial_list) if (yr %in% names(p$year_objs)) { year_counts[yr] <- nrow(p$year_objs[[yr]]$centroid_mat); break }
+}
+canonical_year_for_global <- names(which.max(year_counts))
+message("Using canonical year for centroids/adjacency (most complete): ", canonical_year_for_global)
+# find the corresponding year_obj
 any_year_obj <- NULL
 for (p in period_spatial_list) {
     if (canonical_year_for_global %in% names(p$year_objs)) { any_year_obj <- p$year_objs[[canonical_year_for_global]]; break }
@@ -350,11 +265,19 @@ nbrs_list_global    <- any_year_obj$nbrs_list
 valid_fips_by_centroid <- rownames(centroid_mat_global)
 if (length(valid_fips_by_centroid) == 0) stop("No centroid rows available in canonical year's centroid matrix")
 
-# temporally-stable intersection across all periods
+# compute valid_fips_global using union (or intersection if configured)
 stable_fips_each_period <- lapply(period_spatial_list, function(x) x$stable_fips)
-valid_fips_global <- Reduce(intersect, stable_fips_each_period)
-message("Number of temporally-stable FIPS in intersection (used for global mapping): ", length(valid_fips_global))
-if (length(valid_fips_global) == 0) stop("No temporally-stable counties common to all periods - cannot build global mapping with intersection. Consider using union instead.")
+n_by_period <- vapply(stable_fips_each_period, length, integer(1))
+readr::write_csv(tibble(period = names(stable_fips_each_period), n_temporally_stable = n_by_period),
+                 file.path(diag_out_dir, "temporally_stable_counts_by_period.csv"))
+if (use_intersection_for_global) {
+    valid_fips_global <- Reduce(intersect, stable_fips_each_period)
+    message("Using INTERSECTION across periods for global mapping.")
+} else {
+    valid_fips_global <- Reduce(union, stable_fips_each_period)
+    message("Using UNION across periods for global mapping.")
+}
+message("Number of FIPS available before centroid filter: ", length(valid_fips_global))
 valid_fips_global <- intersect(valid_fips_global, valid_fips_by_centroid)
 message("After intersecting with centroid GEOIDs: ", length(valid_fips_global), " counties available for global mapping")
 if (length(valid_fips_global) == 0) stop("After intersecting with centroid GEOIDs, no valid fips remain for global mapping — check shapefiles.")
@@ -365,10 +288,10 @@ dbExecute(con_tmp, paste0("PRAGMA threads = ", threads))
 yrs_all <- range(unlist(periods))
 dbExecute(con_tmp, glue::glue("
   CREATE TEMP TABLE base_all AS
-  SELECT LPAD(CAST({`county_var`} AS VARCHAR), 5, '0') AS fips
+  SELECT LPAD(CAST({county_var} AS VARCHAR), 5, '0') AS fips
   FROM parquet_scan('{normalizePath(parquet_dir, winslash = '/') }/*.parquet')
   WHERE year BETWEEN {yrs_all[1]} AND {yrs_all[2]}
-    AND {`UCR39_COL`} IS NOT NULL
+    AND {UCR39_COL} IS NOT NULL
 "))
 death_tbl_global <- DBI::dbGetQuery(con_tmp, "SELECT fips, COUNT(*) AS deaths FROM base_all GROUP BY fips") %>%
     as_tibble() %>%
@@ -380,36 +303,34 @@ death_tbl_global <- DBI::dbGetQuery(con_tmp, "SELECT fips, COUNT(*) AS deaths FR
 merged_file <- here::here("data_raw","all_county_groupings.csv")
 stopifnot(file.exists(merged_file))
 merged_df <- readr::read_csv(merged_file, col_types = readr::cols(.default = "c"), show_col_types = FALSE)
-cluster_col_name <- if ("CS Area Code" %in% names(merged_df)) "CS Area Code" else "County Set Name"
-
+# try to find cluster column robustly
+cluster_col_name <- if ("CS Area Code" %in% names(merged_df)) "CS Area Code" else if ("County Set Name" %in% names(merged_df)) "County Set Name" else names(merged_df)[2]
 mapping_df_all <- merged_df %>%
-    mutate(
-        FIPS_raw = stringr::str_trim(as.character(FIPS)),
-        FIPS_digits = ifelse(FIPS_raw == "" | is.na(FIPS_raw), NA_character_, gsub("[^0-9]", "", FIPS_raw)),
-        FIPS5 = ifelse(is.na(FIPS_digits), NA_character_, stringr::str_pad(FIPS_digits, width = 5, side = "left", pad = "0")),
-        cluster_id = stringr::str_trim(as.character(.data[[cluster_col_name]]))
+    mutate(FIPS_raw = stringr::str_trim(as.character(FIPS)),
+           FIPS_digits = ifelse(FIPS_raw == "" | is.na(FIPS_raw), NA_character_, gsub("[^0-9]", "", FIPS_raw)),
+           FIPS5 = ifelse(is.na(FIPS_digits), NA_character_, stringr::str_pad(FIPS_digits, width = 5, side = "left", pad = "0")),
+           cluster_name = stringr::str_trim(as.character(.data[[cluster_col_name]]))
     ) %>%
-    filter(!is.na(FIPS5) & FIPS5 != "" & !is.na(cluster_id) & cluster_id != "") %>%
-    distinct(FIPS5, cluster_id) %>%
-    rename(fips = FIPS5, cluster = cluster_id) %>%
-    mutate(fips = apply_fips_patch(fips))
+    filter(!is.na(FIPS5) & FIPS5 != "" & !is.na(cluster_name) & cluster_name != "") %>%
+    distinct(FIPS5, cluster_name) %>%
+    rename(fips = FIPS5)
 
 mapping_global <- mapping_df_all %>% filter(fips %in% valid_fips_global)
-
-# if any valid_fips_global are missing from mapping_global, add them as singletons
 missing_in_mapping <- setdiff(valid_fips_global, mapping_global$fips)
 if (length(missing_in_mapping) > 0) {
-    message("Adding ", length(missing_in_mapping), " temporally-stable counties not present in all_county_groupings.csv as singleton clusters")
-    add_df <- tibble(fips = missing_in_mapping, cluster = paste0("C_singleton_", missing_in_mapping))
+    message("Adding ", length(missing_in_mapping), " counties not present in all_county_groupings.csv as singletons")
+    add_df <- tibble(fips = missing_in_mapping, cluster_name = paste0("SINGLETON_", missing_in_mapping))
     mapping_global <- bind_rows(mapping_global, add_df)
 }
-
+# create stable numeric internal cluster ids
+cluster_lookup <- mapping_global %>% distinct(cluster_name) %>% mutate(cluster_id = sprintf("CL%06d", seq_len(n())))
+mapping_global <- mapping_global %>% left_join(cluster_lookup, by = "cluster_name") %>% select(fips, cluster = cluster_id, cluster_name)
 # initial table with aggregated deaths
 clu_global <- tibble(fips = mapping_global$fips, cluster = mapping_global$cluster) %>%
     left_join(death_tbl_global %>% select(fips, deaths), by = "fips") %>%
     mutate(deaths = as.numeric(replace_na(deaths, 0)))
 
-# greedy merge helpers (global)
+# ---- helpers for global merging (robust) ----
 compute_cluster_totals_global <- function(mapping_df_local) {
     mapping_df_local %>%
         filter(!is.na(cluster)) %>%
@@ -432,7 +353,7 @@ nearest_cluster_by_centroid_global <- function(cluster_id, mapping_df_local) {
     members_raw <- mapping_df_local$fips[mapping_df_local$cluster == cluster_id]
     members <- intersect(members_raw, rownames(centroid_mat_global))
     if (length(members) == 0) return(NA_character_)
-    centroid_this <- tryCatch(colMeans(centroid_mat_global[members, , drop = FALSE]), error = function(e) NA_real_)
+    centroid_this <- tryCatch(colMeans(centroid_mat_global[members, , drop = FALSE]), error = function(e) rep(NA_real_, 2))
     if (any(is.na(centroid_this))) return(NA_character_)
     other_cluster_ids <- unique(mapping_df_local$cluster[!is.na(mapping_df_local$cluster) & mapping_df_local$cluster != cluster_id])
     if (length(other_cluster_ids) == 0) return(NA_character_)
@@ -449,42 +370,45 @@ nearest_cluster_by_centroid_global <- function(cluster_id, mapping_df_local) {
     candidate_ids[which.min(dists)]
 }
 
+# ---- greedy global merging with diagnostics ----
 mapping_current_global <- clu_global %>% select(fips, cluster, deaths)
-max_iters <- 10000L
+merge_log <- list()
+max_iters <- 20000L
 for (iter in seq_len(max_iters)) {
-    totals <- compute_cluster_totals_global(mapping_current_global %>% filter(!is.na(cluster)))
+    totals <- compute_cluster_totals_global(mapping_current_global)
     small <- totals$cluster[which(totals$cluster_deaths < min_deaths)]
     if (length(small) == 0) break
     c_small <- small[1]
     neigh <- adjacent_clusters_global(c_small, mapping_current_global)
+    c_merge <- NA_character_
     if (length(neigh) > 0) {
         neigh_totals <- totals %>% filter(cluster %in% neigh)
-        if (nrow(neigh_totals) == 0) {
-            c_merge <- nearest_cluster_by_centroid_global(c_small, mapping_current_global)
-        } else {
+        if (nrow(neigh_totals) > 0) {
             c_merge <- neigh_totals$cluster[which.max(neigh_totals$cluster_deaths)]
         }
-    } else {
-        c_merge <- nearest_cluster_by_centroid_global(c_small, mapping_current_global)
     }
+    if (is.na(c_merge)) c_merge <- nearest_cluster_by_centroid_global(c_small, mapping_current_global)
     if (is.na(c_merge) || c_merge == c_small) {
         largest_cluster <- totals$cluster[which.max(totals$cluster_deaths)]
-        if (!is.na(largest_cluster) && largest_cluster != c_small) {
-            c_merge <- largest_cluster
-        } else {
-            break
-        }
+        if (!is.na(largest_cluster) && largest_cluster != c_small) c_merge <- largest_cluster
+    }
+    if (is.na(c_merge) || c_merge == c_small) {
+        warning("Cannot find a suitable merge target for cluster ", c_small, " — stopping merging.")
+        break
     }
     mapping_current_global$cluster[mapping_current_global$cluster == c_small] <- c_merge
+    merge_log[[length(merge_log)+1]] <- tibble(iter = iter, from = c_small, to = c_merge,
+                                               from_deaths = totals$cluster_deaths[totals$cluster==c_small],
+                                               to_deaths = totals$cluster_deaths[totals$cluster==c_merge])
 }
 if (iter == max_iters) warning("Reached max iterations merging clusters in global mapping; some clusters may still be < min_deaths")
+if (length(merge_log)) readr::write_csv(bind_rows(merge_log), file.path(diag_out_dir, "global_merge_log.csv.gz"))
 
 global_cluster_mapping <- mapping_current_global %>%
     group_by(cluster) %>% mutate(cluster_deaths = sum(as.numeric(deaths), na.rm = TRUE)) %>% ungroup() %>%
     select(fips, cluster, deaths, cluster_deaths)
 readr::write_csv(global_cluster_mapping, file.path(diag_out_dir, "global_county_cluster_mapping_agg_deaths.csv.gz"))
 message("Global cluster mapping built: ", n_distinct(global_cluster_mapping$cluster), " clusters; rows: ", nrow(global_cluster_mapping))
-
 dbDisconnect(con_tmp, shutdown = TRUE)
 
 # ----------------------- MAIN METRIC LOOP (uses global mapping) -----------------------
@@ -507,9 +431,7 @@ compute_cstd_detail <- function(counts_df, std_ucr_df, us_within_df, maxH_global
         group_by(period, cluster, ucr39) %>%
         mutate(w = n / sum(n)) %>% ungroup() %>%
         select(period, cluster, ucr39, domain, w)
-    
     base <- us_within_df %>% left_join(std_ucr_df, by=c("period","ucr39"))
-    
     clusters_all <- distinct(counts_df, cluster) %>% pull(cluster)
     expanded <- base %>%
         left_join(w_k, by=c("period","ucr39","domain")) %>%
@@ -517,11 +439,9 @@ compute_cstd_detail <- function(counts_df, std_ucr_df, us_within_df, maxH_global
         tidyr::complete(cluster = clusters_all, fill = list(w = NA_real_)) %>%
         ungroup() %>%
         mutate(w_eff = dplyr::coalesce(w, w_us))
-    
     p_star <- expanded %>%
         group_by(period, cluster, domain) %>%
         summarise(p = sum(s * w_eff, na.rm=TRUE), .groups = "drop")
-    
     detail <- p_star %>%
         group_by(period, cluster) %>%
         summarise(H = {
@@ -542,35 +462,32 @@ us_within_icd4     <- list()
 K_summary          <- list()
 
 for (pname in names(periods)) {
-    log_msg("Processing ", pname)
+    message("Processing ", pname)
     yrs <- periods[[pname]]
     con <- dbConnect(duckdb::duckdb(), dbdir=":memory:")
     on.exit(try(dbDisconnect(con, shutdown=TRUE), silent=TRUE), add=TRUE)
     dbExecute(con, paste0("PRAGMA threads = ", threads))
     duckdb::duckdb_register(con, "garbage", tibble(root3 = garbage_root_set))
-    
     yrs_range <- range(yrs)
-    dbExecute(con, glue("
+    dbExecute(con, glue::glue("
     CREATE TEMP TABLE base AS
     SELECT
       row_number() OVER () AS id,
       year,
-      LPAD(CAST({`county_var`} AS VARCHAR), 5, '0') AS fips,
+      LPAD(CAST({county_var} AS VARCHAR), 5, '0') AS fips,
       ucod,
-      {`UCR39_COL`} AS ucr39,
+      {UCR39_COL} AS ucr39,
       record_1,record_2,record_3,record_4,record_5,
       record_6,record_7,record_8,record_9,record_10,
       record_11,record_12,record_13,record_14,record_15,
       record_16,record_17,record_18,record_19,record_20
     FROM parquet_scan('{normalizePath(parquet_dir, winslash = '/') }/*.parquet')
     WHERE year BETWEEN {yrs_range[1]} AND {yrs_range[2]}
-      AND {`UCR39_COL`} IS NOT NULL
+      AND {UCR39_COL} IS NOT NULL
   "))
-    
     dbExecute(con, "CREATE TEMP TABLE cert AS SELECT id, fips, ucod, ucr39 FROM base WHERE ucod IS NOT NULL")
     n_cert <- dbGetQuery(con, "SELECT COUNT(*) n FROM cert")$n
-    log_msg("[", pname, "] rows in cert: ", format(n_cert, big.mark=","))
-    
+    message("[", pname, "] rows in cert: ", format(n_cert, big.mark=","))
     dbExecute(con, "
     CREATE TEMP TABLE ucod_valid AS
     SELECT id, fips,
@@ -580,48 +497,51 @@ for (pname in names(periods)) {
     FROM cert
     WHERE SUBSTR(UPPER(regexp_replace(ucod,'[^A-Za-z0-9]','')),1,3) NOT IN (SELECT root3 FROM garbage)
   ")
-    
-    # use canonical year = min(years) object's centroid/nbrs (but mapping is global)
     sp_info <- period_spatial_list[[pname]]
     canonical_year <- as.character(min(yrs))
-    if (!canonical_year %in% names(sp_info$year_objs)) {
-        stop("Canonical year ", canonical_year, " not available in period_spatial_list for ", pname)
-    }
+    if (!canonical_year %in% names(sp_info$year_objs)) stop("Canonical year ", canonical_year, " not available in period_spatial_list for ", pname)
     centroid_mat_use <- sp_info$year_objs[[canonical_year]]$centroid_mat
     nbrs_list_use <- sp_info$year_objs[[canonical_year]]$nbrs_list
     valid_county_geoids <- rownames(centroid_mat_use)
-    
-    # deaths per county for this period (used to compute per-period cluster metrics later)
     death_tbl <- dbGetQuery(con, "SELECT fips, COUNT(*) AS deaths FROM ucod_valid GROUP BY fips") %>%
         as_tibble() %>%
         mutate(fips = stringr::str_pad(as.character(fips), 5, pad = "0")) %>%
         mutate(fips = apply_fips_patch(fips)) %>%
         filter(!is.na(fips) & fips %in% valid_county_geoids)
-    
-    # GLOBAL mapping usage: use the pre-built 'global_cluster_mapping' but restrict to current period valid GEOIDs to avoid indexing errors
-    mapping_period <- global_cluster_mapping %>%
-        select(fips, cluster) %>%
-        mutate(fips = as.character(fips)) %>%
-        filter(fips %in% valid_county_geoids)
-    
-    readr::write_csv(mapping_period, file.path(diag_out_dir, paste0("mapping_for_period_", pname, ".csv")))
-    dropped_period <- global_cluster_mapping %>% filter(!(fips %in% valid_county_geoids)) %>%
-        distinct(fips, cluster) %>% mutate(reason = "not_stable_in_period")
-    readr::write_csv(dropped_period, file.path(diag_out_dir, paste0("mapping_dropped_period_", pname, ".csv")))
-    
-    # build initial cluster mapping with deaths (period-specific deaths)
-    clu_df <- death_tbl %>%
-        left_join(mapping_period, by = c("fips" = "fips")) %>%
-        select(fips, cluster, deaths) %>%
-        mutate(cluster = as.character(cluster), fips = as.character(fips))
-    
+     # per-period fallback: any fips in death_tbl but not in mapping_period -> assign nearest global cluster by centroid
+    period_fips <- unique(death_tbl$fips)
+    mapped_fips <- mapping_period$fips
+    missing_period_fips <- setdiff(period_fips, mapped_fips)
+    if (length(missing_period_fips) > 0) {
+        message("Period ", pname, ": ", length(missing_period_fips), " fips present in deaths but missing from mapping_period — mapping to nearest global cluster by centroid.")
+        # compute global cluster centroids from current global mapping
+        global_centroids_df <- mapping_current_global %>%
+            filter(fips %in% rownames(centroid_mat_global)) %>%
+            group_by(cluster) %>%
+            summarise(x = mean(centroid_mat_global[intersect(fips, rownames(centroid_mat_global)), 1], na.rm = TRUE),
+                      y = mean(centroid_mat_global[intersect(fips, rownames(centroid_mat_global)), 2], na.rm = TRUE), .groups = "drop") %>%
+            filter(!is.na(x) & !is.na(y))
+        fallback_map <- tibble(fips = missing_period_fips,
+                               cluster = vapply(missing_period_fips, function(ff) {
+                                   if (!ff %in% rownames(centroid_mat_global)) return(NA_character_)
+                                   pt <- centroid_mat_global[ff,]
+                                   dists <- sqrt((global_centroids_df$x - pt[1])^2 + (global_centroids_df$y - pt[2])^2)
+                                   global_centroids_df$cluster[which.min(dists)]
+                               }, character(1)))
+        # append fallback mappings (distinct)
+        mapping_period <- bind_rows(mapping_period, fallback_map) %>% distinct(fips, cluster)
+        readr::write_csv(tibble(missing_period_fips = missing_period_fips), file.path(diag_out_dir, paste0("missing_period_fips_", pname, ".csv")))
+        # update clu_df for newly mapped fips (if not already present)
+        clu_df <- full_join(tibble(fips = period_fips), clu_df, by = "fips") %>%
+            left_join(mapping_period, by = "fips") %>%
+            mutate(deaths = replace_na(deaths, 0),
+                   cluster = as.character(cluster))
+    }
     cluster_membership[[pname]] <- clu_df %>% mutate(period = pname)
-    
     # local helpers (period-scoped)
     valid_fips_set <- rownames(centroid_mat_use)
     nbrs_list <- nbrs_list_use
     centroid_mat <- centroid_mat_use
-    
     compute_cluster_totals_period <- function(mapping_df_local) {
         mapping_df_local %>%
             filter(!is.na(cluster)) %>%
@@ -630,7 +550,6 @@ for (pname in names(periods)) {
                       n_counties = n(), .groups = "drop") %>%
             arrange(cluster_deaths)
     }
-    
     adjacent_clusters_period <- function(cluster_id, mapping_df_local) {
         fips_in_cluster_raw <- mapping_df_local$fips[mapping_df_local$cluster == cluster_id]
         fips_in_cluster <- intersect(fips_in_cluster_raw, names(nbrs_list))
@@ -641,12 +560,11 @@ for (pname in names(periods)) {
         neigh_clusters <- neigh_clusters[!is.na(neigh_clusters) & neigh_clusters != cluster_id]
         neigh_clusters
     }
-    
     nearest_cluster_by_centroid_safe <- function(cluster_id, mapping_df_local) {
         members_raw <- mapping_df_local$fips[mapping_df_local$cluster == cluster_id]
         members <- intersect(members_raw, valid_fips_set)
         if (length(members) == 0) return(NA_character_)
-        centroid_this <- tryCatch(colMeans(centroid_mat[members, , drop = FALSE]), error = function(e) NA_real_)
+        centroid_this <- tryCatch(colMeans(centroid_mat[members, , drop = FALSE]), error = function(e) rep(NA_real_, 2))
         if (any(is.na(centroid_this))) return(NA_character_)
         other_cluster_ids <- unique(mapping_df_local$cluster[!is.na(mapping_df_local$cluster) & mapping_df_local$cluster != cluster_id])
         if (length(other_cluster_ids) == 0) return(NA_character_)
@@ -662,8 +580,8 @@ for (pname in names(periods)) {
         dists <- sqrt((coords_mat[,1] - centroid_this[1])^2 + (coords_mat[,2] - centroid_this[2])^2)
         candidate_ids[which.min(dists)]
     }
-    
     mapping_current <- clu_df %>% select(fips, cluster, deaths)
+    # period-level greedy merge
     max_iters <- 10000L
     for (iter in seq_len(max_iters)) {
         totals <- compute_cluster_totals_period(mapping_current %>% filter(!is.na(cluster)))
@@ -680,39 +598,23 @@ for (pname in names(periods)) {
         if (is.na(c_merge) || c_merge == c_small) break
         mapping_current$cluster[mapping_current$cluster == c_small] <- c_merge
     }
-    if (iter == max_iters) warning("Reached max iterations merging clusters; some clusters may still be < min_deaths")
-    
+    if (iter == max_iters) warning("Reached max iterations merging clusters; some clusters may still be < min_deaths for period ", pname)
     clu_df_merged <- mapping_current %>% select(fips, cluster, deaths)
     cluster_membership[[pname]] <- clu_df_merged %>% mutate(period = pname)
-    
+    # push mapping into duckdb for counting
     dbExecute(con, "DROP TABLE IF EXISTS map_fips_cluster")
     dbExecute(con, "CREATE TEMP TABLE map_fips_cluster (fips VARCHAR, cluster VARCHAR)")
     DBI::dbAppendTable(con, "map_fips_cluster", clu_df_merged %>% select(fips, cluster) %>% as.data.frame())
-    
-    std_ucr <- dbGetQuery(con, "
-    SELECT ucr39, COUNT(*) AS n
-    FROM ucod_valid
-    GROUP BY 1
-  ") %>% as_tibble() %>% mutate(period = pname, s = n / sum(n))
+    # compute std ucr and within-domain weights
+    std_ucr <- dbGetQuery(con, "SELECT ucr39, COUNT(*) AS n FROM ucod_valid GROUP BY 1") %>% as_tibble() %>% mutate(period = pname, s = n / sum(n))
     std_ucr_list[[pname]] <- std_ucr %>% select(period, ucr39, s)
-    
-    us_r3 <- dbGetQuery(con, "
-    SELECT ucr39, root3 AS domain, COUNT(*) AS n
-    FROM ucod_valid
-    GROUP BY 1,2
-  ") %>% as_tibble() %>% group_by(ucr39) %>% mutate(w_us = n / sum(n)) %>% ungroup() %>% mutate(period = pname) %>% select(period, ucr39, domain, w_us)
-    
-    us_r4 <- dbGetQuery(con, "
-    SELECT ucr39, icd4 AS domain, COUNT(*) AS n
-    FROM ucod_valid
-    GROUP BY 1,2
-  ") %>% as_tibble() %>% group_by(ucr39) %>% mutate(w_us = n / sum(n)) %>% ungroup() %>% mutate(period = pname) %>% select(period, ucr39, domain, w_us)
-    
+    us_r3 <- dbGetQuery(con, "SELECT ucr39, root3 AS domain, COUNT(*) AS n FROM ucod_valid GROUP BY 1,2") %>% as_tibble() %>% group_by(ucr39) %>% mutate(w_us = n / sum(n)) %>% ungroup() %>% mutate(period = pname) %>% select(period, ucr39, domain, w_us)
+    us_r4 <- dbGetQuery(con, "SELECT ucr39, icd4 AS domain, COUNT(*) AS n FROM ucod_valid GROUP BY 1,2") %>% as_tibble() %>% group_by(ucr39) %>% mutate(w_us = n / sum(n)) %>% ungroup() %>% mutate(period = pname) %>% select(period, ucr39, domain, w_us)
     K_root3_global <- dplyr::n_distinct(us_r3$domain)
     K_icd4_global  <- dplyr::n_distinct(us_r4$domain)
     maxH_root3_global <- if (K_root3_global > 1) log(K_root3_global) else NA_real_
     maxH_icd4_global  <- if (K_icd4_global  > 1) log(K_icd4_global)  else NA_real_
-    
+    # extract mcod non-underlying etc (unchanged logical flow)
     dbExecute(con, "DROP TABLE IF EXISTS mcod_codes_raw")
     dbExecute(con, "CREATE TEMP TABLE mcod_codes_raw (id BIGINT, fips VARCHAR, root3 VARCHAR)")
     dbExecute(con, "
@@ -730,7 +632,6 @@ for (pname in names(periods)) {
     )
     WHERE code IS NOT NULL AND code <> '' AND LENGTH(code) >= 3
   ")
-    
     dbExecute(con, "
     CREATE TEMP TABLE mcod_clean AS
     SELECT DISTINCT id, fips, root3
@@ -739,7 +640,6 @@ for (pname in names(periods)) {
       AND SUBSTR(root3,2,1) BETWEEN '0' AND '9'
       AND root3 NOT IN (SELECT root3 FROM garbage)
   ")
-    
     dbExecute(con, "
     CREATE TEMP TABLE mcod_nonunderlying AS
     SELECT m.id, m.fips, m.root3
@@ -748,14 +648,12 @@ for (pname in names(periods)) {
       ON m.id = u.id AND m.root3 = u.root3
     WHERE u.root3 IS NULL
   ")
-    
     dbExecute(con, "
     CREATE TEMP TABLE mcod_with_cause AS
     SELECT n.id, n.fips, n.root3, u.ucr39
     FROM mcod_nonunderlying n
     JOIN ucod_valid u USING (id)
   ")
-    
     mcod_counts <- DBI::dbGetQuery(con, "
     SELECT m.cluster, w.ucr39, w.root3 AS domain, COUNT(DISTINCT w.id) AS n
     FROM mcod_with_cause w
@@ -763,21 +661,18 @@ for (pname in names(periods)) {
     WHERE m.cluster IS NOT NULL
     GROUP BY 1,2,3
   ") %>% as_tibble() %>% mutate(period = pname)
-    
     us_mcod_r3 <- DBI::dbGetQuery(con, "
     SELECT ucr39, root3 AS domain, COUNT(DISTINCT id) AS n
     FROM mcod_with_cause
     GROUP BY 1,2
   ") %>% as_tibble() %>% group_by(ucr39) %>% mutate(w_us = n / sum(n)) %>% ungroup() %>% mutate(period = pname) %>% select(period, ucr39, domain, w_us)
-    
     K_mcod_root3_global <- dplyr::n_distinct(us_mcod_r3$domain)
     maxH_mcod_root3_global <- if (K_mcod_root3_global > 1) log(K_mcod_root3_global) else NA_real_
-    
     det_mcod_r3 <- compute_cstd_detail(mcod_counts %>% select(period, cluster, ucr39, domain, n),
                                        std_ucr %>% select(period, ucr39, s),
                                        us_mcod_r3,
                                        maxH_mcod_root3_global) %>% mutate(metric = "detail_mcod_root3_cstd")
-    
+    # ICD4 path
     dbExecute(con, "
     CREATE TEMP TABLE mcod_nonunderlying_icd4 AS
     WITH expanded AS (
@@ -804,14 +699,12 @@ for (pname in names(periods)) {
       AND SUBSTR(root3,2,1) BETWEEN '0' AND '9'
       AND root3 NOT IN (SELECT root3 FROM garbage)
   ")
-    
     dbExecute(con, "
     CREATE TEMP TABLE mcod_with_cause_icd4 AS
     SELECT n.id, n.fips, n.icd4, u.ucr39
     FROM mcod_nonunderlying_icd4 n
     JOIN ucod_valid u USING (id)
   ")
-    
     mcod4_counts <- DBI::dbGetQuery(con, "
     SELECT m.cluster, w.ucr39, w.icd4 AS domain, COUNT(DISTINCT w.id) AS n
     FROM mcod_with_cause_icd4 w
@@ -819,21 +712,17 @@ for (pname in names(periods)) {
     WHERE m.cluster IS NOT NULL
     GROUP BY 1,2,3
   ") %>% as_tibble() %>% mutate(period = pname)
-    
     us_mcod_icd4 <- DBI::dbGetQuery(con, "
     SELECT ucr39, icd4 AS domain, COUNT(DISTINCT id) AS n
     FROM mcod_with_cause_icd4
     GROUP BY 1,2
   ") %>% as_tibble() %>% group_by(ucr39) %>% mutate(w_us = n / sum(n)) %>% ungroup() %>% mutate(period = pname) %>% select(period, ucr39, domain, w_us)
-    
     K_mcod_icd4_global <- dplyr::n_distinct(us_mcod_icd4$domain)
     maxH_mcod_icd4_global <- if (K_mcod_icd4_global > 1) log(K_mcod_icd4_global) else NA_real_
-    
     det_mcod_icd4 <- compute_cstd_detail(mcod4_counts %>% select(period, cluster, ucr39, domain, n),
                                          std_ucr %>% select(period, ucr39, s),
                                          us_mcod_icd4,
                                          maxH_mcod_icd4_global) %>% mutate(metric = "detail_mcod_icd4_cstd")
-    
     counts_r3 <- dbGetQuery(con, "
     SELECT m.cluster, v.ucr39, v.root3 AS domain, COUNT(*) AS n
     FROM ucod_valid v
@@ -841,7 +730,6 @@ for (pname in names(periods)) {
     WHERE m.cluster IS NOT NULL
     GROUP BY 1,2,3
   ") %>% as_tibble() %>% mutate(period = pname)
-    
     counts_r4 <- dbGetQuery(con, "
     SELECT m.cluster, v.ucr39, v.icd4 AS domain, COUNT(*) AS n
     FROM ucod_valid v
@@ -849,17 +737,14 @@ for (pname in names(periods)) {
     WHERE m.cluster IS NOT NULL
     GROUP BY 1,2,3
   ") %>% as_tibble() %>% mutate(period = pname)
-    
     det_r3 <- compute_cstd_detail(counts_r3 %>% select(period, cluster, ucr39, domain, n),
                                   std_ucr %>% select(period, ucr39, s),
                                   us_r3,
                                   maxH_root3_global) %>% mutate(metric = "detail_ucod_root3_cstd")
-    
     det_r4 <- compute_cstd_detail(counts_r4 %>% select(period, cluster, ucr39, domain, n),
                                   std_ucr %>% select(period, ucr39, s),
                                   us_r4,
                                   maxH_icd4_global) %>% mutate(metric = "detail_ucod_icd4_cstd")
-    
     metrics_list[[pname]] <- bind_rows(det_mcod_r3, det_mcod_icd4, det_r3, det_r4)
     us_within_root3[[pname]] <- us_r3
     us_within_icd4[[pname]]  <- us_r4
@@ -870,14 +755,12 @@ for (pname in names(periods)) {
         K_mcod_root3 = K_mcod_root3_global,
         K_mcod_icd4  = K_mcod_icd4_global
     )
-    
     dbDisconnect(con, shutdown=TRUE); gc()
 }
 
 # ----------------------- outputs -----------------------
 cluster_members_county <- bind_rows(cluster_membership) %>%
     transmute(period, cluster, fips, cluster_deaths = deaths)
-
 cluster_members_cluster <- cluster_members_county %>%
     group_by(period, cluster) %>%
     summarise(
@@ -885,11 +768,9 @@ cluster_members_cluster <- cluster_members_county %>%
         n_counties = n(),
         .groups = "drop"
     )
-
 metrics_out <- bind_rows(metrics_list) %>%
     tidyr::pivot_wider(names_from = metric, values_from = detail) %>%
     arrange(period, cluster)
-
 std_ucr_all      <- bind_rows(std_ucr_list) %>% arrange(period, ucr39)
 us_within_r3_all <- bind_rows(us_within_root3) %>% arrange(period, ucr39, domain)
 us_within_r4_all <- bind_rows(us_within_icd4)  %>% arrange(period, ucr39, domain)
@@ -897,11 +778,9 @@ K_summary_all    <- bind_rows(K_summary) %>% arrange(period)
 
 write_csv(cluster_members_cluster, file.path(out_dir, "cluster_totals_by_period.csv.gz"))
 write_csv(metrics_out, file.path(out_dir, "cluster_metrics_ucr39_cstd.csv.gz"))
-
 cluster_members_all_periods <- bind_rows(cluster_membership) %>%
     transmute(period, cluster, fips, cluster_deaths = deaths)
 write_csv(cluster_members_all_periods, file.path(out_dir, "county_cluster_membership.csv.gz"))
-
 write_csv(std_ucr_all,      file.path(out_dir, "ucr39_standard_by_period.csv.gz"))
 write_csv(us_within_r3_all, file.path(out_dir, "national_within_cause_shares_root3.csv.gz"))
 write_csv(us_within_r4_all, file.path(out_dir, "national_within_cause_shares_icd4.csv.gz"))
