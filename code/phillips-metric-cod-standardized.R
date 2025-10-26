@@ -508,34 +508,53 @@ for (pname in names(periods)) {
         mutate(fips = stringr::str_pad(as.character(fips), 5, pad = "0")) %>%
         mutate(fips = apply_fips_patch(fips)) %>%
         filter(!is.na(fips) & fips %in% valid_county_geoids)
-     # per-period fallback: any fips in death_tbl but not in mapping_period -> assign nearest global cluster by centroid
-    period_fips <- unique(death_tbl$fips)
-    mapped_fips <- mapping_period$fips
-    missing_period_fips <- setdiff(period_fips, mapped_fips)
+
+    period_fips <- sort(unique(death_tbl$fips))
+    
+    mapping_period <- mapping_current_global %>%
+        dplyr::select(fips, cluster) %>%
+        dplyr::filter(fips %in% period_fips) %>%
+        dplyr::distinct()
+    
+    clu_df <- tibble::tibble(fips = period_fips) %>%
+        dplyr::left_join(mapping_period, by = "fips") %>%
+        dplyr::left_join(death_tbl,     by = "fips") %>%
+        dplyr::mutate(deaths = as.numeric(dplyr::coalesce(deaths, 0)))
+    
+    missing_period_fips <- setdiff(period_fips, mapping_period$fips)
     if (length(missing_period_fips) > 0) {
-        message("Period ", pname, ": ", length(missing_period_fips), " fips present in deaths but missing from mapping_period — mapping to nearest global cluster by centroid.")
-        # compute global cluster centroids from current global mapping
+        message("Period ", pname, ": ", length(missing_period_fips),
+                " fips in deaths but missing from mapping — assigning to nearest global cluster.")
+        
         global_centroids_df <- mapping_current_global %>%
-            filter(fips %in% rownames(centroid_mat_global)) %>%
-            group_by(cluster) %>%
-            summarise(x = mean(centroid_mat_global[intersect(fips, rownames(centroid_mat_global)), 1], na.rm = TRUE),
-                      y = mean(centroid_mat_global[intersect(fips, rownames(centroid_mat_global)), 2], na.rm = TRUE), .groups = "drop") %>%
-            filter(!is.na(x) & !is.na(y))
-        fallback_map <- tibble(fips = missing_period_fips,
-                               cluster = vapply(missing_period_fips, function(ff) {
-                                   if (!ff %in% rownames(centroid_mat_global)) return(NA_character_)
-                                   pt <- centroid_mat_global[ff,]
-                                   dists <- sqrt((global_centroids_df$x - pt[1])^2 + (global_centroids_df$y - pt[2])^2)
-                                   global_centroids_df$cluster[which.min(dists)]
-                               }, character(1)))
-        # append fallback mappings (distinct)
-        mapping_period <- bind_rows(mapping_period, fallback_map) %>% distinct(fips, cluster)
-        readr::write_csv(tibble(missing_period_fips = missing_period_fips), file.path(diag_out_dir, paste0("missing_period_fips_", pname, ".csv")))
-        # update clu_df for newly mapped fips (if not already present)
-        clu_df <- full_join(tibble(fips = period_fips), clu_df, by = "fips") %>%
-            left_join(mapping_period, by = "fips") %>%
-            mutate(deaths = replace_na(deaths, 0),
-                   cluster = as.character(cluster))
+            dplyr::filter(fips %in% rownames(centroid_mat_global)) %>%
+            dplyr::group_by(cluster) %>%
+            dplyr::summarise(
+                x = mean(centroid_mat_global[intersect(fips, rownames(centroid_mat_global)), 1], na.rm = TRUE),
+                y = mean(centroid_mat_global[intersect(fips, rownames(centroid_mat_global)), 2], na.rm = TRUE),
+                .groups = "drop"
+            ) %>%
+            dplyr::filter(!is.na(x) & !is.na(y))
+        
+        fallback_map <- tibble::tibble(
+            fips = missing_period_fips,
+            cluster = vapply(missing_period_fips, function(ff) {
+                if (!ff %in% rownames(centroid_mat_global)) return(NA_character_)
+                pt <- centroid_mat_global[ff, ]
+                dists <- sqrt((global_centroids_df$x - pt[1])^2 + (global_centroids_df$y - pt[2])^2)
+                global_centroids_df$cluster[which.min(dists)]
+            }, character(1))
+        )
+        
+        mapping_period <- dplyr::bind_rows(mapping_period, fallback_map) %>%
+            dplyr::distinct(fips, cluster)
+        
+        clu_df <- tibble::tibble(fips = period_fips) %>%
+            dplyr::left_join(mapping_period, by = "fips") %>%
+            dplyr::left_join(death_tbl,     by = "fips") %>%
+            dplyr::mutate(deaths = as.numeric(dplyr::coalesce(deaths, 0)),
+                          cluster = as.character(cluster))
+    
     }
     cluster_membership[[pname]] <- clu_df %>% mutate(period = pname)
     # local helpers (period-scoped)
