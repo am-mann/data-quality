@@ -511,20 +511,26 @@ for (pname in names(periods)) {
 
     period_fips <- sort(unique(death_tbl$fips))
     
+    # Start from the GLOBAL cluster mapping, restricted to counties that appear in this period
     mapping_period <- mapping_current_global %>%
         dplyr::select(fips, cluster) %>%
         dplyr::filter(fips %in% period_fips) %>%
         dplyr::distinct()
     
+    # Period-specific deaths but period-consistent clusters
     clu_df <- tibble::tibble(fips = period_fips) %>%
         dplyr::left_join(mapping_period, by = "fips") %>%
         dplyr::left_join(death_tbl,     by = "fips") %>%
-        dplyr::mutate(deaths = as.numeric(dplyr::coalesce(deaths, 0)))
+        dplyr::mutate(
+            deaths  = as.numeric(dplyr::coalesce(deaths, 0)),
+            cluster = as.character(cluster)
+        )
     
+    # Handle any fips that appear in this period but were not in mapping_global
     missing_period_fips <- setdiff(period_fips, mapping_period$fips)
     if (length(missing_period_fips) > 0) {
         message("Period ", pname, ": ", length(missing_period_fips),
-                " fips in deaths but missing from mapping — assigning to nearest global cluster.")
+                " fips in deaths but missing from global mapping — assigning to nearest global cluster.")
         
         global_centroids_df <- mapping_current_global %>%
             dplyr::filter(fips %in% rownames(centroid_mat_global)) %>%
@@ -552,78 +558,24 @@ for (pname in names(periods)) {
         clu_df <- tibble::tibble(fips = period_fips) %>%
             dplyr::left_join(mapping_period, by = "fips") %>%
             dplyr::left_join(death_tbl,     by = "fips") %>%
-            dplyr::mutate(deaths = as.numeric(dplyr::coalesce(deaths, 0)),
-                          cluster = as.character(cluster))
+            dplyr::mutate(
+                deaths  = as.numeric(dplyr::coalesce(deaths, 0)),
+                cluster = as.character(cluster)
+            )
+    }
     
-    }
-    cluster_membership[[pname]] <- clu_df %>% mutate(period = pname)
-    # local helpers (period-scoped)
-    valid_fips_set <- rownames(centroid_mat_use)
-    nbrs_list <- nbrs_list_use
-    centroid_mat <- centroid_mat_use
-    compute_cluster_totals_period <- function(mapping_df_local) {
-        mapping_df_local %>%
-            filter(!is.na(cluster)) %>%
-            group_by(cluster) %>%
-            summarise(cluster_deaths = sum(as.numeric(deaths), na.rm = TRUE),
-                      n_counties = n(), .groups = "drop") %>%
-            arrange(cluster_deaths)
-    }
-    adjacent_clusters_period <- function(cluster_id, mapping_df_local) {
-        fips_in_cluster_raw <- mapping_df_local$fips[mapping_df_local$cluster == cluster_id]
-        fips_in_cluster <- intersect(fips_in_cluster_raw, names(nbrs_list))
-        if (length(fips_in_cluster) == 0) return(character(0))
-        neigh_fips <- unique(unlist(nbrs_list[fips_in_cluster], use.names = FALSE))
-        neigh_fips <- intersect(neigh_fips, mapping_df_local$fips)
-        neigh_clusters <- unique(mapping_df_local$cluster[mapping_df_local$fips %in% neigh_fips])
-        neigh_clusters <- neigh_clusters[!is.na(neigh_clusters) & neigh_clusters != cluster_id]
-        neigh_clusters
-    }
-    nearest_cluster_by_centroid_safe <- function(cluster_id, mapping_df_local) {
-        members_raw <- mapping_df_local$fips[mapping_df_local$cluster == cluster_id]
-        members <- intersect(members_raw, valid_fips_set)
-        if (length(members) == 0) return(NA_character_)
-        centroid_this <- tryCatch(colMeans(centroid_mat[members, , drop = FALSE]), error = function(e) rep(NA_real_, 2))
-        if (any(is.na(centroid_this))) return(NA_character_)
-        other_cluster_ids <- unique(mapping_df_local$cluster[!is.na(mapping_df_local$cluster) & mapping_df_local$cluster != cluster_id])
-        if (length(other_cluster_ids) == 0) return(NA_character_)
-        coords_list <- lapply(other_cluster_ids, function(cid) {
-            memb <- intersect(mapping_df_local$fips[mapping_df_local$cluster == cid], valid_fips_set)
-            if (length(memb) == 0) return(NULL)
-            as.numeric(colMeans(centroid_mat[memb, , drop = FALSE]))
-        })
-        valid_idx <- which(!vapply(coords_list, is.null, logical(1)))
-        if (length(valid_idx) == 0) return(NA_character_)
-        coords_mat <- do.call(rbind, coords_list[valid_idx])
-        candidate_ids <- other_cluster_ids[valid_idx]
-        dists <- sqrt((coords_mat[,1] - centroid_this[1])^2 + (coords_mat[,2] - centroid_this[2])^2)
-        candidate_ids[which.min(dists)]
-    }
-    mapping_current <- clu_df %>% select(fips, cluster, deaths)
-    # period-level greedy merge
-    max_iters <- 10000L
-    for (iter in seq_len(max_iters)) {
-        totals <- compute_cluster_totals_period(mapping_current %>% filter(!is.na(cluster)))
-        small <- totals$cluster[which(totals$cluster_deaths < min_deaths)]
-        if (length(small) == 0) break
-        c_small <- small[1]
-        neigh <- adjacent_clusters_period(c_small, mapping_current)
-        if (length(neigh) > 0) {
-            neigh_totals <- totals %>% filter(cluster %in% neigh)
-            if (nrow(neigh_totals) == 0) c_merge <- nearest_cluster_by_centroid_safe(c_small, mapping_current) else c_merge <- neigh_totals$cluster[which.max(neigh_totals$cluster_deaths)]
-        } else {
-            c_merge <- nearest_cluster_by_centroid_safe(c_small, mapping_current)
-        }
-        if (is.na(c_merge) || c_merge == c_small) break
-        mapping_current$cluster[mapping_current$cluster == c_small] <- c_merge
-    }
-    if (iter == max_iters) warning("Reached max iterations merging clusters; some clusters may still be < min_deaths for period ", pname)
-    clu_df_merged <- mapping_current %>% select(fips, cluster, deaths)
-    cluster_membership[[pname]] <- clu_df_merged %>% mutate(period = pname)
-    # push mapping into duckdb for counting
+    # Save membership (period-consistent clusters)
+    cluster_membership[[pname]] <- clu_df %>% dplyr::mutate(period = pname)
+    
+    # Push mapping into DuckDB for counting – NO period-level re-merge
     dbExecute(con, "DROP TABLE IF EXISTS map_fips_cluster")
     dbExecute(con, "CREATE TEMP TABLE map_fips_cluster (fips VARCHAR, cluster VARCHAR)")
-    DBI::dbAppendTable(con, "map_fips_cluster", clu_df_merged %>% select(fips, cluster) %>% as.data.frame())
+    DBI::dbAppendTable(
+        con,
+        "map_fips_cluster",
+        clu_df %>% dplyr::select(fips, cluster) %>% as.data.frame()
+    )
+    
     # compute std ucr and within-domain weights
     std_ucr <- dbGetQuery(con, "SELECT ucr39, COUNT(*) AS n FROM ucod_valid GROUP BY 1") %>% as_tibble() %>% mutate(period = pname, s = n / sum(n))
     std_ucr_list[[pname]] <- std_ucr %>% select(period, ucr39, s)
