@@ -25,7 +25,7 @@ crs_proj  <- 5070
 threads   <- max(1L, parallel::detectCores() - 1L)
 
 # whether to require strict temporally-stable intersection for global mapping
-use_intersection_for_global <- TRUE
+use_intersection_for_global <- FALSE
 
 # ---------------- FIPS patch ----------------
 fips_patch <- c(
@@ -509,20 +509,18 @@ for (pname in names(periods)) {
         mutate(fips = apply_fips_patch(fips)) %>%
         filter(!is.na(fips) & fips %in% valid_county_geoids)
 
-    period_fips <- sort(unique(death_tbl$fips))
+    period_fips <- intersect(mapping_current_global$fips, valid_county_geoids)
     
-    # Start from the GLOBAL cluster mapping, restricted to counties that appear in this period
     mapping_period <- mapping_current_global %>%
-        dplyr::select(fips, cluster) %>%
-        dplyr::filter(fips %in% period_fips) %>%
-        dplyr::distinct()
+        select(fips, cluster) %>%
+        filter(fips %in% period_fips) %>%
+        distinct()
     
-    # Period-specific deaths but period-consistent clusters
     clu_df <- tibble::tibble(fips = period_fips) %>%
-        dplyr::left_join(mapping_period, by = "fips") %>%
-        dplyr::left_join(death_tbl,     by = "fips") %>%
-        dplyr::mutate(
-            deaths  = as.numeric(dplyr::coalesce(deaths, 0)),
+        left_join(mapping_period, by = "fips") %>%
+        left_join(death_tbl,     by = "fips") %>%
+        mutate(
+            deaths  = as.numeric(coalesce(deaths, 0)),  # 0 deaths allowed
             cluster = as.character(cluster)
         )
     
