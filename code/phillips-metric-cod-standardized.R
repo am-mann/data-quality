@@ -195,7 +195,18 @@ build_year_spatial_pref_earlier_geoid_fallback <- function(yr, crs_proj = 5070, 
     }
     if (is.null(counties_sf) || nrow(counties_sf) == 0) stop("Failed to obtain county shapefile for year ", yr, " or nearby fallback years. Provide a local shapefile.")
     counties_sf <- tryCatch({ ensure_geoid(counties_sf) }, error = function(e) { stop(e$message) })
-    counties_sf <- counties_sf %>% mutate(GEOID = as.character(GEOID), GEOID = stringr::str_pad(GEOID, 5, pad = "0")) %>% dplyr::select(GEOID, geometry)
+    counties_sf <- counties_sf %>%
+        mutate(
+            GEOID = as.character(GEOID),
+            GEOID = stringr::str_pad(GEOID, 5, pad = "0"),
+            GEOID = apply_fips_patch(GEOID)     
+        ) %>%
+        dplyr::group_by(GEOID) %>%
+        dplyr::summarise(
+            geometry = sf::st_union(geometry),  
+            .groups = "drop"
+        )
+    
     counties_sf <- tryCatch({ safe_normalize_counties(counties_sf) }, error = function(e) { message("    Warning: geometry normalization failed: ", e$message, " — proceeding with raw shapefile (may fail later)."); counties_sf })
     counties_proj <- tryCatch({ safe_st_transform(counties_sf, crs_proj) }, error = function(e) { message("    safe_st_transform ultimately failed: ", e$message); stop("st_transform failed and recovery attempts exhausted for year ", yr) })
     adj <- tryCatch({ sf::st_touches(counties_proj) }, error = function(e) { message("    st_touches failed: ", e$message, " — trying st_intersects() as fallback"); tryCatch(sf::st_intersects(counties_proj), error = function(e2) stop("st_intersects also failed: ", e2$message)) })
@@ -521,6 +532,16 @@ for (pname in names(periods)) {
         left_join(death_tbl,     by = "fips") %>%
         mutate(
             deaths  = as.numeric(coalesce(deaths, 0)),  # 0 deaths allowed
+            cluster = as.character(cluster)
+        )
+    
+    
+    # Period-specific deaths but period-consistent clusters
+    clu_df <- tibble::tibble(fips = period_fips) %>%
+        dplyr::left_join(mapping_period, by = "fips") %>%
+        dplyr::left_join(death_tbl,     by = "fips") %>%
+        dplyr::mutate(
+            deaths  = as.numeric(dplyr::coalesce(deaths, 0)),
             cluster = as.character(cluster)
         )
     
