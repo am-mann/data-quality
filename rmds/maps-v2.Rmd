@@ -6373,5 +6373,607 @@ print(corr_tbl)
 
 ```
 
+NEW: Make plot of level of detail v.s. size to assess bias (DEC 22)
+```{r}
+# Sample-size sensitivity plot for Level-of-Detail (CSTD) metric
+# - draws ONE large "national" sample from a chosen period (proxy population)
+# - computes a reference ("truth") detail on that population draw
+# - for each sample size n, takes B bootstrap-like subsamples (without replacement)
+# - plots estimate (mean + 95% interval) and bias vs n
+#
+# Assumes your upstream objects already exist:
+#   parquet_dir, county_var, UCR39_COL, garbage_root_set, threads, .clamp100, out_dir (or here())
+# If not, this chunk is still mostly standalone: it re-loads needed libs and reconnects DuckDB.
+
+suppressPackageStartupMessages({
+  library(dplyr); library(tidyr); library(purrr); library(tibble)
+  library(duckdb); library(DBI); library(glue)
+  library(ggplot2); library(scales); library(here); library(fs)
+})
+
+# ---------------- user knobs ----------------
+set.seed(1)
+
+period_name <- "2020_2022"          # choose one: names(periods)
+years_use   <- 2020:2022           # must match period_name (kept explicit for standalone use)
+B           <- 1000L               # number of random subsamples per n
+pop_draw_n  <- 200000L             # "proxy population" size drawn from national data for this period
+sample_sizes <- c(200L, 500L, 1000L, 1500L, 2500L, 5000L, 10000L, 20000L)
+
+# Output
+out_dir_figs <- here("figures")
+dir_create(out_dir_figs)
+
+# ---------------- helpers ----------------
+# Robust clean for ICD-10 strings inside DuckDB query:
+# root3: first 3 alnum; icd4: first 4 alnum
+# (We filter garbage by root3 using your garbage_root_set already.)
+compute_detail_one_sample_icd4_cstd <- function(df_sample, std_ucr, us_within_icd4, maxH) {
+  # df_sample columns: ucr39, icd4
+  if (nrow(df_sample) == 0) return(NA_real_)
+
+  # within-cause shares in sample
+  w_k <- df_sample %>%
+    count(ucr39, icd4, name = "n") %>%
+    group_by(ucr39) %>%
+    mutate(w = n / sum(n)) %>%
+    ungroup()
+
+  # expand over all (ucr39, icd4) pairs that exist nationally; fill missing with NA then fallback to w_us
+  expanded <- us_within_icd4 %>%
+    left_join(std_ucr, by = "ucr39") %>%                       # adds s (national cause weights)
+    left_join(w_k, by = c("ucr39" = "ucr39", "icd4" = "icd4")) %>%
+    mutate(w_eff = dplyr::coalesce(w, w_us))
+
+  # aggregate within-cause to overall p*(icd4) using national cause weights s
+  p_star <- expanded %>%
+    group_by(icd4) %>%
+    summarise(p = sum(s * w_eff, na.rm = TRUE), .groups = "drop")
+
+  # entropy + scale to 0-100
+  pp <- p_star$p
+  pp <- pp / sum(pp, na.rm = TRUE)
+  pp <- pp[is.finite(pp) & pp > 0]
+
+  if (!length(pp) || is.na(maxH) || maxH <= 0) return(NA_real_)
+
+  H <- -sum(pp * log(pp))
+  .clamp100(100 * H / maxH)
+}
+
+# ---------------- pull a national "proxy population" draw ----------------
+con <- dbConnect(duckdb::duckdb(), dbdir=":memory:")
+on.exit(try(dbDisconnect(con, shutdown = TRUE), silent = TRUE), add = TRUE)
+dbExecute(con, paste0("PRAGMA threads = ", max(1L, threads)))
+
+# register garbage root3 set
+duckdb::duckdb_register(con, "garbage", tibble(root3 = garbage_root_set))
+
+# Create a temp table of valid (non-garbage) deaths for the selected years
+yrs_range <- range(years_use)
+
+dbExecute(con, glue("
+  CREATE TEMP TABLE ucod_valid AS
+  SELECT
+    {UCR39_COL} AS ucr39,
+    SUBSTR(UPPER(regexp_replace(ucod,'[^A-Za-z0-9]','')),1,3) AS root3,
+    SUBSTR(UPPER(regexp_replace(ucod,'[^A-Za-z0-9]','')),1,4) AS icd4
+  FROM parquet_scan('{normalizePath(parquet_dir, winslash = '/') }/*.parquet')
+  WHERE year BETWEEN {yrs_range[1]} AND {yrs_range[2]}
+    AND {UCR39_COL} IS NOT NULL
+    AND ucod IS NOT NULL
+"))
+
+# Filter out garbage by root3
+dbExecute(con, "
+  CREATE TEMP TABLE ucod_valid_nongarbage AS
+  SELECT ucr39, icd4
+  FROM ucod_valid
+  WHERE root3 NOT IN (SELECT root3 FROM garbage)
+    AND icd4 IS NOT NULL
+    AND LENGTH(icd4) = 4
+")
+
+n_available <- dbGetQuery(con, "SELECT COUNT(*) AS n FROM ucod_valid_nongarbage")$n
+message("[", period_name, "] non-garbage UCOD rows available: ", format(n_available, big.mark=","))
+
+pop_n_eff <- min(pop_draw_n, as.integer(n_available))
+if (pop_n_eff < max(sample_sizes)) {
+  warning("Proxy population draw (", pop_n_eff, ") is smaller than max(sample_sizes) (", max(sample_sizes), "). Truncating sample_sizes.")
+  sample_sizes <- sample_sizes[sample_sizes <= pop_n_eff]
+}
+
+# Draw a large random subset once (cheap-ish) and do all resampling in-memory
+message("Drawing proxy population of size ", format(pop_n_eff, big.mark=","), " ...")
+pop_df <- dbGetQuery(con, glue("
+  SELECT ucr39, icd4
+  FROM ucod_valid_nongarbage
+  USING SAMPLE {pop_n_eff}
+")) %>% as_tibble()
+
+# ---------------- compute national standardization pieces from proxy population ----------------
+# national cause weights s = P(ucr39)
+std_ucr <- pop_df %>%
+  count(ucr39, name = "n") %>%
+  mutate(s = n / sum(n)) %>%
+  select(ucr39, s)
+
+# national within-cause shares w_us = P(icd4 | ucr39)
+us_within_icd4 <- pop_df %>%
+  count(ucr39, icd4, name = "n") %>%
+  group_by(ucr39) %>%
+  mutate(w_us = n / sum(n)) %>%
+  ungroup() %>%
+  select(ucr39, icd4, w_us)
+
+K_icd4 <- dplyr::n_distinct(us_within_icd4$icd4)
+maxH_icd4 <- if (K_icd4 > 1) log(K_icd4) else NA_real_
+
+# Reference ("truth") on full proxy population
+ref_detail <- compute_detail_one_sample_icd4_cstd(pop_df, std_ucr, us_within_icd4, maxH_icd4)
+message("Reference detail (proxy population): ", round(ref_detail, 2))
+
+# ---------------- resampling experiment ----------------
+# For each n, take B subsamples and compute detail
+# (sampling without replacement within the proxy population; this isolates finite-sample effects cleanly)
+res_df <- map_dfr(sample_sizes, function(n) {
+  message("Resampling n = ", n, " (B = ", B, ") ...")
+  est <- replicate(B, {
+    idx <- sample.int(nrow(pop_df), size = n, replace = FALSE)
+    compute_detail_one_sample_icd4_cstd(pop_df[idx, , drop=FALSE], std_ucr, us_within_icd4, maxH_icd4)
+  })
+  tibble(
+    n = n,
+    estimate = est,
+    bias = est - ref_detail
+  )
+})
+
+summ_df <- res_df %>%
+  group_by(n) %>%
+  summarise(
+    ref_detail = ref_detail,
+    mean_est   = mean(estimate, na.rm=TRUE),
+    lo_est     = quantile(estimate, 0.025, na.rm=TRUE),
+    hi_est     = quantile(estimate, 0.975, na.rm=TRUE),
+    mean_bias  = mean(bias, na.rm=TRUE),
+    lo_bias    = quantile(bias, 0.025, na.rm=TRUE),
+    hi_bias    = quantile(bias, 0.975, na.rm=TRUE),
+    .groups = "drop"
+  )
+
+# ---------------- plots ----------------
+p_est <- ggplot(summ_df, aes(x = n, y = mean_est)) +
+  geom_hline(aes(yintercept = ref_detail), linetype = "dashed") +
+  geom_ribbon(aes(ymin = lo_est, ymax = hi_est), alpha = 0.2) +
+  geom_line() +
+  geom_point(size = 2) +
+  scale_x_log10(labels = comma) +
+  labs(
+    x = "Sample size (log scale)",
+    y = "Estimated level of detail (0–100)",
+    title = paste0("Sample-size sensitivity of level of detail (", period_name, ")"),
+    subtitle = paste0("Proxy population draw N = ", comma(pop_n_eff), "; dashed line = reference on proxy population")
+  )
+
+p_bias <- ggplot(summ_df, aes(x = n, y = mean_bias)) +
+  geom_hline(yintercept = 0, linetype = "dashed") +
+  geom_ribbon(aes(ymin = lo_bias, ymax = hi_bias), alpha = 0.2) +
+  geom_line() +
+  geom_point(size = 2) +
+  scale_x_log10(labels = comma) +
+  labs(
+    x = "Sample size (log scale)",
+    y = "Bias (estimate − reference)",
+    title = paste0("Bias vs sample size (", period_name, ")"),
+    subtitle = "Ribbon shows 2.5–97.5% across 1000 subsamples at each n"
+  )
+
+# Save
+fn_est  <- file.path(out_dir_figs, paste0("detail_sensitivity_estimate_", period_name, ".png"))
+fn_bias <- file.path(out_dir_figs, paste0("detail_sensitivity_bias_", period_name, ".png"))
+ggsave(fn_est,  p_est,  width = 8.5, height = 5.2, dpi = 300)
+ggsave(fn_bias, p_bias, width = 8.5, height = 5.2, dpi = 300)
+
+print(p_est)
+print(p_bias)
+
+# Optional: save the summary table for appendix/debug
+write_csv(summ_df, file.path(out_dir_figs, paste0("detail_sensitivity_summary_", period_name, ".csv")))
+
+cat("\nSaved:\n- ", fn_est, "\n- ", fn_bias, "\n", sep="")
+```
+Appendix: results plots
+```{r}
+# =====================================================================
+# Stand-alone DIAGNOSTICS + SENSITIVITY + TIME-SERIES PLOTS CHUNK
+# - Raw covariate plots (income, per-capita public health exp, excess mortality, etc.)
+# - Sensitivity: stability of "level of detail" vs deaths (why 1,500)
+# - Time series of indices: median, IQR, middle 95% over years
+#
+# Assumes you have already produced:
+#   data/county_year_quality_metrics.csv.gz   (from your pipeline)
+# and (optionally) county-level covariate files somewhere under data/ or data_raw/.
+# =====================================================================
+
+suppressPackageStartupMessages({
+  library(dplyr); library(tidyr); library(readr); library(stringr); library(purrr)
+  library(ggplot2); library(scales); library(here)
+})
+
+# -----------------------------
+# config
+# -----------------------------
+county_var <- "county_ihme"
+
+dq_path <- here("data", "county_year_quality_metrics.csv.gz")
+stopifnot(file.exists(dq_path))
+
+fig_dir <- here("figures", "dq_diagnostics")
+dir.create(fig_dir, recursive = TRUE, showWarnings = FALSE)
+
+set.seed(1)
+
+# Which columns in your county-year file correspond to the 3 dimensions?
+# (Adjust if your helper outputs differ.)
+metric_cols <- c(
+  prop_garbage = "prop_garbage",
+  RI           = "DQ_overall",          # <-- change if your RI column has a different name
+  detail       = "DQ_expH_over_K"       # <-- change if your level-of-detail column differs
+)
+
+# helper: robust quantiles
+q_ <- function(x, p) as.numeric(stats::quantile(x, probs = p, na.rm = TRUE, names = FALSE, type = 7))
+
+# -----------------------------
+# load county-year DQ metrics
+# -----------------------------
+dq <- readr::read_csv(dq_path, show_col_types = FALSE)
+
+# sanity: ensure year + county exist
+stopifnot("year" %in% names(dq))
+stopifnot(county_var %in% names(dq))
+
+# enforce numeric year
+dq <- dq %>% mutate(year = as.integer(year))
+
+# -----------------------------
+# OPTIONAL: load & merge covariates (best-effort auto-detect)
+# -----------------------------
+# This tries several common file names/locations; if none exist, we still produce the DQ plots.
+cov_candidates <- c(
+  here("data", "county_covariates.csv"),
+  here("data", "county_covariates.csv.gz"),
+  here("data_raw", "county_covariates.csv"),
+  here("data_raw", "county_covariates.csv.gz"),
+  here("data", "covariates", "county_covariates.csv"),
+  here("data", "covariates", "county_covariates.csv.gz")
+)
+cov_path <- cov_candidates[file.exists(cov_candidates)][1]
+
+cov <- NULL
+if (!is.na(cov_path) && nzchar(cov_path)) {
+  message("Reading covariates: ", cov_path)
+  cov <- readr::read_csv(cov_path, show_col_types = FALSE)
+
+  # Try to standardize key columns (best-effort)
+  if (!county_var %in% names(cov)) {
+    # common alternatives
+    if ("county" %in% names(cov)) cov <- cov %>% rename(!!county_var := county)
+    if ("fips" %in% names(cov) && !county_var %in% names(cov)) cov <- cov %>% rename(!!county_var := fips)
+  }
+  if (!"year" %in% names(cov)) {
+    # allow period-only covariates; we won't merge by year then
+    message("Covariates have no 'year' column; will plot as cross-sectional (no merge).")
+  } else {
+    cov <- cov %>% mutate(year = as.integer(year))
+  }
+
+  # Merge if keys exist
+  if (all(c(county_var, "year") %in% names(cov))) {
+    dq_cov <- dq %>% left_join(cov, by = c(county_var, "year"))
+  } else if (county_var %in% names(cov)) {
+    dq_cov <- dq %>% left_join(cov, by = county_var)
+  } else {
+    message("Covariates missing a join key; skipping merge.")
+    dq_cov <- dq
+    cov <- NULL
+  }
+} else {
+  message("No covariates file found (county_covariates.csv*). Will still plot DQ indices over time + sensitivity.")
+  dq_cov <- dq
+}
+
+# -----------------------------
+# 1) Raw covariate plots
+# -----------------------------
+# We will look for plausible covariate column names and plot their raw distributions over time.
+# Edit/extend this list to match your actual covariate column names.
+covariate_name_map <- list(
+  income = c("income", "mean_income", "avg_income", "median_income", "percap_income"),
+  public_health_exp_pc = c("ph_exp_pc", "public_health_exp_pc", "percap_public_health_spending",
+                           "per_capita_public_health_expenditure", "public_health_spending_pc"),
+  health_exp_pc = c("health_exp_pc", "percap_health_expenditure", "per_capita_health_expenditure"),
+  excess_covid_rate = c("excess_covid_rate", "excess_mortality_rate", "covid_excess_mortality_rate",
+                        "excess_natural_rate", "excess_rate")
+)
+
+find_first_existing <- function(cands, df) {
+  hit <- cands[cands %in% names(df)][1]
+  if (is.na(hit) || !nzchar(hit)) NA_character_ else hit
+}
+
+cov_hits <- purrr::imap_chr(covariate_name_map, ~ find_first_existing(.x, dq_cov))
+cov_hits <- cov_hits[!is.na(cov_hits)]
+
+if (length(cov_hits) > 0) {
+  cov_long <- dq_cov %>%
+    select(any_of(c(county_var, "year", cov_hits))) %>%
+    pivot_longer(cols = all_of(cov_hits), names_to = "covariate", values_to = "value") %>%
+    mutate(covariate = factor(covariate, levels = cov_hits))
+
+  # (a) Raw time series distribution: median + IQR + 2.5/97.5
+  cov_summ <- cov_long %>%
+    group_by(covariate, year) %>%
+    summarise(
+      n = sum(!is.na(value)),
+      med = q_(value, 0.50),
+      q25 = q_(value, 0.25),
+      q75 = q_(value, 0.75),
+      lo95 = q_(value, 0.025),
+      hi95 = q_(value, 0.975),
+      .groups = "drop"
+    )
+
+  p_cov_ts <- ggplot(cov_summ, aes(x = year, y = med)) +
+    geom_ribbon(aes(ymin = lo95, ymax = hi95), alpha = 0.15) +
+    geom_ribbon(aes(ymin = q25, ymax = q75), alpha = 0.25) +
+    geom_line() +
+    facet_wrap(~ covariate, scales = "free_y", ncol = 1) +
+    labs(
+      title = "Raw covariates over time (median, IQR, middle 95%)",
+      x = NULL, y = NULL
+    ) +
+    theme_minimal(base_size = 12)
+
+  ggsave(file.path(fig_dir, "covariates_raw_timeseries.png"), p_cov_ts, width = 9, height = 10, dpi = 300)
+
+  # (b) Cross-sectional histograms (pooled across years)
+  p_cov_hist <- ggplot(cov_long, aes(x = value)) +
+    geom_histogram(bins = 60) +
+    facet_wrap(~ covariate, scales = "free", ncol = 1) +
+    labs(
+      title = "Raw covariate distributions (all county-years pooled)",
+      x = NULL, y = "Count"
+    ) +
+    theme_minimal(base_size = 12)
+
+  ggsave(file.path(fig_dir, "covariates_raw_hist.png"), p_cov_hist, width = 9, height = 10, dpi = 300)
+
+} else {
+  message("No recognized covariate columns found in dq_cov. Add your covariate column names to covariate_name_map.")
+}
+
+# -----------------------------
+# 2) Sensitivity: stability of level-of-detail vs number of deaths
+# -----------------------------
+# Goal: show why 1,500 is a reasonable threshold by plotting how much the detail metric
+# varies when you (a) repeatedly subsample within large counties/county-sets at different n
+# and (b) compute the detail metric on each subsample.
+#
+# IMPORTANT:
+# This chunk will try to use your helper(s) if present; otherwise it will fall back to a proxy:
+# Shannon entropy of uc4 among non-garbage deaths (still useful to show stabilization vs n).
+#
+# For the "true" standardized detail you described in the paper, you likely have helper functions
+# inside dq_entropy_helper.R. If you do, add a small wrapper `compute_detail_from_sample(ds)` below.
+# -----------------------------
+
+# (A) Identify a set of high-death county-years to subsample from
+if (!"n_cert" %in% names(dq)) {
+  warning("dq file does not have n_cert; sensitivity plot will be skipped. (You can add n_cert to output.)")
+} else {
+
+  # Choose donor county-years with lots of deaths (so subsampling makes sense)
+  donors <- dq %>%
+    filter(!is.na(n_cert), n_cert >= 20000) %>%
+    select(all_of(c(county_var, "year", "n_cert"))) %>%
+    slice_sample(n = min(20, n()))
+
+  if (nrow(donors) == 0) {
+    message("No donor county-years with n_cert >= 20000 found; lower the donor threshold if needed.")
+  } else {
+
+    # --- You MUST be able to read the underlying microdata for this part.
+    # We will attempt to infer parquet directory; edit if your path differs.
+    parquet_dir <- if (dir.exists(here("data_private", "mcod"))) {
+      here("data_private", "mcod")
+    } else if (dir.exists(here("data_private", "mcod_sample"))) {
+      here("data_private", "mcod_sample")
+    } else {
+      NA_character_
+    }
+
+    if (is.na(parquet_dir)) {
+      message("Could not locate parquet_dir (data_private/mcod*). Skipping sensitivity subsampling.")
+    } else {
+      suppressPackageStartupMessages(library(arrow))
+
+      # read-one-year helper (minimal cols)
+      read_year_min <- function(y) {
+        f <- file.path(parquet_dir, paste0("mort", y, ".parquet"))
+        stopifnot(file.exists(f))
+        arrow::read_parquet(f, as_data_frame = TRUE,
+                           col_select = intersect(c("ucod", county_var, "year"), names(arrow::read_parquet(f, as_data_frame = FALSE))))
+      }
+
+      # proxy detail metric from a sample (fallback)
+      canonical_icd <- function(x) stringr::str_remove_all(stringr::str_to_upper(x), "[^A-Z0-9\\.]")
+      uc4_of <- function(ucod) substr(canonical_icd(ucod), 1, 4)
+
+      compute_detail_from_sample <- function(df_sample) {
+        # If you have a true standardized detail function, replace this with it.
+        # Fallback: scaled entropy of uc4 among all deaths in the sample.
+        u <- uc4_of(df_sample$ucod)
+        u <- u[!is.na(u) & nzchar(u)]
+        if (length(u) == 0) return(NA_real_)
+        p <- table(u) / length(u)
+        H <- -sum(as.numeric(p) * log(as.numeric(p)))
+        K <- length(p)
+        if (K <= 1) return(0)
+        100 * (H / log(K))
+      }
+
+      # Subsample sizes (include 1500 explicitly)
+      ns <- c(250, 500, 750, 1000, 1250, 1500, 2000, 3000, 5000, 10000)
+      B  <- 200  # replicates per n per donor (adjust if heavy)
+
+      # Pull microdata for donor years only
+      donor_years <- sort(unique(donors$year))
+      micro_by_year <- setNames(vector("list", length(donor_years)), donor_years)
+
+      for (y in donor_years) {
+        message("Loading microdata for sensitivity: year ", y)
+        micro_by_year[[as.character(y)]] <- read_year_min(y) %>%
+          mutate(year = as.integer(year))
+      }
+
+      # Create sensitivity draws
+      sens <- purrr::pmap_dfr(
+        donors,
+        function(...) {
+          row <- tibble::tibble(...)
+          y <- row$year
+          cty <- row[[county_var]]
+          dfy <- micro_by_year[[as.character(y)]]
+
+          pool <- dfy %>% filter(.data[[county_var]] == cty)
+          if (nrow(pool) < max(ns)) {
+            # skip if not enough in that county-year
+            return(tibble())
+          }
+
+          purrr::map_dfr(ns, function(n_) {
+            reps <- purrr::map_dbl(seq_len(B), function(b) {
+              samp <- pool %>% slice_sample(n = n_, replace = FALSE)
+              compute_detail_from_sample(samp)
+            })
+            tibble(
+              year = y,
+              !!county_var := cty,
+              n = n_,
+              detail = reps,
+              sd = sd(reps, na.rm = TRUE),
+              iqr = IQR(reps, na.rm = TRUE),
+              med = median(reps, na.rm = TRUE)
+            )
+          })
+        }
+      )
+
+      if (nrow(sens) == 0) {
+        message("Sensitivity draws returned 0 rows (likely donors didn't have enough microdata).")
+      } else {
+        # Summarise across donors: how variability shrinks with n
+        sens_summ <- sens %>%
+          group_by(n) %>%
+          summarise(
+            med_sd = median(sd, na.rm = TRUE),
+            med_iqr = median(iqr, na.rm = TRUE),
+            .groups = "drop"
+          )
+
+        p_sens <- ggplot(sens_summ, aes(x = n, y = med_sd)) +
+          geom_line() +
+          geom_point() +
+          geom_vline(xintercept = 1500, linetype = 2) +
+          scale_x_continuous(trans = "log10", breaks = ns, labels = ns) +
+          labs(
+            title = "Sensitivity: stability of level-of-detail vs sample size",
+            subtitle = "Median within-donor SD across repeated subsamples; dashed line at n = 1,500",
+            x = "Sample size (log10 scale)",
+            y = "Median SD of detail across replicates"
+          ) +
+          theme_minimal(base_size = 12)
+
+        ggsave(file.path(fig_dir, "detail_sensitivity_sd_vs_n.png"), p_sens, width = 9, height = 5, dpi = 300)
+
+        # Optional: show the distribution of replicate detail at each n (pooled)
+        p_sens_box <- ggplot(sens, aes(x = factor(n), y = detail)) +
+          geom_boxplot(outlier.alpha = 0.2) +
+          geom_vline(xintercept = which(ns == 1500), linetype = 2) +
+          labs(
+            title = "Sensitivity: replicate detail distributions by sample size",
+            x = "Sample size (n)",
+            y = "Detail (replicate estimates)"
+          ) +
+          theme_minimal(base_size = 12) +
+          theme(axis.text.x = element_text(angle = 45, hjust = 1))
+
+        ggsave(file.path(fig_dir, "detail_sensitivity_box_by_n.png"), p_sens_box, width = 10, height = 6, dpi = 300)
+      }
+    }
+  }
+}
+
+# -----------------------------
+# 3) Indices over time: median, IQR, middle 95%
+# -----------------------------
+# Build a long table for the 3 core indices, then summarise per year.
+missing_metrics <- names(metric_cols)[!unlist(metric_cols) %in% names(dq)]
+if (length(missing_metrics) > 0) {
+  message(
+    "These metric columns were not found and will be skipped:\n",
+    paste0("  - ", missing_metrics, " (expected column: ", metric_cols[missing_metrics], ")", collapse = "\n")
+  )
+}
+
+metric_cols_present <- metric_cols[metric_cols %in% names(dq)]
+if (length(metric_cols_present) == 0) {
+  stop("None of the metric columns in metric_cols were found in dq. Update metric_cols to match your file.")
+}
+
+dq_long <- dq %>%
+  select(year, all_of(unname(metric_cols_present))) %>%
+  pivot_longer(cols = -year, names_to = "metric", values_to = "value") %>%
+  mutate(metric = factor(metric, levels = unname(metric_cols_present)))
+
+dq_ts <- dq_long %>%
+  group_by(metric, year) %>%
+  summarise(
+    n = sum(!is.na(value)),
+    med = q_(value, 0.50),
+    q25 = q_(value, 0.25),
+    q75 = q_(value, 0.75),
+    lo95 = q_(value, 0.025),
+    hi95 = q_(value, 0.975),
+    .groups = "drop"
+  )
+
+metric_pretty <- c(
+  prop_garbage = "Proportion garbage-coded (raw)",
+  DQ_overall   = "Re-assignability Index (RI)",
+  DQ_expH_over_K = "Level of detail"
+)
+
+p_dq_ts <- ggplot(dq_ts, aes(x = year, y = med)) +
+  geom_ribbon(aes(ymin = lo95, ymax = hi95), alpha = 0.15) +
+  geom_ribbon(aes(ymin = q25, ymax = q75), alpha = 0.25) +
+  geom_line() +
+  facet_wrap(~ metric, scales = "free_y", ncol = 1,
+             labeller = as_labeller(metric_pretty, default = label_value)) +
+  labs(
+    title = "Data quality indices over time (median, IQR, middle 95%)",
+    x = NULL, y = NULL
+  ) +
+  theme_minimal(base_size = 12)
+
+ggsave(file.path(fig_dir, "dq_indices_timeseries.png"), p_dq_ts, width = 9, height = 10, dpi = 300)
+
+# Also save a tidy summary table for paper/appendix
+readr::write_csv(dq_ts, file.path(fig_dir, "dq_indices_timeseries_summary.csv"))
+
+message("Done. Outputs written to: ", fig_dir)
+```
 
 
