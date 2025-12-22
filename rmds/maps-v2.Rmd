@@ -6754,5 +6754,236 @@ detail_change_summary
 #  coding detail than others.”
 ```
 
+Statistical analysis chunk (DEC 21)
+```{r}
+# ============================================================
+# NEW: Statistical inference for (1) before/after changes and
+#      (2) associations with county covariates
+# ============================================================
+# Implements Matt's suggestion:
+#  - Paired Wilcoxon signed-rank tests on county-level BEFORE vs AFTER period means
+#  - Correlation tests (Spearman + Pearson) between county-level metrics and covariates
+# Outputs:
+#  - output/stats_prepost_signedrank_county.csv
+#  - output/stats_correlations_county.csv
+# ============================================================
+
+suppressPackageStartupMessages({
+  library(dplyr)
+  library(tidyr)
+  library(purrr)
+  library(broom)
+  library(readr)
+  library(here)
+  library(stringr)
+})
+
+dir.create(here("output"), recursive = TRUE, showWarnings = FALSE)
+
+# ---------------------------
+# 0) Identify the analysis frame to use
+# ---------------------------
+# We prefer `base_sel` because it typically already has:
+# county_ihme, year, prop_garbage, ri, detail_icd4, (maybe agg_index/direction_score),
+# and often covariates like income_raw, ph_pc_med, reporting_type.
+if (!exists("base_sel")) {
+  stop("This chunk expects `base_sel` to exist (built earlier). ",
+       "If your main county-year table has a different name, replace `base_sel` below.")
+}
+
+df0 <- base_sel %>%
+  mutate(
+    county_ihme = str_pad(as.character(county_ihme), 5, pad = "0"),
+    year = suppressWarnings(as.integer(year))
+  ) %>%
+  filter(is.finite(year), year >= 1999, year <= 2022, county_ihme != "00000")
+
+# ---------------------------
+# 1) Define periods and compute county-level period means
+# ---------------------------
+period_of_year <- function(y) {
+  dplyr::case_when(
+    y %in% 1999:2005 ~ "1999_2005",
+    y %in% 2006:2012 ~ "2006_2012",
+    y %in% 2013:2019 ~ "2013_2019",
+    y %in% 2020:2022 ~ "2020_2022",
+    TRUE ~ NA_character_
+  )
+}
+
+df0 <- df0 %>% mutate(period = period_of_year(year)) %>% filter(!is.na(period))
+
+# Candidate metric columns (use what exists)
+metric_candidates <- c(
+  "prop_garbage", "ri", "ri_post_only", "detail_icd4",
+  "agg_index", "direction_score"
+)
+metric_cols <- intersect(metric_candidates, names(df0))
+if (length(metric_cols) == 0) {
+  stop("No metric columns found in `base_sel`. Looked for: ",
+       paste(metric_candidates, collapse = ", "))
+}
+
+# Pick continuous covariates if available
+covar_candidates <- c(
+  "income_raw", "income_med", "avg_income",
+  "ph_pc_med", "ph_pc", "ph_pc_raw",
+  "excess_covid", "excess_covid_deaths", "excess_deaths", "covid_excess"
+)
+covar_cols <- intersect(covar_candidates, names(df0))
+
+# County-level period means (metrics + covariates)
+df_period_means <- df0 %>%
+  group_by(county_ihme, period) %>%
+  summarise(
+    across(all_of(metric_cols), ~ mean(suppressWarnings(as.numeric(.x)), na.rm = TRUE)),
+    across(all_of(covar_cols),  ~ mean(suppressWarnings(as.numeric(.x)), na.rm = TRUE)),
+    .groups = "drop"
+  )
+
+# ---------------------------
+# 2) Paired before/after tests (Wilcoxon signed-rank on paired county period means)
+# ---------------------------
+run_signedrank_pair <- function(dat_long, metric, pre_period, post_period, label) {
+  dat_wide <- dat_long %>%
+    select(county_ihme, period, value = all_of(metric)) %>%
+    filter(period %in% c(pre_period, post_period)) %>%
+    pivot_wider(names_from = period, values_from = value)
+
+  pre  <- dat_wide[[pre_period]]
+  post <- dat_wide[[post_period]]
+  ok <- is.finite(pre) & is.finite(post)
+  pre <- pre[ok]; post <- post[ok]
+  diffs <- post - pre
+  diffs <- diffs[is.finite(diffs)]
+
+  if (length(diffs) < 10) {
+    return(tibble(
+      comparison = label,
+      metric = metric,
+      n_pairs = length(diffs),
+      median_diff = NA_real_,
+      q25_diff = NA_real_,
+      q75_diff = NA_real_,
+      share_increase = NA_real_,
+      hl_est = NA_real_,
+      hl_lo = NA_real_,
+      hl_hi = NA_real_,
+      p_value = NA_real_
+    ))
+  }
+
+  # One-sample signed-rank on differences -> tests median shift != 0
+  wt <- suppressWarnings(stats::wilcox.test(diffs, mu = 0, alternative = "two.sided",
+                                           conf.int = TRUE, conf.level = 0.95, exact = FALSE))
+  ci <- wt$conf.int
+  est <- unname(wt$estimate)  # Hodges–Lehmann (pseudo-median) estimate
+
+  tibble(
+    comparison = label,
+    metric = metric,
+    n_pairs = length(diffs),
+    median_diff = median(diffs, na.rm = TRUE),
+    q25_diff = quantile(diffs, 0.25, na.rm = TRUE),
+    q75_diff = quantile(diffs, 0.75, na.rm = TRUE),
+    share_increase = mean(diffs > 0, na.rm = TRUE),
+    hl_est = est,
+    hl_lo = unname(ci[1]),
+    hl_hi = unname(ci[2]),
+    p_value = unname(wt$p.value)
+  )
+}
+
+# Define the two “before/after” contrasts that usually map cleanly to manuscript language
+comparisons <- tribble(
+  ~pre,        ~post,       ~label,
+  "2013_2019",  "2020_2022", "COVID-era change: 2013–2019 vs 2020–2022",
+  "1999_2005",  "2020_2022", "Long-run change: 1999–2005 vs 2020–2022"
+)
+
+signedrank_tbl <- expand_grid(
+  metric = metric_cols,
+  comparisons
+) %>%
+  mutate(
+    out = pmap(
+      list(pre, post, label, metric),
+      ~ run_signedrank_pair(df_period_means, metric = ..4, pre_period = ..1, post_period = ..2, label = ..3)
+    )
+  ) %>%
+  select(out) %>%
+  unnest(out) %>%
+  group_by(comparison) %>%
+  mutate(p_adj_fdr = p.adjust(p_value, method = "BH")) %>%
+  ungroup()
+
+out_signedrank <- here("output", "stats_prepost_signedrank_county.csv")
+write_csv(signedrank_tbl, out_signedrank)
+message("[STATS] Wrote paired signed-rank results: ", out_signedrank)
+print(signedrank_tbl)
+
+# ---------------------------
+# 3) Correlation plan with inference (county-level, period-averaged or overall)
+# ---------------------------
+# We do this on county averages across the full study window (1999–2022) by default.
+df_county_avg <- df0 %>%
+  group_by(county_ihme) %>%
+  summarise(
+    across(all_of(metric_cols), ~ mean(suppressWarnings(as.numeric(.x)), na.rm = TRUE)),
+    across(all_of(covar_cols),  ~ mean(suppressWarnings(as.numeric(.x)), na.rm = TRUE)),
+    .groups = "drop"
+  )
+
+# Bootstrap CI for correlation (works for Pearson and Spearman)
+boot_cor_ci <- function(x, y, method = c("spearman","pearson"), B = 500L) {
+  method <- match.arg(method)
+  ok <- is.finite(x) & is.finite(y)
+  x <- x[ok]; y <- y[ok]
+  n <- length(x)
+  if (n < 25) return(c(lo = NA_real_, hi = NA_real_))
+  rs <- replicate(B, {
+    ii <- sample.int(n, size = n, replace = TRUE)
+    suppressWarnings(stats::cor(x[ii], y[ii], method = method))
+  })
+  stats::quantile(rs, probs = c(0.025, 0.975), na.rm = TRUE, names = FALSE) %>%
+    setNames(c("lo","hi"))
+}
+
+# Only run if we actually have covariates to correlate against
+corr_tbl <- tibble()
+if (length(covar_cols) > 0) {
+  corr_tbl <- expand_grid(
+    metric = metric_cols,
+    covariate = covar_cols,
+    method = c("spearman","pearson")
+  ) %>%
+    mutate(
+      x = map2(metric, df_county_avg, ~ df_county_avg[[.x]]),
+      y = map2(covariate, df_county_avg, ~ df_county_avg[[.x]]),
+      n = map2_int(x, y, ~ sum(is.finite(.x) & is.finite(.y))),
+      r = map3_dbl(x, y, method, ~ suppressWarnings(stats::cor(.x, .y, method = ..3, use = "pairwise.complete.obs"))),
+      p_value = pmap_dbl(list(x, y, method), function(x, y, method) {
+        ok <- is.finite(x) & is.finite(y)
+        if (sum(ok) < 25) return(NA_real_)
+        suppressWarnings(stats::cor.test(x[ok], y[ok], method = method)$p.value)
+      }),
+      ci = pmap(list(x, y, method), function(x, y, method) boot_cor_ci(x, y, method = method, B = 500L)),
+      r_lo = map_dbl(ci, ~ .x["lo"]),
+      r_hi = map_dbl(ci, ~ .x["hi"])
+    ) %>%
+    select(metric, covariate, method, n, r, r_lo, r_hi, p_value) %>%
+    group_by(method) %>%
+    mutate(p_adj_fdr = p.adjust(p_value, method = "BH")) %>%
+    ungroup()
+
+  out_corr <- here("output", "stats_correlations_county.csv")
+  write_csv(corr_tbl, out_corr)
+  message("[STATS] Wrote correlation inference table: ", out_corr)
+  print(corr_tbl)
+} else {
+  message("[STATS] No continuous covariates found for correlation tests; skipping correlation inference.")
+}
+```
+
 
 
